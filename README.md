@@ -1,0 +1,56 @@
+# Financial Statement Reviewer
+
+This is a local AI-style audit assistant for prepared PDF financial statements. It extracts PDF text and tables, then reviews four dimensions:
+
+- Totals and rounding: totals, subtotals, cross-footings, duplicate totals, and consistent rounding labels such as `$000s`, thousands, or millions.
+- Formatting: inconsistent number formats, missing brackets for negatives, mixed currency symbols, missing comparative periods, and IFRS statement heading checks.
+- Notes agreement: cross-references, note totals, face statement amounts, segment totals, EPS calculations, tax notes, and depreciation charge agreement.
+- Accounting policies: irrelevant policies for the company context, boilerplate wording, missing policies for significant transactions, and references to superseded standards.
+- Standards checklist: triggered IFRS disclosure checks for IAS 1, IFRS 15, IFRS 16, IFRS 7 / IFRS 9, IAS 12, IAS 16, IAS 38, IAS 36, IAS 33, IFRS 8, IAS 24, IAS 10, and IAS 37.
+
+The tool is designed as a review assistant. It does not replace professional judgement, source working papers, or a disclosure checklist.
+
+## Run the app
+
+```powershell
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## Run from the command line
+
+```powershell
+python cli.py "C:\path\to\financial_statement.pdf" --company-name "Example Plc" --industry "Technology" --currency NGN --significant-transaction leases --checklist-area "IFRS 16" --output review.md
+```
+
+For scanned or signed image-based PDFs, enable local OCR:
+
+```powershell
+python cli.py "C:\path\to\signed_afs.pdf" --ocr --ocr-max-pages 60 --ocr-dpi 200 --output review.md
+```
+
+OCR uses local Tesseract. The app renders pages in memory and does not save page images or OCR text unless you explicitly download a review report.
+
+## Review logic
+
+The checks are intentionally transparent and conservative:
+
+- table totals and row cross-footings are compared against visible component rows using a one-unit presentation tolerance;
+- note references are matched with note headings found in the extracted text;
+- note sections are searched for internal total agreement and targeted EPS, tax, depreciation, and segment indicators;
+- policy relevance is checked using keyword sets for common IFRS policy areas, company industry, expected policy areas, and significant transactions.
+- checklist items are activated by detected balances/transactions or by forced checklist areas supplied by the reviewer.
+- low-text PDFs are routed through an OCR fallback when enabled; otherwise the app raises an extraction-quality finding instead of producing misleading accounting exceptions.
+- OCR table reconstruction uses word positions and line-level numeric patterns to rebuild candidate rows such as `Revenue | 10,000 | 8,000`, allowing totals and cross-footing checks to run on scanned statements where OCR quality is sufficient.
+
+The bundled checklist is a starter engine, not a full licensed IFRS disclosure checklist. Expand `STANDARD_CHECKLIST` in `reviewer.py` with your firm's detailed disclosure requirements and evidence phrases.
+
+## OCR prerequisites
+
+Install Tesseract OCR locally and ensure `tesseract.exe` is on PATH. On this workstation the app also checks the standard Windows install path:
+
+```text
+C:\Users\<user>\AppData\Local\Programs\Tesseract-OCR\tesseract.exe
+```
+
+PDF extraction quality depends on the source PDF. Scanned image-only reports need OCR before this tool can review them.

@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from reviewer import CompanyProfile, ReviewOptions, findings_to_markdown, review_pdf
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Review a prepared financial statement PDF.")
+    parser.add_argument("pdf", type=Path, help="Path to the PDF report")
+    parser.add_argument("--company-name", default="", help="Expected reporting entity name")
+    parser.add_argument("--industry", default="", help="Company industry")
+    parser.add_argument("--currency", default="", help="Expected reporting currency marker, such as NGN")
+    parser.add_argument("--presentation-standard", default="IFRS", help="Presentation framework, default IFRS")
+    parser.add_argument(
+        "--expected-policy",
+        action="append",
+        default=[],
+        help="Policy area expected to apply. Can be supplied more than once.",
+    )
+    parser.add_argument(
+        "--significant-transaction",
+        action="append",
+        default=[],
+        help="Significant transaction or balance expected to have tailored accounting policy coverage.",
+    )
+    parser.add_argument(
+        "--checklist-area",
+        action="append",
+        default=[],
+        help="Standard or disclosure area to force into the standards checklist review.",
+    )
+    parser.add_argument("--ocr", action="store_true", help="Run local OCR if the PDF has low embedded text coverage")
+    parser.add_argument("--ocr-max-pages", type=int, default=60, help="Maximum scanned pages to OCR")
+    parser.add_argument("--ocr-dpi", type=int, default=200, help="OCR render DPI, usually 150-300")
+    parser.add_argument("--output", type=Path, help="Optional markdown report path")
+    args = parser.parse_args()
+
+    profile = CompanyProfile(
+        company_name=args.company_name,
+        industry=args.industry,
+        reporting_currency=args.currency,
+        expected_policies=tuple(args.expected_policy),
+        significant_transactions=tuple(args.significant_transaction),
+        presentation_standard=args.presentation_standard,
+        checklist_areas=tuple(args.checklist_area),
+    )
+    result = review_pdf(
+        args.pdf,
+        profile,
+        ReviewOptions(use_ocr=args.ocr, ocr_max_pages=args.ocr_max_pages, ocr_dpi=args.ocr_dpi),
+    )
+    report = findings_to_markdown(result)
+    if args.output:
+        args.output.write_text(report, encoding="utf-8")
+    else:
+        print(report)
+    return 1 if result.metrics["high"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
