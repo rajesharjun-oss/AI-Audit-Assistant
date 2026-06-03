@@ -234,7 +234,7 @@ def review_pdf(
     document = extract_pdf(path)
     if _requires_ocr(document) and options.use_ocr:
         document = extract_pdf_with_ocr(path, document, options)
-    profile = profile or CompanyProfile()
+    profile = _profile_with_detected_defaults(profile or CompanyProfile(), document)
     findings: list[Finding] = []
     findings.extend(check_extraction_quality(document))
     if _requires_ocr(document) or _extraction_unreliable(document):
@@ -254,6 +254,7 @@ def _build_result(document: PdfDocument, findings: list[Finding]) -> ReviewResul
         "text_chars": document.text_chars,
         "extraction_coverage": f"{document.extraction_coverage:.0%}",
         "extraction_confidence": f"{document.extraction_confidence}%",
+        "table_confidence": f"{document.table_extraction_confidence}%",
         "extraction_profile": document.extraction_profile,
         "unreadable_values": document.unreadable_value_count,
         "merged_value_cells": document.merged_value_cell_count,
@@ -266,8 +267,27 @@ def _build_result(document: PdfDocument, findings: list[Finding]) -> ReviewResul
         "medium": sum(1 for item in findings if item.severity == "Medium"),
         "low": sum(1 for item in findings if item.severity == "Low"),
         "note_headings": _format_note_heading_debug(document),
+        "detected_profile": infer_detected_profile(document),
     }
     return ReviewResult(findings=findings, metrics=metrics)
+
+
+def _profile_with_detected_defaults(profile: CompanyProfile, document: PdfDocument) -> CompanyProfile:
+    detected = infer_detected_profile(document)
+    reporting_currency = profile.reporting_currency or normalize_reporting_currency(detected.get("Currency", ""))
+    framework = profile.presentation_standard
+    if not framework or framework == "IFRS":
+        detected_framework = detected.get("Framework", "")
+        framework = detected_framework if detected_framework in {"IFRS", "Local GAAP"} else "IFRS"
+    return CompanyProfile(
+        company_name=profile.company_name,
+        industry=profile.industry,
+        reporting_currency=reporting_currency,
+        expected_policies=profile.expected_policies,
+        significant_transactions=profile.significant_transactions,
+        presentation_standard=framework,
+        checklist_areas=profile.checklist_areas,
+    )
 
 
 def check_extraction_quality(document: PdfDocument) -> list[Finding]:
@@ -314,9 +334,9 @@ def check_extraction_quality(document: PdfDocument) -> list[Finding]:
                 "PDF extraction",
                 "Extraction confidence is too low for reliable automated audit checks.",
                 (
-                    f"Profile: {document.extraction_profile}; confidence {document.extraction_confidence}%; "
+                    f"Profile: {document.extraction_profile}; text confidence {document.extraction_confidence}%; "
                     f"text coverage {document.extraction_coverage:.0%}; unreadable values {document.unreadable_value_count}; "
-                    f"merged value cells {document.merged_value_cell_count}."
+                    f"table confidence {document.table_extraction_confidence}%; merged value cells {document.merged_value_cell_count}."
                 ),
                 "Use a cleaner text-selectable PDF, repair the source export, or run OCR with a higher-quality scan before relying on the exception register.",
             )
@@ -362,6 +382,124 @@ def check_extraction_quality(document: PdfDocument) -> list[Finding]:
         )
     )
     return findings
+
+
+def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
+    text = document.text
+    lower = text.lower()
+    profile = {
+        "Company name": _detect_company_name(document),
+        "Year end": _detect_year_end(text),
+        "Currency": _detect_currency(text),
+        "Framework": _detect_framework(text),
+        "Entity type": _detect_entity_type(text),
+        "Principal activities": _detect_principal_activities(text),
+        "Detected balances": _detect_major_balances(lower),
+        "Suggested checklist areas": _suggest_checklist_areas(lower),
+        "Extraction confidence": f"Text {document.extraction_confidence}% | Tables {document.table_extraction_confidence}%",
+    }
+    return profile
+
+
+def _detect_company_name(document: PdfDocument) -> str:
+    for page in document.pages[:3]:
+        for line in page.text.splitlines()[:12]:
+            clean = re.sub(r"\s+", " ", line).strip(" -")
+            if not clean or len(clean) < 5:
+                continue
+            if re.search(r"financial statements|annual report|statement of|notes to", clean, re.I):
+                continue
+            if clean.isupper() or re.search(r"\b(limited|ltd|plc|incorporated|institute|company|corporation)\b", clean, re.I):
+                return clean.title() if clean.isupper() else clean
+    return "Not detected"
+
+
+def _detect_year_end(text: str) -> str:
+    patterns = (
+        r"(?:year|period) ended\s+([A-Za-z]+\s+\d{1,2},?\s+20\d{2})",
+        r"(?:as at|at)\s+([A-Za-z]+\s+\d{1,2},?\s+20\d{2})",
+        r"(\d{1,2}\s+[A-Za-z]+\s+20\d{2})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            return re.sub(r"\s+", " ", match.group(1)).strip()
+    years = sorted(set(YEAR_RE.findall(text)))
+    return years[-1] if years else "Not detected"
+
+
+def _detect_currency(text: str) -> str:
+    if re.search(r"N['’]?\s?000|N000|Naira|₦|\bNGN\b", text, flags=re.I):
+        return "NGN"
+    if re.search(r"\bUSD\b|US\$|\bDollar\b|\$", text, flags=re.I):
+        return "USD"
+    if re.search(r"\bGBP\b|\bPound\b", text, flags=re.I):
+        return "GBP"
+    if re.search(r"\bEUR\b|\bEuro\b", text, flags=re.I):
+        return "EUR"
+    return "Not detected"
+
+
+def _detect_framework(text: str) -> str:
+    if re.search(r"international financial reporting standards|IFRS", text, flags=re.I):
+        return "IFRS"
+    if re.search(r"local gaap|generally accepted accounting", text, flags=re.I):
+        return "Local GAAP"
+    return "Not detected"
+
+
+def _detect_entity_type(text: str) -> str:
+    lower = text.lower()
+    if any(term in lower for term in ("non-profit", "not-for-profit", "professional body", "institute", "members fund", "accumulated fund")):
+        return "Non-profit / professional body"
+    if "plc" in lower or "public limited" in lower:
+        return "Public company"
+    if "limited" in lower or "ltd" in lower:
+        return "Private company"
+    return "Not detected"
+
+
+def _detect_principal_activities(text: str) -> str:
+    match = re.search(r"principal activit(?:y|ies).{0,260}", text, flags=re.I | re.S)
+    if match:
+        return re.sub(r"\s+", " ", match.group(0)).strip()[:220]
+    return "Not detected"
+
+
+def _detect_major_balances(lower: str) -> str:
+    areas = []
+    balance_terms = (
+        ("Revenue", "revenue"),
+        ("Receivables", "receivable"),
+        ("Cash", "cash and cash equivalents"),
+        ("Investment property", "investment property"),
+        ("PPE", "property, plant and equipment"),
+        ("Intangibles", "intangible"),
+        ("Payables", "payable"),
+        ("Financial liabilities", "financial liabilities"),
+        ("Tax", "tax"),
+    )
+    for label, term in balance_terms:
+        if term in lower:
+            areas.append(label)
+    return ", ".join(areas[:10]) if areas else "Not detected"
+
+
+def _suggest_checklist_areas(lower: str) -> str:
+    suggestions = []
+    if "revenue from contracts" in lower or "contract asset" in lower or "contract liability" in lower:
+        suggestions.append("IFRS 15")
+    if any(term in lower for term in ("lease liability", "right-of-use", "right of use asset")):
+        suggestions.append("IFRS 16")
+    if "investment property" in lower:
+        suggestions.append("IAS 40")
+    if "property, plant and equipment" in lower:
+        suggestions.append("IAS 16")
+    if "financial instruments" in lower or "credit risk" in lower:
+        suggestions.append("IFRS 7 / IFRS 9")
+    if re.search(r"\b(eps|earnings per share)\b", lower):
+        suggestions.append("IAS 33")
+    return ", ".join(suggestions) if suggestions else "None strongly triggered"
 
 
 def _requires_ocr(document: PdfDocument) -> bool:
@@ -508,8 +646,9 @@ def check_formatting(document: PdfDocument, profile: CompanyProfile) -> list[Fin
             )
         )
 
-    parenthesis_negatives = bool(re.search(r"\(\s?\d[\d,]*(?:\.\d+)?\s?\)", text))
-    minus_negatives = bool(re.search(r"(?<!\w)-\d[\d,]*(?:\.\d+)?", text))
+    financial_amount_text = "\n".join(_financial_amount_contexts(document))
+    parenthesis_negatives = bool(re.search(r"\(\s?\d[\d,]*(?:\.\d+)?\s?\)", financial_amount_text))
+    minus_negatives = bool(re.search(r"(?<!\w)-\d[\d,]*(?:\.\d+)?", financial_amount_text))
     if parenthesis_negatives and minus_negatives:
         findings.append(
             Finding(
@@ -536,10 +675,14 @@ def check_formatting(document: PdfDocument, profile: CompanyProfile) -> list[Fin
     _check_comparatives(findings, document)
     _check_required_statement_names(findings, document, profile)
     for page in document.pages:
-        bad_separators = [
-            token for token in re.findall(r"\b\d{4,}(?:\.\d+)?\b", page.text)
-            if _looks_like_unformatted_amount(token)
-        ]
+        bad_separators = []
+        for line in _financial_amount_contexts(PdfDocument([page])):
+            if _ignore_formatting_line(line):
+                continue
+            bad_separators.extend(
+                token for token in re.findall(r"\b\d{4,}(?:\.\d+)?\b", line)
+                if _looks_like_unformatted_amount(token)
+            )
         if bad_separators:
             findings.append(
                 Finding(
@@ -565,6 +708,52 @@ def _looks_like_unformatted_amount(token: str) -> bool:
     return True
 
 
+def _financial_amount_contexts(document: PdfDocument) -> list[str]:
+    contexts: list[str] = []
+    for page in document.pages:
+        for table in page.tables:
+            if _classify_table_for_arithmetic(table)["can_run_arithmetic"] or _looks_like_statement_table(table):
+                contexts.extend(
+                    line
+                    for line in (" ".join(str(cell or "") for cell in row) for row in table)
+                    if not _ignore_formatting_line(line)
+                )
+        for line in page.text.splitlines():
+            lower = line.lower()
+            if _ignore_formatting_line(line):
+                continue
+            if len(NUMBER_RE.findall(line)) >= 2 and any(
+                keyword in lower
+                for keyword in (
+                    "revenue",
+                    "assets",
+                    "liabilities",
+                    "equity",
+                    "cash",
+                    "payables",
+                    "receivables",
+                    "cost",
+                    "expense",
+                    "surplus",
+                    "deficit",
+                    "fund",
+                    "total",
+                )
+            ):
+                contexts.append(line)
+    return contexts
+
+
+def _ignore_formatting_line(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(frc|ican|pro|registration|certificate|website|www\.|address|phone|telephone|decree| act |approval|approved|signature|signatory|license|licence|ratio|ias \d+|ifrs \d+)\b",
+            line,
+            flags=re.I,
+        )
+    )
+
+
 def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1")) -> list[Finding]:
     text = document.text
     findings: list[Finding] = []
@@ -584,7 +773,7 @@ def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1
         )
         return findings
     heading_refs = set(headings)
-    detailed_note_checks_allowed = document.extraction_confidence >= 80
+    detailed_note_checks_allowed = document.table_extraction_confidence >= 80
     for ref in sorted(statement_refs - heading_refs, key=_note_sort_key):
         findings.append(
             Finding(
@@ -602,8 +791,8 @@ def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1
                 "Extraction quality",
                 "Low",
                 "Notes agreement",
-                "Detailed note reference, amount, and subtotal checks were skipped because extraction confidence is below 80%.",
-                f"Extraction confidence: {document.extraction_confidence}%. Note headings were still detected for navigation and debug review.",
+                "Detailed note reference, amount, and subtotal checks were skipped because table extraction confidence is below 80%.",
+                f"Table confidence: {document.table_extraction_confidence}%. Note headings were still detected for navigation and debug review.",
                 "Use the detected note heading debug output to inspect references, but do not rely on automated note agreement checks until table extraction is cleaner.",
             )
         )
@@ -659,15 +848,20 @@ def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1
 
 def check_policy_relevance(document: PdfDocument, profile: CompanyProfile) -> list[Finding]:
     text = document.text.lower()
+    policy_text = _accounting_policy_text(document).lower()
+    detected_profile = infer_detected_profile(document)
+    entity_type = detected_profile.get("Entity type", "").lower()
     findings: list[Finding] = []
     expected = {item.strip().lower() for item in profile.expected_policies if item.strip()}
     significant = {item.strip().lower() for item in profile.significant_transactions if item.strip()}
 
     for policy_name, rule in POLICY_RULES.items():
-        policy_present = any(keyword in text for keyword in rule["policy"])
+        policy_present = any(keyword in policy_text for keyword in rule["policy"])
         evidence_present = _policy_evidence_present(policy_name, rule["evidence"], text)
         explicitly_expected = policy_name in expected or policy_name in significant
         if policy_name == "consolidation" and not evidence_present and not explicitly_expected:
+            continue
+        if policy_name == "tax" and "non-profit" in entity_type and not evidence_present and not explicitly_expected:
             continue
         if policy_present and not evidence_present and not explicitly_expected:
             location, snippet = _first_keyword_context(document, rule["policy"])
@@ -681,7 +875,7 @@ def check_policy_relevance(document: PdfDocument, profile: CompanyProfile) -> li
                     "Remove boilerplate policy wording if it does not apply, or add the missing related disclosure if it does apply.",
                 )
             )
-        if (evidence_present or explicitly_expected) and not policy_present:
+        if (explicitly_expected or _strong_policy_gap(policy_name, text)) and not policy_present:
             location, snippet = _first_keyword_context(document, rule["evidence"])
             findings.append(
                 Finding(
@@ -1137,7 +1331,7 @@ def _check_industry_policy_fit(findings: list[Finding], document: PdfDocument, p
             mismatches = policies
             break
     for policy in mismatches:
-        if policy in text:
+        if policy in _accounting_policy_text(document).lower():
             location, snippet = _first_keyword_context(document, (policy,))
             findings.append(
                 Finding(
@@ -1149,6 +1343,23 @@ def _check_industry_policy_fit(findings: list[Finding], document: PdfDocument, p
                     "Tailor the policy note to the entity and remove industry-irrelevant boilerplate unless the company actually has this activity.",
                 )
             )
+
+
+def _accounting_policy_text(document: PdfDocument) -> str:
+    text = document.text
+    matches = list(re.finditer(r"summary of significant accounting policies|significant accounting policies|accounting policies", text, flags=re.I))
+    if not matches:
+        return text
+    start_match = next((match for match in matches if "summary" in match.group(0).lower()), matches[-1])
+    tail = text[start_match.start():]
+    end_match = re.search(
+        r"\n\s*5\s+Critical accounting estimates|\n\s*5\.\s*Critical accounting estimates|\n\s*Critical accounting estimates",
+        tail[1200:],
+        flags=re.I,
+    )
+    if end_match:
+        return tail[: 1200 + end_match.start()]
+    return tail[:18000]
 
 
 def _check_superseded_standards(findings: list[Finding], document: PdfDocument) -> None:
@@ -1266,6 +1477,16 @@ def _policy_evidence_present(policy_name: str, evidence_keywords: tuple[str, ...
         )
         return any(indicator in text for indicator in group_indicators)
     return any(keyword in text for keyword in evidence_keywords)
+
+
+def _strong_policy_gap(policy_name: str, text: str) -> bool:
+    if policy_name == "revenue":
+        return "revenue" in text and not any(term in text for term in ("revenue is recognised", "revenue is recognized", "(m) revenue"))
+    if policy_name == "leases":
+        return any(term in text for term in ("lease liability", "right-of-use asset", "right of use asset"))
+    if policy_name == "tax":
+        return any(term in text for term in ("tax expense", "deferred tax", "current tax", "tax payable")) and not _tax_exempt_context(text)
+    return False
 
 
 def _first_keyword_context(document: PdfDocument, keywords: tuple[str, ...]) -> tuple[str, str]:

@@ -79,13 +79,20 @@ class PdfDocument:
         if self.text_chars < 1000:
             score = min(score, 35)
         score -= min(40, self.unreadable_value_count * 3)
+        if self.ocr_error:
+            score = min(score, 30)
+        return max(0, min(100, score))
+
+    @property
+    def table_extraction_confidence(self) -> int:
+        if not self.pages:
+            return 0
+        score = self.extraction_confidence
         if self.merged_value_cell_count <= 10:
             merged_penalty = self.merged_value_cell_count
         else:
             merged_penalty = 10 + int((self.merged_value_cell_count - 10) * 0.5)
         score -= min(25, merged_penalty)
-        if self.ocr_error:
-            score = min(score, 30)
         return max(0, min(100, score))
 
 
@@ -102,7 +109,7 @@ class Finding:
 @dataclass
 class ReviewResult:
     findings: list[Finding]
-    metrics: dict[str, int | str]
+    metrics: dict[str, int | str | dict[str, str]]
 
 
 @dataclass

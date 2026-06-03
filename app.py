@@ -380,39 +380,48 @@ st.markdown(
 with st.container(border=True):
     st.markdown(
         """
-        <div class="profile-heading">Engagement profile</div>
-        <div class="profile-copy">Set the company context so the assistant can tailor policy and standards checks.</div>
+        <div class="profile-heading">Review mode</div>
+        <div class="profile-copy">Quick Review only needs the PDF. Advanced Review lets you override the detected engagement profile.</div>
         """,
         unsafe_allow_html=True,
     )
-    profile_cols = st.columns([1.2, 1, 0.8, 0.8])
-    company_name = profile_cols[0].text_input("Company name")
-    industry = profile_cols[1].text_input("Industry")
-    currency_choice = profile_cols[2].selectbox(
-        "Reporting currency",
-        ["Not specified", "NGN", "USD", "GBP", "EUR", "ZAR", "GHS", "KES", "Other"],
-        index=1,
-    )
-    reporting_currency = currency_choice
-    if currency_choice == "Other":
-        reporting_currency = profile_cols[2].text_input("Custom currency", placeholder="Example: NGN")
-    presentation_standard = profile_cols[3].selectbox("Presentation standard", ["IFRS", "Local GAAP"], index=0)
-    detail_cols = st.columns(3)
-    expected_policies_text = detail_cols[0].text_area(
-        "Expected policies",
-        placeholder="Example: revenue, financial instruments, tax",
-        help="Comma-separated policy areas that are expected even if balances are not obvious in the extracted PDF text.",
-    )
-    significant_transactions_text = detail_cols[1].text_area(
-        "Significant transactions",
-        placeholder="Example: leases, share-based payments, foreign currency loans",
-        help="Comma-separated transactions or balances that should have tailored accounting policy coverage.",
-    )
-    checklist_areas_text = detail_cols[2].text_area(
-        "Force checklist areas",
-        placeholder="Example: IFRS 15, IFRS 16, revenue, leases, EPS",
-        help="Comma-separated standards or areas to check even if the PDF text does not clearly trigger them.",
-    )
+    review_mode = st.radio("Mode", ["Quick Review", "Advanced Review"], horizontal=True)
+    company_name = ""
+    industry = ""
+    reporting_currency = "Not specified"
+    presentation_standard = "IFRS"
+    expected_policies_text = ""
+    significant_transactions_text = ""
+    checklist_areas_text = ""
+    if review_mode == "Advanced Review":
+        profile_cols = st.columns([1.2, 1, 0.8, 0.8])
+        company_name = profile_cols[0].text_input("Company name")
+        industry = profile_cols[1].text_input("Industry")
+        currency_choice = profile_cols[2].selectbox(
+            "Reporting currency",
+            ["Not specified", "NGN", "USD", "GBP", "EUR", "ZAR", "GHS", "KES", "Other"],
+            index=0,
+        )
+        reporting_currency = currency_choice
+        if currency_choice == "Other":
+            reporting_currency = profile_cols[2].text_input("Custom currency", placeholder="Example: NGN")
+        presentation_standard = profile_cols[3].selectbox("Presentation standard", ["IFRS", "Local GAAP"], index=0)
+        detail_cols = st.columns(3)
+        expected_policies_text = detail_cols[0].text_area(
+            "Expected policies",
+            placeholder="Example: revenue, financial instruments, tax",
+            help="Comma-separated policy areas that are expected even if balances are not obvious in the extracted PDF text.",
+        )
+        significant_transactions_text = detail_cols[1].text_area(
+            "Significant transactions",
+            placeholder="Example: leases, share-based payments, foreign currency loans",
+            help="Comma-separated transactions or balances that should have tailored accounting policy coverage.",
+        )
+        checklist_areas_text = detail_cols[2].text_area(
+            "Force checklist areas",
+            placeholder="Example: IFRS 15, IFRS 16, revenue, leases, EPS",
+            help="Comma-separated standards or areas to check even if the PDF text does not clearly trigger them.",
+        )
     ocr_cols = st.columns([1, 1, 1])
     ocr_cols[0].markdown('<div class="control-label">OCR scanned PDFs</div>', unsafe_allow_html=True)
     use_ocr = ocr_cols[0].toggle(
@@ -510,16 +519,26 @@ finally:
     temp_path.unlink(missing_ok=True)
 
 st.markdown('<div class="section-label">Review dashboard</div>', unsafe_allow_html=True)
-metric_cols = st.columns(9)
+metric_cols = st.columns(10)
 metric_cols[0].metric("Pages", result.metrics["pages"])
 metric_cols[1].metric("Text coverage", result.metrics.get("extraction_coverage", "0%"))
-metric_cols[2].metric("Confidence", result.metrics.get("extraction_confidence", "0%"))
-metric_cols[3].metric("OCR pages", result.metrics.get("ocr_pages", 0))
-metric_cols[4].metric("OCR tables", result.metrics.get("ocr_tables", 0))
-metric_cols[5].metric("Tables", result.metrics["tables"])
-metric_cols[6].metric("Findings", result.metrics["findings"])
-metric_cols[7].metric("High", result.metrics["high"])
-metric_cols[8].metric("Medium", result.metrics["medium"])
+metric_cols[2].metric("Text confidence", result.metrics.get("extraction_confidence", "0%"))
+metric_cols[3].metric("Table confidence", result.metrics.get("table_confidence", "0%"))
+metric_cols[4].metric("OCR pages", result.metrics.get("ocr_pages", 0))
+metric_cols[5].metric("OCR tables", result.metrics.get("ocr_tables", 0))
+metric_cols[6].metric("Tables", result.metrics["tables"])
+metric_cols[7].metric("Findings", result.metrics["findings"])
+metric_cols[8].metric("High", result.metrics["high"])
+metric_cols[9].metric("Medium", result.metrics["medium"])
+
+detected_profile = result.metrics.get("detected_profile", {})
+if isinstance(detected_profile, dict):
+    st.markdown('<div class="section-label">Detected profile</div>', unsafe_allow_html=True)
+    profile_rows = [
+        {"Field": key, "Detected value": value}
+        for key, value in detected_profile.items()
+    ]
+    st.dataframe(pd.DataFrame(profile_rows), use_container_width=True, hide_index=True)
 
 st.markdown(
     f"""

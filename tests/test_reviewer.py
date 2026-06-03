@@ -11,6 +11,7 @@ from reviewer import (
     check_policy_relevance,
     check_rounding_and_casting,
     check_standard_checklist,
+    infer_detected_profile,
     normalize_reporting_currency,
     review_pdf,
 )
@@ -376,6 +377,53 @@ def test_currency_normalization_accepts_naira_aliases_and_rejects_invalid_code()
     assert normalize_reporting_currency("N’000") == "NGN"
     assert normalize_reporting_currency("N000") == "NGN"
     assert normalize_reporting_currency("NGB") == ""
+
+
+def test_detected_profile_infers_upload_only_context():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "CHARTERED INSTITUTE OF PERSONNEL MANAGEMENT\nFinancial Statements\nYear ended December 31, 2025\nPrepared in accordance with IFRS and presented in N'000.\nPrincipal activities are professional membership services.\nCash and cash equivalents 100\nTrade and other receivables 50",
+                [],
+            )
+        ]
+    )
+
+    profile = infer_detected_profile(document)
+
+    assert profile["Company name"] == "Chartered Institute Of Personnel Management"
+    assert profile["Year end"] == "December 31, 2025"
+    assert profile["Currency"] == "NGN"
+    assert profile["Framework"] == "IFRS"
+    assert "professional body" in profile["Entity type"].lower()
+
+
+def test_text_confidence_separates_table_confidence():
+    noisy_table = [["Description", "2025", "2024"], ["Revenue", "100 90", ""], ["Total", "100", "90"]]
+    document = PdfDocument(
+        [PdfPage(1, "Statement of financial position\n" + ("Revenue 100 90\n" * 120), [noisy_table])]
+    )
+
+    assert document.extraction_confidence >= 90
+    assert document.table_extraction_confidence < document.extraction_confidence
+
+
+def test_formatting_ignores_registration_numbers_and_nonfinancial_negatives():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "FRC registration number 816300\nCertificate number 375217\nAddress 12345 Lagos\nThis text has extraction artefact -12345",
+                [],
+            )
+        ]
+    )
+
+    findings = check_formatting(document, CompanyProfile())
+
+    assert not any("thousands separators" in finding.issue.lower() for finding in findings)
+    assert not any("negative" in finding.issue.lower() for finding in findings)
 
 
 def test_superseded_standard_context_classifies_current_policy_as_high_and_transition_as_low():
