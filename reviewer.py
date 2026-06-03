@@ -13,6 +13,7 @@ NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\
 YEAR_RE = re.compile(r"\b20\d{2}\b")
 NOTE_REF_RE = re.compile(r"\bnote\s+(\d+[A-Za-z]?)\b|\bnotes?\s+(\d+[A-Za-z]?)\b", re.I)
 NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s*[\).:-]?\s+(.{3,100})$", re.I)
+ENTITY_SUFFIX_RE = re.compile(r"\b(?:limited|ltd|plc|inc|corp|corporation|company)\b", re.I)
 
 
 POLICY_RULES = {
@@ -421,9 +422,37 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
             )
         )
 
+    if document.ocr_used:
+        table_count = sum(len(page.tables) for page in document.pages)
+        if table_count:
+            findings.append(
+                Finding(
+                    "Extraction quality",
+                    "Low",
+                    "OCR reconstructed tables",
+                    "Generic arithmetic checks were skipped for OCR-reconstructed tables.",
+                    f"OCR reconstructed {table_count} table candidate(s). Generic row/column casting is disabled for OCR tables until statement-specific structure is confidently identified.",
+                    "Use the reconstructed tables as review evidence, but rely on statement-specific checks or manual review for scanned statements.",
+                )
+            )
+        return findings
+
     for page in document.pages:
         for table_index, table in enumerate(page.tables, start=1):
             if len(table) < 3:
+                continue
+            table_quality = _classify_table_for_arithmetic(table)
+            if not table_quality["can_run_arithmetic"]:
+                findings.append(
+                    Finding(
+                        "Extraction quality",
+                        "Low",
+                        f"Page {page.number}, table {table_index}",
+                        "Arithmetic checks were skipped for a low-confidence or non-standard table.",
+                        f"Table type: {table_quality['type']}; reason: {table_quality['reason']}.",
+                        "Review this table manually or improve table extraction before relying on automated casting checks.",
+                    )
+                )
                 continue
             note_cols = _note_columns(table)
             rows = [_numeric_row(row, note_cols) for row in table]
@@ -529,6 +558,18 @@ def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1
     findings: list[Finding] = []
     headings = _note_headings(text)
     statement_refs = _statement_note_references(document)
+    if document.ocr_used:
+        findings.append(
+            Finding(
+                "Extraction quality",
+                "Low",
+                "Notes agreement",
+                "Detailed note-reference reconciliation was skipped for an OCR-assisted document.",
+                "OCR can misread note columns, year columns, and note tables; reference checks are disabled until structured notes are confidently identified.",
+                "Use OCR output for navigation, but rely on manual review or a clean text PDF before treating note-reference exceptions as audit findings.",
+            )
+        )
+        return findings
     heading_refs = set(headings)
     for ref in sorted(statement_refs - heading_refs, key=_note_sort_key):
         findings.append(
@@ -1063,6 +1104,71 @@ def _note_columns(table: list[list[str]]) -> set[int]:
     return {index for index, cell in enumerate(header) if str(cell).strip().lower() in {"note", "notes", "ref", "reference"}}
 
 
+def _classify_table_for_arithmetic(table: list[list[str]]) -> dict[str, object]:
+    text = " ".join(" ".join(str(cell or "") for cell in row) for row in table).lower()
+    if "value added" in text or "value-added" in text:
+        return {"type": "value-added statement", "can_run_arithmetic": False, "reason": "value-added statements have presentation-specific subtotals"}
+    if "five year" in text or "5 year" in text or "financial summary" in text:
+        return {"type": "multi-year summary", "can_run_arithmetic": False, "reason": "multi-year summaries should not be cast like primary statements"}
+    if _table_has_merged_numeric_cells(table):
+        return {"type": "merged extraction", "can_run_arithmetic": False, "reason": "one or more cells contain multiple numeric values"}
+    if not _table_shape_confident(table):
+        return {"type": "low-confidence table", "can_run_arithmetic": False, "reason": "numeric row shapes are inconsistent"}
+    if _looks_like_statement_table(table):
+        return {"type": "statement table", "can_run_arithmetic": True, "reason": "consistent financial statement table structure"}
+    return {"type": "other table", "can_run_arithmetic": False, "reason": "table type is not a recognised statement/note total table"}
+
+
+def _table_has_merged_numeric_cells(table: list[list[str]]) -> bool:
+    for row in table:
+        for cell in row[1:]:
+            if len(NUMBER_RE.findall(str(cell or ""))) > 1:
+                return True
+    return False
+
+
+def _table_shape_confident(table: list[list[str]]) -> bool:
+    note_cols = _note_columns(table)
+    amount_counts: list[int] = []
+    for row in table[1:]:
+        count = 0
+        for index, cell in enumerate(row[1:], start=1):
+            if index in note_cols:
+                continue
+            if _parse_decimal(cell) is not None:
+                count += 1
+        if count:
+            amount_counts.append(count)
+    if len(amount_counts) < 3:
+        return False
+    most_common_count = max(set(amount_counts), key=amount_counts.count)
+    return most_common_count >= 1 and amount_counts.count(most_common_count) / len(amount_counts) >= 0.7
+
+
+def _looks_like_statement_table(table: list[list[str]]) -> bool:
+    text = " ".join(str(row[0] or "").lower() for row in table if row)
+    statement_keywords = (
+        "revenue",
+        "cost of sales",
+        "gross profit",
+        "profit before",
+        "tax",
+        "assets",
+        "liabilities",
+        "equity",
+        "cash",
+        "receivables",
+        "payables",
+        "property, plant",
+        "depreciation",
+        "inventory",
+        "borrowings",
+        "total",
+    )
+    hits = sum(1 for keyword in statement_keywords if keyword in text)
+    return hits >= 2 and "total" in text
+
+
 def _numeric_row(row: list[str], note_cols: set[int] | None = None) -> list[str | Decimal | None]:
     note_cols = note_cols or set()
     converted: list[str | Decimal | None] = []
@@ -1149,7 +1255,7 @@ def _note_headings(text: str) -> dict[str, str]:
         match = NOTE_HEADING_RE.match(line.strip())
         if match:
             number, title = match.groups()
-            if not title.lower().startswith(("to the", "are", "and")):
+            if _valid_note_heading(number, title):
                 headings[number.upper()] = title.strip()
     return headings
 
@@ -1189,7 +1295,7 @@ def _note_sections(text: str) -> dict[str, str]:
     current: str | None = None
     for line in text.splitlines():
         match = NOTE_HEADING_RE.match(line.strip())
-        if match:
+        if match and _valid_note_heading(match.group(1), match.group(2)):
             current = match.group(1).upper()
         if current:
             sections[current].append(line)
@@ -1199,6 +1305,36 @@ def _note_sections(text: str) -> dict[str, str]:
 def _is_notes_page(text: str) -> bool:
     lower = text.lower()
     return "notes to the financial statements" in lower or lower.count("accounting polic") >= 2
+
+
+def _valid_note_heading(number: str, title: str) -> bool:
+    number = number.upper().strip()
+    title_clean = re.sub(r"^[^\w(]+", "", title.strip())
+    title_lower = title_clean.lower()
+    suffix_match = re.fullmatch(r"\d{1,2}([A-Z])", number)
+    if YEAR_RE.fullmatch(number):
+        return False
+    if re.fullmatch(r"\d{2,}[A-Z]", number):
+        return False
+    if not re.fullmatch(r"\d{1,2}[A-Z]?", number):
+        return False
+    if suffix_match and suffix_match.group(1) not in {"A", "B", "C", "D"}:
+        return False
+    numeric = int(re.match(r"\d+", number).group(0))
+    if numeric < 1 or numeric > 80:
+        return False
+    if title_lower.startswith(("to the", "are", "and", "for the year", "in thousands", "n'000")):
+        return False
+    if title_lower.startswith(("financial statements for the year ended", "audited financial statements")):
+        return False
+    if title_lower in {"directors", "director", "report of the directors", "corporate information"}:
+        return False
+    words = title_clean.split()
+    if ENTITY_SUFFIX_RE.search(title_clean) and len(words) <= 4:
+        return False
+    if YEAR_RE.search(title_clean) and len(words) <= 8:
+        return False
+    return bool(re.search(r"[A-Za-z]{3,}", title_clean))
 
 
 def _last_amount(line: str) -> Decimal | None:

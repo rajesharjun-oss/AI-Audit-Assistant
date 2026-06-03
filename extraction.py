@@ -189,6 +189,8 @@ def _reconstruct_ocr_tables(lines: list[dict[str, object]]) -> list[list[list[st
             rows.append(row)
     if sum(1 for row in rows if len(row) >= 2) < 3:
         return []
+    if not _table_rows_are_structured(rows):
+        return []
     return [rows]
 
 
@@ -199,6 +201,8 @@ def _tables_from_text_lines(text: str) -> list[list[list[str]]]:
         if row:
             rows.append(row)
     if len(rows) < 3:
+        return []
+    if not _table_rows_are_structured(rows):
         return []
     return [rows]
 
@@ -221,6 +225,15 @@ def _line_to_table_row(line: str) -> list[str] | None:
     if len(amounts) >= 3 and _looks_like_note_column(amounts[0]):
         amounts = amounts[1:]
     return [label, *amounts]
+
+
+def _table_rows_are_structured(rows: list[list[str]]) -> bool:
+    amount_counts = [len(row) - 1 for row in rows if len(row) > 1]
+    if len(amount_counts) < 3:
+        return False
+    most_common_count = max(set(amount_counts), key=amount_counts.count)
+    consistency = amount_counts.count(most_common_count) / len(amount_counts)
+    return most_common_count >= 2 and consistency >= 0.6
 
 
 def _looks_like_note_column(value: str) -> bool:

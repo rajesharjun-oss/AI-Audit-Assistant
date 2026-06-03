@@ -4,6 +4,7 @@ import extraction
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
+    _note_headings,
     check_formatting,
     check_extraction_quality,
     check_notes_agreement,
@@ -61,12 +62,152 @@ def test_note_column_is_not_treated_as_amount_column():
     assert findings == []
 
 
+def test_arithmetic_skips_merged_numeric_cells():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "",
+                [[["Description", "2025", "2024"], ["Revenue", "100 90", ""], ["Total revenue", "100", "90"]]],
+            )
+        ]
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert any("skipped" in finding.issue.lower() for finding in findings)
+    assert not any("does not agree" in finding.issue.lower() for finding in findings)
+
+
+def test_arithmetic_skips_five_year_summary():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "",
+                [
+                    [
+                        ["Five year financial summary", "2025", "2024", "2023"],
+                        ["Revenue", "100", "90", "80"],
+                        ["Total assets", "300", "280", "250"],
+                        ["Total equity", "200", "190", "170"],
+                    ]
+                ],
+            )
+        ]
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert any("multi-year summary" in finding.evidence.lower() for finding in findings)
+    assert not any("does not agree" in finding.issue.lower() for finding in findings)
+
+
+def test_arithmetic_skips_value_added_statement():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "",
+                [
+                    [
+                        ["Value added statement", "2025", "2024"],
+                        ["Revenue", "100", "90"],
+                        ["Bought in materials", "40", "35"],
+                        ["Total value added", "60", "55"],
+                    ]
+                ],
+            )
+        ]
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert any("value-added statement" in finding.evidence.lower() for finding in findings)
+    assert not any("does not agree" in finding.issue.lower() for finding in findings)
+
+
+def test_generic_arithmetic_skips_ocr_reconstructed_tables():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nRevenue 100 90\nTotal revenue 999 999",
+                [[["Description", "2025", "2024"], ["Revenue", "100", "90"], ["Total revenue", "999", "999"]]],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+        ocr_tables=1,
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert any("generic arithmetic checks were skipped" in finding.issue.lower() for finding in findings)
+    assert not any("does not agree" in finding.issue.lower() for finding in findings)
+
+
 def test_notes_check_flags_missing_note_heading():
     document = PdfDocument([PdfPage(1, "Revenue Note 7 100\nProfit for the year 40", [])])
 
     findings = check_notes_agreement(document)
 
     assert any("note 7" in finding.issue.lower() for finding in findings)
+
+
+def test_notes_agreement_is_conservative_for_ocr_documents():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nRevenue Note 7 100\nNotes to the financial statements\n8 Revenue",
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings = check_notes_agreement(document)
+
+    assert len(findings) == 1
+    assert findings[0].category == "Extraction quality"
+    assert "skipped for an ocr-assisted document" in findings[0].issue.lower()
+
+
+def test_note_heading_detection_rejects_years_and_ocr_noise():
+    text = "2021 Statement of changes\n2022 Revenue\n89B OCR garbage\n4 Revenue\n5 Trade and other receivables"
+
+    headings = _note_headings(text)
+
+    assert "2021" not in headings
+    assert "2022" not in headings
+    assert "89B" not in headings
+    assert headings["4"] == "Revenue"
+
+
+def test_note_heading_detection_rejects_report_furniture_and_entity_names():
+    text = "\n".join(
+        [
+            "1 Significant accounting policies",
+            "1S Funtierra Limited",
+            "4 Funtierra Limited",
+            "5 Directors",
+            "7 Financial Statements for the year ended December 31, 2021",
+            "9 _ Financial liabilities",
+            "10 Trade and other payables",
+        ]
+    )
+
+    headings = _note_headings(text)
+
+    assert headings["1"] == "Significant accounting policies"
+    assert "1S" not in headings
+    assert "4" not in headings
+    assert "5" not in headings
+    assert "7" not in headings
+    assert headings["9"] == "_ Financial liabilities"
+    assert headings["10"] == "Trade and other payables"
 
 
 def test_policy_check_flags_boilerplate_lease_policy():
