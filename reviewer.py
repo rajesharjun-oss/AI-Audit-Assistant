@@ -234,7 +234,7 @@ def review_pdf(
     profile = profile or CompanyProfile()
     findings: list[Finding] = []
     findings.extend(check_extraction_quality(document))
-    if _requires_ocr(document):
+    if _requires_ocr(document) or _extraction_unreliable(document):
         return _build_result(document, findings)
     findings.extend(check_totals_and_rounding(document))
     findings.extend(check_formatting(document, profile))
@@ -250,6 +250,10 @@ def _build_result(document: PdfDocument, findings: list[Finding]) -> ReviewResul
         "text_pages": document.text_pages,
         "text_chars": document.text_chars,
         "extraction_coverage": f"{document.extraction_coverage:.0%}",
+        "extraction_confidence": f"{document.extraction_confidence}%",
+        "extraction_profile": document.extraction_profile,
+        "unreadable_values": document.unreadable_value_count,
+        "merged_value_cells": document.merged_value_cell_count,
         "ocr_used": "Yes" if document.ocr_used else "No",
         "ocr_pages": document.ocr_pages,
         "ocr_tables": document.ocr_tables,
@@ -275,7 +279,45 @@ def check_extraction_quality(document: PdfDocument) -> list[Finding]:
                 "Confirm Tesseract OCR is installed and accessible, then retry. You can also upload a text-selectable PDF.",
             )
         )
-    if document.ocr_used and not _requires_ocr(document):
+    if document.unreadable_value_count:
+        severity = "High" if document.unreadable_value_count >= 5 else "Medium"
+        findings.append(
+            Finding(
+                "Extraction quality",
+                severity,
+                "PDF extraction",
+                "Unreadable or placeholder values were detected in extracted text or tables.",
+                f"Detected {document.unreadable_value_count} unreadable placeholder(s), such as ####, replacement characters, or blanked-out value markers.",
+                "Resolve the source PDF/export issue before relying on arithmetic or note-agreement findings for affected pages.",
+            )
+        )
+    if document.merged_value_cell_count:
+        findings.append(
+            Finding(
+                "Extraction quality",
+                "Medium",
+                "Table extraction",
+                "Some extracted table cells appear to contain multiple merged values.",
+                f"Detected {document.merged_value_cell_count} table cell(s) containing more than one numeric value.",
+                "Review the extracted table layout. Merged numeric cells can make column arithmetic and cross-footing checks unreliable.",
+            )
+        )
+    if _extraction_unreliable(document):
+        findings.append(
+            Finding(
+                "Extraction quality",
+                "High",
+                "PDF extraction",
+                "Extraction confidence is too low for reliable automated audit checks.",
+                (
+                    f"Profile: {document.extraction_profile}; confidence {document.extraction_confidence}%; "
+                    f"text coverage {document.extraction_coverage:.0%}; unreadable values {document.unreadable_value_count}; "
+                    f"merged value cells {document.merged_value_cell_count}."
+                ),
+                "Use a cleaner text-selectable PDF, repair the source export, or run OCR with a higher-quality scan before relying on the exception register.",
+            )
+        )
+    if document.ocr_used and not _requires_ocr(document) and not _extraction_unreliable(document):
         findings.append(
             Finding(
                 "Extraction quality",
@@ -322,6 +364,10 @@ def _requires_ocr(document: PdfDocument) -> bool:
     if not document.pages:
         return True
     return document.text_chars < 1000 or document.extraction_coverage < 0.25
+
+
+def _extraction_unreliable(document: PdfDocument) -> bool:
+    return document.extraction_confidence < 50 or document.unreadable_value_count >= 5
 
 
 def check_standard_checklist(document: PdfDocument, profile: CompanyProfile) -> list[Finding]:

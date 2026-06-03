@@ -42,6 +42,21 @@ The checks are intentionally transparent and conservative:
 - checklist items are activated by detected balances/transactions or by forced checklist areas supplied by the reviewer.
 - low-text PDFs are routed through an OCR fallback when enabled; otherwise the app raises an extraction-quality finding instead of producing misleading accounting exceptions.
 - OCR table reconstruction uses word positions and line-level numeric patterns to rebuild candidate rows such as `Revenue | 10,000 | 8,000`, allowing totals and cross-footing checks to run on scanned statements where OCR quality is sufficient.
+- extraction confidence scores combine text coverage, OCR status, unreadable placeholders, and suspicious merged numeric cells. Low-confidence extraction stops deterministic audit checks and raises extraction-quality findings instead of producing unreliable exceptions.
+
+## Extraction confidence
+
+The tool classifies uploaded PDFs as `text-based`, `partially scanned`, `image-only`, `ocr-assisted`, or `empty`.
+
+It flags extraction quality issues when:
+
+- text coverage is too low;
+- OCR fails or only covers part of the report;
+- values are unreadable or contain placeholders such as `#####`;
+- replacement characters or blanked-out value markers appear;
+- table cells appear to contain merged numeric values.
+
+If extraction confidence is below the reliability threshold, the app stops before arithmetic, note-agreement, policy, and checklist checks. This prevents the exception register from presenting poor extraction as audit evidence.
 
 The bundled checklist is a starter engine, not a full licensed IFRS disclosure checklist. Expand `STANDARD_CHECKLIST` in `reviewer.py` with your firm's detailed disclosure requirements and evidence phrases.
 

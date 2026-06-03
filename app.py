@@ -499,15 +499,16 @@ finally:
     temp_path.unlink(missing_ok=True)
 
 st.markdown('<div class="section-label">Review dashboard</div>', unsafe_allow_html=True)
-metric_cols = st.columns(8)
+metric_cols = st.columns(9)
 metric_cols[0].metric("Pages", result.metrics["pages"])
 metric_cols[1].metric("Text coverage", result.metrics.get("extraction_coverage", "0%"))
-metric_cols[2].metric("OCR pages", result.metrics.get("ocr_pages", 0))
-metric_cols[3].metric("OCR tables", result.metrics.get("ocr_tables", 0))
-metric_cols[4].metric("Tables", result.metrics["tables"])
-metric_cols[5].metric("Findings", result.metrics["findings"])
-metric_cols[6].metric("High", result.metrics["high"])
-metric_cols[7].metric("Medium", result.metrics["medium"])
+metric_cols[2].metric("Confidence", result.metrics.get("extraction_confidence", "0%"))
+metric_cols[3].metric("OCR pages", result.metrics.get("ocr_pages", 0))
+metric_cols[4].metric("OCR tables", result.metrics.get("ocr_tables", 0))
+metric_cols[5].metric("Tables", result.metrics["tables"])
+metric_cols[6].metric("Findings", result.metrics["findings"])
+metric_cols[7].metric("High", result.metrics["high"])
+metric_cols[8].metric("Medium", result.metrics["medium"])
 
 st.markdown(
     f"""

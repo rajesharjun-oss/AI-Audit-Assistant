@@ -1,6 +1,7 @@
 from decimal import Decimal
 
-from extraction import _line_to_table_row, _reconstruct_ocr_tables
+import extraction
+from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
     check_formatting,
@@ -172,6 +173,69 @@ def test_extraction_quality_flags_scanned_pdf_like_document():
 
     assert findings
     assert findings[0].category == "Extraction quality"
+
+
+def test_extraction_quality_flags_placeholder_values():
+    document = PdfDocument([PdfPage(1, "Revenue #####\nTotal income #####", [])])
+
+    findings = check_extraction_quality(document)
+
+    assert any("Unreadable" in finding.issue for finding in findings)
+    assert any("too low" in finding.issue for finding in findings)
+
+
+def test_extraction_quality_flags_merged_numeric_cells():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Revenue 100 90\n" * 120,
+                [[["Description", "2025", "2024"], ["Revenue", "100 90", ""], ["Total", "100", "90"]]],
+            )
+        ]
+    )
+
+    findings = check_extraction_quality(document)
+
+    assert any("merged values" in finding.issue.lower() for finding in findings)
+
+
+def test_clean_text_document_has_high_extraction_confidence():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\n" + ("Revenue 100 90\n" * 120),
+                [[["Description", "2025", "2024"], ["Revenue", "100", "90"], ["Total revenue", "100", "90"]]],
+            )
+        ]
+    )
+
+    assert document.extraction_profile == "text-based"
+    assert document.extraction_confidence >= 90
+
+
+def test_text_based_document_with_layout_noise_is_not_blocked():
+    noisy_table = [["Description", "2025", "2024"]]
+    noisy_table.extend([["Line item", "100 90", ""] for _ in range(20)])
+    document = PdfDocument(
+        [PdfPage(1, "Statement of financial position\n" + ("Revenue 100 90\n" * 120), [noisy_table])]
+    )
+
+    findings = check_extraction_quality(document)
+
+    assert document.extraction_confidence >= 50
+    assert not any("too low" in finding.issue for finding in findings)
+
+
+def test_ocr_fallback_does_not_crash_when_tesseract_missing(monkeypatch):
+    monkeypatch.setattr(extraction, "_resolve_tesseract", lambda: "")
+    base_document = PdfDocument([PdfPage(1, "", [])])
+
+    document = extract_pdf_with_ocr("missing.pdf", base_document, ReviewOptions(use_ocr=True))
+
+    assert document.ocr_error
+    assert document.pages == base_document.pages
 
 
 def test_review_options_enable_ocr_without_changing_defaults():
