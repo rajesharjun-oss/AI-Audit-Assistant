@@ -561,6 +561,14 @@ st.download_button(
 with st.expander("Detected note headings", expanded=False):
     st.code(str(result.metrics.get("note_headings", "No note headings detected.")))
 
+status_cols = st.columns(2)
+with status_cols[0]:
+    with st.expander("Checks performed", expanded=True):
+        st.write(str(result.metrics.get("checks_performed", "No deterministic checks completed.")))
+with status_cols[1]:
+    with st.expander("Checks skipped", expanded=False):
+        st.write(str(result.metrics.get("checks_skipped", "No major checks skipped.")))
+
 if not result.findings:
     st.success("No issues were detected by the automated checks.")
     st.stop()

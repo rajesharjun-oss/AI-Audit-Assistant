@@ -5,9 +5,11 @@ from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
     _note_headings,
+    _amounts_from_statement_line,
     check_formatting,
     check_extraction_quality,
     check_notes_agreement,
+    check_primary_statement_consistency,
     check_policy_relevance,
     check_rounding_and_casting,
     check_standard_checklist,
@@ -62,6 +64,63 @@ def test_note_column_is_not_treated_as_amount_column():
     findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
 
     assert findings == []
+
+
+def test_statement_line_parser_handles_split_amounts_and_note_columns():
+    assert _amounts_from_statement_line("Other Revenue 9 307,482 1 89,751")[-2:] == [
+        Decimal("307482"),
+        Decimal("189751"),
+    ]
+    assert _amounts_from_statement_line("Office accommodation costs 10 3 9,772 1 7,996")[-2:] == [
+        Decimal("39772"),
+        Decimal("17996"),
+    ]
+    assert _amounts_from_statement_line("Total Liabilities 1 41,411 1 54,819")[-2:] == [
+        Decimal("141411"),
+        Decimal("154819"),
+    ]
+    assert _amounts_from_statement_line("Net cash inflow from financing activities - ( 16,128)")[-2:] == [
+        Decimal("0"),
+        Decimal("-16128"),
+    ]
+
+
+def test_primary_statement_checks_run_from_line_text_when_tables_are_low_confidence():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of income and expenditure",
+                        "Subscriptions 242,511 120,424",
+                        "Registrations 75,392 81,050",
+                        "Operating Revenue 7 2 ,783,064 2,029,846",
+                        "Gross Operating Revenue 3,100,967 2,231,320",
+                        "Operating Expenditure 8 (1,269,506) (986,920)",
+                        "Gross Revenue 1,831,461 1,244,400",
+                        "Other Revenue 9 307,482 1 89,751",
+                        "Finance Income 5 2,200 40,216",
+                        "TOTAL INCOME 2,191,143 1 ,474,367",
+                        "Office accommodation costs 10 3 9,772 1 7,996",
+                        "Personnel costs 633,447 441,731",
+                        "Administrative costs 871,713 589,872",
+                        "Finance Expenses 1 1,013 14,599",
+                        "TOTAL EXPENDITURE 1,555,945 1 ,064,198",
+                        "SURPLUS OF INCOME OVER EXPENDITURE 635,198 410,169",
+                        "TOTAL COMPREHENSIVE INCOME 635,198 410,169",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    findings, performed, skipped = check_primary_statement_consistency(document)
+
+    assert findings == []
+    assert any("total income checked" in item for item in performed)
+    assert any("total expenditure checked" in item for item in performed)
 
 
 def test_arithmetic_skips_merged_numeric_cells():

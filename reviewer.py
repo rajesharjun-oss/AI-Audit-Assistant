@@ -236,18 +236,43 @@ def review_pdf(
         document = extract_pdf_with_ocr(path, document, options)
     profile = _profile_with_detected_defaults(profile or CompanyProfile(), document)
     findings: list[Finding] = []
+    checks_performed: list[str] = []
+    checks_skipped: list[str] = []
     findings.extend(check_extraction_quality(document))
-    if _requires_ocr(document) or _extraction_unreliable(document):
-        return _build_result(document, findings)
-    findings.extend(check_totals_and_rounding(document))
+    if _requires_ocr(document):
+        checks_skipped.append("Primary statement checks skipped because PDF extraction is unreliable.")
+        return _build_result(document, findings, checks_performed, checks_skipped)
+    if _extraction_unreliable(document):
+        checks_skipped.append("Document-level extraction quality is low; detailed table checks are limited to clean page/table evidence.")
+    statement_findings, statement_performed, statement_skipped = check_primary_statement_consistency(document)
+    findings.extend(statement_findings)
+    checks_performed.extend(statement_performed)
+    checks_skipped.extend(statement_skipped)
+    totals_findings = check_totals_and_rounding(document)
+    findings.extend(totals_findings)
     findings.extend(check_formatting(document, profile))
-    findings.extend(check_notes_agreement(document))
+    note_findings = check_notes_agreement(document)
+    findings.extend(note_findings)
+    if any(finding.location == "Notes agreement" and finding.category == "Extraction quality" for finding in note_findings):
+        checks_performed.append("Basic note heading existence checks completed where statement note references were clearly detected.")
+        checks_skipped.append("Detailed note agreement skipped because table extraction confidence is below threshold.")
+    else:
+        checks_performed.append("Basic note reference and note amount agreement checks completed.")
     findings.extend(check_policy_relevance(document, profile))
     findings.extend(check_standard_checklist(document, profile))
-    return _build_result(document, findings)
+    if totals_findings:
+        checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables where indicated in extraction findings.")
+    return _build_result(document, findings, checks_performed, checks_skipped)
 
 
-def _build_result(document: PdfDocument, findings: list[Finding]) -> ReviewResult:
+def _build_result(
+    document: PdfDocument,
+    findings: list[Finding],
+    checks_performed: list[str] | None = None,
+    checks_skipped: list[str] | None = None,
+) -> ReviewResult:
+    checks_performed = checks_performed or []
+    checks_skipped = checks_skipped or []
     metrics = {
         "pages": len(document.pages),
         "text_pages": document.text_pages,
@@ -268,6 +293,8 @@ def _build_result(document: PdfDocument, findings: list[Finding]) -> ReviewResul
         "low": sum(1 for item in findings if item.severity == "Low"),
         "note_headings": _format_note_heading_debug(document),
         "detected_profile": infer_detected_profile(document),
+        "checks_performed": "\n".join(dict.fromkeys(checks_performed)) or "No deterministic checks completed.",
+        "checks_skipped": "\n".join(dict.fromkeys(checks_skipped)) or "No major checks skipped.",
     }
     return ReviewResult(findings=findings, metrics=metrics)
 
@@ -549,6 +576,31 @@ def check_standard_checklist(document: PdfDocument, profile: CompanyProfile) -> 
 
 def check_rounding_and_casting(document: PdfDocument, tolerance: Decimal = Decimal("1")) -> list[Finding]:
     return check_totals_and_rounding(document, tolerance)
+
+
+def check_primary_statement_consistency(
+    document: PdfDocument,
+    tolerance: Decimal = Decimal("1"),
+) -> tuple[list[Finding], list[str], list[str]]:
+    findings: list[Finding] = []
+    performed: list[str] = []
+    skipped: list[str] = []
+    checks = (
+        ("Statement of income and expenditure", _check_income_statement_text),
+        ("Statement of financial position", _check_sfp_text),
+        ("Statement of changes in accumulated fund", _check_accumulated_fund_text),
+        ("Statement of cash flows", _check_cash_flow_text),
+    )
+    for statement_name, checker in checks:
+        page = _find_statement_page(document, statement_name)
+        if not page:
+            skipped.append(f"{statement_name}: statement page not detected.")
+            continue
+        page_findings, page_performed, page_skipped = checker(page, tolerance)
+        findings.extend(page_findings)
+        performed.extend(page_performed)
+        skipped.extend(page_skipped)
+    return findings, performed, skipped
 
 
 def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None = None) -> list[Finding]:
@@ -923,6 +975,14 @@ def findings_to_markdown(result: ReviewResult) -> str:
         "- Notes agreement: note cross-references and reconciliation of note figures to face statements.",
         "- Accounting policies: relevance, missing policies, boilerplate wording, and superseded standards.",
         "- Standards checklist: triggered IFRS disclosure checks for presentation, policies, and transaction-specific notes.",
+        "",
+        "## Checks performed",
+        "",
+        str(result.metrics.get("checks_performed", "No deterministic checks completed.")),
+        "",
+        "## Checks skipped",
+        "",
+        str(result.metrics.get("checks_skipped", "No major checks skipped.")),
         "",
     ]
     if not result.findings:
@@ -1318,6 +1378,323 @@ def _check_depreciation_note(findings: list[Finding], ref: str, section: str, to
                 "Agree depreciation charges to expense classification notes and the cash flow add-back.",
             )
         )
+
+
+def _find_statement_page(document: PdfDocument, statement_name: str) -> PdfPage | None:
+    target = statement_name.lower()
+    for page in document.pages:
+        for line in page.text.splitlines():
+            lower = line.strip().lower()
+            if "..." in lower or "…" in lower:
+                continue
+            if lower.startswith(target):
+                return page
+    return None
+
+
+def _check_income_statement_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Finding], list[str], list[str]]:
+    rows = _statement_rows(page.text)
+    performed: list[str] = []
+    skipped: list[str] = []
+    findings: list[Finding] = []
+    gross_operating = ("subscriptions", "registrations", "operating revenue")
+    total_income = ("gross revenue", "other revenue", "finance income")
+    expenditure = ("office accommodation costs", "personnel costs", "administrative costs", "finance expenses")
+    if _has_rows(rows, (*gross_operating, "gross operating revenue")):
+        _check_sum_rows(findings, page.number, "Income statement", "Gross operating revenue", rows, gross_operating, "gross operating revenue", tolerance)
+        performed.append("Income statement: gross operating revenue checked from line-extracted rows.")
+    else:
+        skipped.append("Income statement: gross operating revenue skipped because component rows were not confidently parsed.")
+    if _has_rows(rows, ("gross operating revenue", "operating expenditure", "gross revenue")):
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Income statement",
+            "Gross revenue equals gross operating revenue less operating expenditure.",
+            [a + b for a, b in zip(_row_amounts(rows, "gross operating revenue"), _row_amounts(rows, "operating expenditure"))],
+            _row_amounts(rows, "gross revenue"),
+            tolerance,
+        )
+        performed.append("Income statement: gross revenue checked against operating revenue less operating expenditure.")
+    else:
+        skipped.append("Income statement: gross revenue skipped because required rows were not confidently parsed.")
+    if _has_rows(rows, (*total_income, "total income")):
+        _check_sum_rows(findings, page.number, "Income statement", "Total income", rows, total_income, "total income", tolerance)
+        performed.append("Income statement: total income checked from line-extracted rows.")
+    else:
+        skipped.append("Income statement: total income skipped because component rows were not confidently parsed.")
+    if _has_rows(rows, (*expenditure, "total expenditure")):
+        _check_sum_rows(findings, page.number, "Income statement", "Total expenditure", rows, expenditure, "total expenditure", tolerance)
+        performed.append("Income statement: total expenditure checked from line-extracted rows.")
+    else:
+        skipped.append("Income statement: total expenditure skipped because component rows were not confidently parsed.")
+    if _has_rows(rows, ("total income", "total expenditure", "surplus of income over expenditure")):
+        expected = _row_amounts(rows, "total income")
+        expenditure_amounts = _row_amounts(rows, "total expenditure")
+        reported = _row_amounts(rows, "surplus of income over expenditure")
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Income statement",
+            "Surplus equals total income less total expenditure.",
+            [a - b for a, b in zip(expected, expenditure_amounts)],
+            reported,
+            tolerance,
+        )
+        performed.append("Income statement: surplus checked against income less expenditure.")
+    else:
+        skipped.append("Income statement: surplus check skipped because required rows were not confidently parsed.")
+    if _has_rows(rows, ("surplus of income over expenditure", "total comprehensive income")):
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Income statement",
+            "Total comprehensive income agrees to surplus where OCI is nil.",
+            _row_amounts(rows, "surplus of income over expenditure"),
+            _row_amounts(rows, "total comprehensive income"),
+            tolerance,
+        )
+        performed.append("Income statement: total comprehensive income checked.")
+    return findings, performed, skipped
+
+
+def _check_sfp_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Finding], list[str], list[str]]:
+    rows = _statement_rows(page.text)
+    performed: list[str] = []
+    skipped: list[str] = []
+    findings: list[Finding] = []
+    non_current = ("investment property", "property plant and equipment", "intangible assets")
+    current = ("inventories", "trade and other receivables", "cash and cash equivalents")
+    funds = ("accumulated fund", "donation fund", "library development fund")
+    if _has_rows(rows, (*non_current, "total non - current assets")):
+        _check_sum_rows(findings, page.number, "Statement of financial position", "Non-current assets", rows, non_current, "total non - current assets", tolerance)
+        performed.append("Statement of financial position: non-current assets checked.")
+    else:
+        skipped.append("Statement of financial position: non-current assets skipped because rows were not confidently parsed.")
+    if _has_rows(rows, (*current, "total current assets")):
+        _check_sum_rows(findings, page.number, "Statement of financial position", "Current assets", rows, current, "total current assets", tolerance)
+        performed.append("Statement of financial position: current assets checked.")
+    else:
+        skipped.append("Statement of financial position: current assets skipped because rows were not confidently parsed.")
+    if _has_rows(rows, ("total non - current assets", "total current assets", "total assets")):
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of financial position",
+            "Total assets equals non-current assets plus current assets.",
+            [a + b for a, b in zip(_row_amounts(rows, "total non - current assets"), _row_amounts(rows, "total current assets"))],
+            _row_amounts(rows, "total assets"),
+            tolerance,
+        )
+        performed.append("Statement of financial position: total assets checked.")
+    if _has_rows(rows, (*funds, "total members fund")):
+        _check_sum_rows(findings, page.number, "Statement of financial position", "Members fund", rows, funds, "total members fund", tolerance)
+        performed.append("Statement of financial position: members fund checked.")
+    else:
+        skipped.append("Statement of financial position: members fund skipped because rows were not confidently parsed.")
+    if _has_rows(rows, ("total members fund", "total liabilities", "total members fund and liability")):
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of financial position",
+            "Members fund plus liabilities equals total members fund and liability.",
+            [a + b for a, b in zip(_row_amounts(rows, "total members fund"), _row_amounts(rows, "total liabilities"))],
+            _row_amounts(rows, "total members fund and liability"),
+            tolerance,
+        )
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of financial position",
+            "Total assets equals total members fund and liability.",
+            _row_amounts(rows, "total assets"),
+            _row_amounts(rows, "total members fund and liability"),
+            tolerance,
+        )
+        performed.append("Statement of financial position: balance sheet equation checked.")
+    else:
+        skipped.append("Statement of financial position: balance sheet equation skipped because rows were not confidently parsed.")
+    return findings, performed, skipped
+
+
+def _check_accumulated_fund_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Finding], list[str], list[str]]:
+    lines = page.text.splitlines()
+    findings: list[Finding] = []
+    performed: list[str] = []
+    skipped: list[str] = []
+    balance_rows = [(line, _amounts_from_statement_line(line)) for line in lines if "balance as at" in line.lower()]
+    surplus_rows = [(line, _amounts_from_statement_line(line)) for line in lines if line.lower().strip().startswith("surplus for the year")]
+    if len(balance_rows) >= 3 and len(surplus_rows) >= 2:
+        opening_2025 = balance_rows[-2][1]
+        closing_2025 = balance_rows[-1][1]
+        surplus_2025 = surplus_rows[-1][1]
+        if len(opening_2025) >= 4 and len(closing_2025) >= 4 and surplus_2025:
+            expected_total = opening_2025[-1] + surplus_2025[-1]
+            reported_total = closing_2025[-1]
+            _check_scalar_equation(
+                findings,
+                page.number,
+                "Statement of changes in accumulated fund",
+                "Closing accumulated fund agrees to opening fund plus surplus.",
+                expected_total,
+                reported_total,
+                tolerance,
+            )
+            performed.append("Statement of changes in accumulated fund: opening plus surplus checked to closing fund.")
+        else:
+            skipped.append("Statement of changes in accumulated fund: skipped because fund columns were not confidently parsed.")
+    else:
+        skipped.append("Statement of changes in accumulated fund: skipped because movement rows were not confidently parsed.")
+    return findings, performed, skipped
+
+
+def _check_cash_flow_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Finding], list[str], list[str]]:
+    rows = _statement_rows(page.text)
+    findings: list[Finding] = []
+    performed: list[str] = []
+    skipped: list[str] = []
+    if _has_rows(rows, ("net cash inflow from operating activities", "net cash absorbed in investing activities", "net cash inflow from financing activities", "net increase in cash and cash equivalents")):
+        expected = [
+            a + b + c
+            for a, b, c in zip(
+                _row_amounts(rows, "net cash inflow from operating activities"),
+                _row_amounts(rows, "net cash absorbed in investing activities"),
+                _row_amounts(rows, "net cash inflow from financing activities"),
+            )
+        ]
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of cash flows",
+            "Operating, investing, and financing cash flows agree to net increase in cash.",
+            expected,
+            _row_amounts(rows, "net increase in cash and cash equivalents"),
+            tolerance,
+        )
+        performed.append("Statement of cash flows: net cash increase checked.")
+    else:
+        skipped.append("Statement of cash flows: net cash increase skipped because cash flow subtotals were not confidently parsed.")
+    if _has_rows(rows, ("net increase in cash and cash equivalents", "cash and cash equivalents at the beginning of the year", "cash and cash equivalents as at the end of the year")):
+        expected = [
+            a + b
+            for a, b in zip(
+                _row_amounts(rows, "net increase in cash and cash equivalents"),
+                _row_amounts(rows, "cash and cash equivalents at the beginning of the year"),
+            )
+        ]
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of cash flows",
+            "Closing cash agrees to opening cash plus net increase.",
+            expected,
+            _row_amounts(rows, "cash and cash equivalents as at the end of the year"),
+            tolerance,
+        )
+        performed.append("Statement of cash flows: closing cash movement checked.")
+    else:
+        skipped.append("Statement of cash flows: closing cash movement skipped because rows were not confidently parsed.")
+    return findings, performed, skipped
+
+
+def _statement_rows(text: str) -> dict[str, list[Decimal]]:
+    rows: dict[str, list[Decimal]] = {}
+    for line in text.splitlines():
+        amounts = _amounts_from_statement_line(line)
+        if len(amounts) < 2:
+            continue
+        label = _statement_label(line)
+        if label:
+            rows[label] = amounts[-2:]
+    return rows
+
+
+def _statement_label(line: str) -> str:
+    cleaned = _normalise_statement_number_spacing(line)
+    cleaned = re.sub(r"\([^)]*\)", " ", cleaned)
+    cleaned = re.sub(r"\b(?:note|n'?000|000|20\d{2}|\d{1,2}[a-c]?)\b", " ", cleaned, flags=re.I)
+    cleaned = NUMBER_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"[^A-Za-z&/ -]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+    return cleaned.strip(" -")
+
+
+def _normalise_statement_number_spacing(line: str) -> str:
+    cleaned = re.sub(r"(\d)\s+,", r"\1,", line)
+    cleaned = re.sub(r"\b(\d)\s+(\d,\d{3})(?!,)", r"\1\2", cleaned)
+    cleaned = re.sub(r"\b(\d)\s+(\d{2},\d{3})\b", r"\1\2", cleaned)
+    cleaned = re.sub(r"\b(\d)\s+(\d{2,3})\b(?=\s|$)", r"\1\2", cleaned)
+    cleaned = re.sub(r"\(\s+", "(", cleaned)
+    cleaned = re.sub(r"\s+\)", ")", cleaned)
+    return cleaned
+
+
+def _amounts_from_statement_line(line: str) -> list[Decimal]:
+    cleaned = _normalise_statement_number_spacing(line)
+    cleaned = re.sub(r"\s-\s+(?=\(?\s?\d)", " 0 ", cleaned)
+    tokens = re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", cleaned)
+    amounts = [_parse_decimal(token) for token in tokens]
+    amounts = [amount for amount in amounts if amount is not None]
+    return [amount for amount in amounts if abs(amount) < Decimal("100000000")]
+
+
+def _has_rows(rows: dict[str, list[Decimal]], labels: tuple[str, ...]) -> bool:
+    return all(label in rows and len(rows[label]) >= 2 for label in labels)
+
+
+def _row_amounts(rows: dict[str, list[Decimal]], label: str) -> list[Decimal]:
+    return rows.get(label, [])[-2:]
+
+
+def _check_sum_rows(
+    findings: list[Finding],
+    page_number: int,
+    location: str,
+    caption: str,
+    rows: dict[str, list[Decimal]],
+    components: tuple[str, ...],
+    total_label: str,
+    tolerance: Decimal,
+) -> None:
+    expected = [sum(values) for values in zip(*(_row_amounts(rows, label) for label in components))]
+    _check_vector_equation(findings, page_number, location, f"{caption} agrees to component rows.", expected, _row_amounts(rows, total_label), tolerance)
+
+
+def _check_vector_equation(
+    findings: list[Finding],
+    page_number: int,
+    location: str,
+    issue: str,
+    expected: list[Decimal],
+    reported: list[Decimal],
+    tolerance: Decimal,
+) -> None:
+    for index, (expected_value, reported_value) in enumerate(zip(expected, reported), start=1):
+        _check_scalar_equation(findings, page_number, location, f"{issue} Column {index}.", expected_value, reported_value, tolerance)
+
+
+def _check_scalar_equation(
+    findings: list[Finding],
+    page_number: int,
+    location: str,
+    issue: str,
+    expected: Decimal,
+    reported: Decimal,
+    tolerance: Decimal,
+) -> None:
+    diff = reported - expected
+    if abs(diff) <= tolerance:
+        return
+    findings.append(
+        Finding(
+            "Totals and rounding",
+            "High" if abs(diff) > tolerance * 5 else "Medium",
+            f"Page {page_number} | {location}",
+            issue,
+            f"Expected {expected:,}; reported {reported:,}; difference {diff:,}.",
+            "Review the line-extracted primary statement totals against the signed financial statements.",
+        )
+    )
 
 
 def _check_industry_policy_fit(findings: list[Finding], document: PdfDocument, profile: CompanyProfile) -> None:
