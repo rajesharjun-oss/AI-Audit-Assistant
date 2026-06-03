@@ -1,12 +1,8 @@
 from decimal import Decimal
 
+from extraction import _line_to_table_row, _reconstruct_ocr_tables
+from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
-    CompanyProfile,
-    PdfDocument,
-    PdfPage,
-    ReviewOptions,
-    _line_to_table_row,
-    _reconstruct_ocr_tables,
     check_formatting,
     check_extraction_quality,
     check_notes_agreement,
@@ -39,6 +35,29 @@ def test_rounding_check_flags_bad_visible_total():
 
     assert findings
     assert findings[0].category == "Totals and rounding"
+
+
+def test_note_column_is_not_treated_as_amount_column():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "",
+                [
+                    [
+                        ["Description", "Note", "2025", "2024"],
+                        ["Revenue", "5", "100", "90"],
+                        ["Other income", "6", "50", "40"],
+                        ["Total income", "99", "150", "130"],
+                    ]
+                ],
+            )
+        ]
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert findings == []
 
 
 def test_notes_check_flags_missing_note_heading():

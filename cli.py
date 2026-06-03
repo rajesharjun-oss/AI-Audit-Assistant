@@ -3,7 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from reviewer import CompanyProfile, ReviewOptions, findings_to_markdown, review_pdf
+from models import CompanyProfile, ReviewOptions
+from reviewer import findings_to_markdown, review_pdf
 
 
 def main() -> int:

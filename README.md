@@ -45,6 +45,14 @@ The checks are intentionally transparent and conservative:
 
 The bundled checklist is a starter engine, not a full licensed IFRS disclosure checklist. Expand `STANDARD_CHECKLIST` in `reviewer.py` with your firm's detailed disclosure requirements and evidence phrases.
 
+## Code structure
+
+- `models.py` contains shared dataclasses for documents, findings, profile inputs, and review options.
+- `extraction.py` handles PDF text extraction, OCR fallback, and OCR table reconstruction.
+- `reviewer.py` coordinates deterministic review checks and report text.
+- `app.py` provides the Streamlit interface.
+- `cli.py` provides batch review from the command line.
+
 ## OCR prerequisites
 
 Install Tesseract OCR locally and ensure `tesseract.exe` is on PATH. On this workstation the app also checks the standard Windows install path:

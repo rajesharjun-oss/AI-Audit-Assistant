@@ -1,101 +1,18 @@
 from __future__ import annotations
 
 import re
-import shutil
-import warnings
 from collections import Counter, defaultdict
-from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from io import BytesIO
 from pathlib import Path
 
-import fitz
-import pdfplumber
-import pytesseract
-from PIL import Image
-from pypdf import PdfReader
+from extraction import extract_pdf, extract_pdf_with_ocr
+from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, ReviewOptions, ReviewResult
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
 YEAR_RE = re.compile(r"\b20\d{2}\b")
 NOTE_REF_RE = re.compile(r"\bnote\s+(\d+[A-Za-z]?)\b|\bnotes?\s+(\d+[A-Za-z]?)\b", re.I)
 NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s*[\).:-]?\s+(.{3,100})$", re.I)
-
-
-@dataclass
-class PdfPage:
-    number: int
-    text: str
-    tables: list[list[list[str]]]
-
-
-@dataclass
-class PdfDocument:
-    pages: list[PdfPage]
-    ocr_used: bool = False
-    ocr_pages: int = 0
-    ocr_tables: int = 0
-    ocr_error: str = ""
-
-    @property
-    def text(self) -> str:
-        return "\n\n".join(page.text for page in self.pages if page.text)
-
-    @property
-    def text_pages(self) -> int:
-        return sum(1 for page in self.pages if page.text.strip())
-
-    @property
-    def text_chars(self) -> int:
-        return sum(len(page.text.strip()) for page in self.pages)
-
-    @property
-    def extraction_coverage(self) -> float:
-        return self.text_pages / len(self.pages) if self.pages else 0.0
-
-
-@dataclass
-class Finding:
-    category: str
-    severity: str
-    location: str
-    issue: str
-    evidence: str
-    recommendation: str
-
-
-@dataclass
-class ReviewResult:
-    findings: list[Finding]
-    metrics: dict[str, int | str]
-
-
-@dataclass
-class CompanyProfile:
-    company_name: str = ""
-    industry: str = ""
-    reporting_currency: str = ""
-    expected_policies: tuple[str, ...] = ()
-    significant_transactions: tuple[str, ...] = ()
-    presentation_standard: str = "IFRS"
-    checklist_areas: tuple[str, ...] = ()
-
-
-@dataclass
-class ReviewOptions:
-    use_ocr: bool = False
-    ocr_max_pages: int | None = 60
-    ocr_dpi: int = 200
-
-
-@dataclass(frozen=True)
-class ChecklistItem:
-    standard: str
-    area: str
-    requirement: str
-    applies_when: tuple[str, ...]
-    evidence_keywords: tuple[str, ...]
-    severity: str = "Medium"
 
 
 POLICY_RULES = {
@@ -305,53 +222,6 @@ STANDARD_CHECKLIST = (
 )
 
 
-def extract_pdf(path: str | Path) -> PdfDocument:
-    path = Path(path)
-    fast_pages = _extract_text_fast(path)
-    if fast_pages is not None and not any(page.text.strip() for page in fast_pages):
-        return PdfDocument(fast_pages)
-
-    pages: list[PdfPage] = []
-    with pdfplumber.open(str(path)) as pdf:
-        for index, page in enumerate(pdf.pages, start=1):
-            fast_text = fast_pages[index - 1].text if fast_pages and index - 1 < len(fast_pages) else ""
-            if not fast_text.strip():
-                pages.append(PdfPage(index, "", []))
-                continue
-            text = page.extract_text(x_tolerance=1, y_tolerance=3) or fast_text
-            tables = page.extract_tables() if text.strip() else []
-            cleaned_tables = [
-                [[_clean_cell(cell) for cell in row] for row in table if any(row)]
-                for table in (tables or [])
-            ]
-            pages.append(PdfPage(index, text, cleaned_tables))
-    return PdfDocument(pages)
-
-
-def _extract_text_fast(path: Path) -> list[PdfPage] | None:
-    try:
-        reader = PdfReader(str(path))
-        pages = []
-        for index, page in enumerate(reader.pages, start=1):
-            if not _page_has_font_resources(page):
-                pages.append(PdfPage(index, "", []))
-                continue
-            pages.append(PdfPage(index, page.extract_text() or "", []))
-        return pages
-    except Exception:
-        return None
-
-
-def _page_has_font_resources(page: object) -> bool:
-    try:
-        resources = page.get("/Resources") or {}
-        if hasattr(resources, "get_object"):
-            resources = resources.get_object()
-        return bool(resources.get("/Font"))
-    except Exception:
-        return True
-
-
 def review_pdf(
     path: str | Path,
     profile: CompanyProfile | None = None,
@@ -454,162 +324,6 @@ def _requires_ocr(document: PdfDocument) -> bool:
     return document.text_chars < 1000 or document.extraction_coverage < 0.25
 
 
-def extract_pdf_with_ocr(
-    path: str | Path,
-    base_document: PdfDocument | None = None,
-    options: ReviewOptions | None = None,
-) -> PdfDocument:
-    options = options or ReviewOptions(use_ocr=True)
-    base_document = base_document or extract_pdf(path)
-    executable = _resolve_tesseract()
-    if not executable:
-        return PdfDocument(
-            base_document.pages,
-            ocr_used=False,
-            ocr_pages=0,
-            ocr_tables=0,
-            ocr_error="Tesseract OCR executable was not found on PATH or in the standard local install folder.",
-        )
-    pytesseract.pytesseract.tesseract_cmd = executable
-
-    pages: list[PdfPage] = []
-    ocr_pages = 0
-    max_pages = options.ocr_max_pages if options.ocr_max_pages and options.ocr_max_pages > 0 else None
-    try:
-        source = fitz.open(str(path))
-        try:
-            for index, page in enumerate(source, start=1):
-                existing = base_document.pages[index - 1] if index - 1 < len(base_document.pages) else PdfPage(index, "", [])
-                if existing.text.strip() and len(existing.text.strip()) >= 100:
-                    pages.append(existing)
-                    continue
-                if max_pages is not None and ocr_pages >= max_pages:
-                    pages.append(existing)
-                    continue
-                text, tables = _ocr_page(page, options.ocr_dpi)
-                pages.append(PdfPage(index, text, tables))
-                ocr_pages += 1
-        finally:
-            source.close()
-    except Exception as exc:
-        return PdfDocument(
-            base_document.pages,
-            ocr_used=True,
-            ocr_pages=ocr_pages,
-            ocr_tables=sum(len(page.tables) for page in pages),
-            ocr_error=f"OCR failed after {ocr_pages} page(s): {exc}",
-        )
-    return PdfDocument(
-        pages,
-        ocr_used=ocr_pages > 0,
-        ocr_pages=ocr_pages,
-        ocr_tables=sum(len(page.tables) for page in pages),
-    )
-
-
-def _ocr_page(page: object, dpi: int) -> tuple[str, list[list[list[str]]]]:
-    dpi = max(120, min(dpi, 300))
-    matrix = fitz.Matrix(dpi / 72, dpi / 72)
-    pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-    with Image.open(BytesIO(pixmap.tobytes("png"))) as image:
-        image = image.convert("L")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            data = pytesseract.image_to_data(image, config="--oem 3 --psm 6", output_type=pytesseract.Output.DICT)
-    lines = _ocr_lines_from_data(data)
-    text = "\n".join(line["text"] for line in lines)
-    tables = _reconstruct_ocr_tables(lines)
-    return text, tables
-
-
-def _ocr_lines_from_data(data: dict[str, list[object]]) -> list[dict[str, object]]:
-    grouped: dict[tuple[int, int, int], list[dict[str, object]]] = defaultdict(list)
-    total = len(data.get("text", []))
-    for index in range(total):
-        token = str(data["text"][index] or "").strip()
-        if not token:
-            continue
-        try:
-            confidence = float(data.get("conf", ["-1"])[index])
-        except ValueError:
-            confidence = -1
-        if confidence < 20:
-            continue
-        word = {
-            "text": token,
-            "left": int(data["left"][index]),
-            "top": int(data["top"][index]),
-            "width": int(data["width"][index]),
-            "height": int(data["height"][index]),
-        }
-        key = (
-            int(data.get("block_num", [0])[index]),
-            int(data.get("par_num", [0])[index]),
-            int(data.get("line_num", [0])[index]),
-        )
-        grouped[key].append(word)
-
-    lines: list[dict[str, object]] = []
-    for words in grouped.values():
-        words.sort(key=lambda item: int(item["left"]))
-        line_text = " ".join(str(word["text"]) for word in words)
-        lines.append(
-            {
-                "text": line_text,
-                "top": min(int(word["top"]) for word in words),
-                "left": min(int(word["left"]) for word in words),
-                "bottom": max(int(word["top"]) + int(word["height"]) for word in words),
-                "words": words,
-            }
-        )
-    lines.sort(key=lambda item: (int(item["top"]), int(item["left"])))
-    return lines
-
-
-def _reconstruct_ocr_tables(lines: list[dict[str, object]]) -> list[list[list[str]]]:
-    rows: list[list[str]] = []
-    for line in lines:
-        row = _line_to_table_row(str(line["text"]))
-        if row:
-            rows.append(row)
-    if sum(1 for row in rows if len(row) >= 2) < 3:
-        return []
-    return [rows]
-
-
-def _line_to_table_row(line: str) -> list[str] | None:
-    cleaned = re.sub(r"\s+", " ", line).strip()
-    if not cleaned:
-        return None
-    lower = cleaned.lower()
-    if "docusign envelope" in lower or "envelope id" in lower:
-        return None
-    matches = list(NUMBER_RE.finditer(cleaned))
-    if len(matches) < 2:
-        return None
-    first = matches[0]
-    label = cleaned[: first.start()].strip(" .:-")
-    if not label:
-        return None
-    amounts = [match.group(0).strip() for match in matches]
-    if len(amounts) >= 3 and _looks_like_note_column(amounts[0]):
-        amounts = amounts[1:]
-    return [label, *amounts]
-
-
-def _looks_like_note_column(value: str) -> bool:
-    parsed = _parse_decimal(value)
-    return parsed is not None and parsed == parsed.to_integral_value() and Decimal("1") <= parsed <= Decimal("99")
-
-
-def _resolve_tesseract() -> str:
-    executable = shutil.which("tesseract")
-    if executable:
-        return executable
-    candidate = Path.home() / "AppData" / "Local" / "Programs" / "Tesseract-OCR" / "tesseract.exe"
-    return str(candidate) if candidate.exists() else ""
-
-
 def check_standard_checklist(document: PdfDocument, profile: CompanyProfile) -> list[Finding]:
     if profile.presentation_standard.upper() != "IFRS":
         return []
@@ -665,9 +379,12 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
         for table_index, table in enumerate(page.tables, start=1):
             if len(table) < 3:
                 continue
-            rows = [_numeric_row(row) for row in table]
+            note_cols = _note_columns(table)
+            rows = [_numeric_row(row, note_cols) for row in table]
             max_cols = max((len(row) for row in rows), default=0)
             for col in range(1, max_cols):
+                if col in note_cols:
+                    continue
                 _check_vertical_totals(findings, page.number, table_index, rows, col, tolerance)
             _check_cross_footings(findings, page.number, table_index, rows, tolerance)
             _check_column_consistency(findings, page.number, table_index, table)
@@ -975,7 +692,7 @@ def _check_vertical_totals(
 ) -> None:
     subtotal_rows: list[tuple[int, Decimal]] = []
     running: list[Decimal] = []
-    for row_index, row in enumerate(rows):
+    for row_index, row in enumerate(rows[1:], start=1):
         label = str(row[0]).lower() if row else ""
         value = row[col] if col < len(row) else None
         if not isinstance(value, Decimal):
@@ -1293,15 +1010,22 @@ def _detect_rounding_scale(text: str) -> tuple[str, Decimal]:
     return "units", Decimal("1")
 
 
-def _clean_cell(cell: object) -> str:
-    return str(cell or "").replace("\n", " ").strip()
+def _note_columns(table: list[list[str]]) -> set[int]:
+    if not table:
+        return set()
+    header = table[0]
+    return {index for index, cell in enumerate(header) if str(cell).strip().lower() in {"note", "notes", "ref", "reference"}}
 
 
-def _numeric_row(row: list[str]) -> list[str | Decimal | None]:
+def _numeric_row(row: list[str], note_cols: set[int] | None = None) -> list[str | Decimal | None]:
+    note_cols = note_cols or set()
     converted: list[str | Decimal | None] = []
     for index, cell in enumerate(row):
         if index == 0:
             converted.append(cell)
+            continue
+        if index in note_cols:
+            converted.append(None)
             continue
         converted.append(_parse_decimal(cell))
     return converted

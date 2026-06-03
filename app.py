@@ -6,7 +6,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from reviewer import CompanyProfile, ReviewOptions, build_ai_review_memo, findings_to_markdown, review_pdf
+from models import CompanyProfile, ReviewOptions
+from reviewer import build_ai_review_memo, findings_to_markdown, review_pdf
 
 
 st.set_page_config(page_title="AI Audit Assistant", layout="wide", initial_sidebar_state="expanded")
