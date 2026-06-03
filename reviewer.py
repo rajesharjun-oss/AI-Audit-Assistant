@@ -409,6 +409,7 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
     findings: list[Finding] = []
     scale_label, scale_tolerance = _detect_rounding_scale(document.text)
     tolerance = tolerance if tolerance is not None else scale_tolerance
+    tolerance = max(tolerance, Decimal("1"))
 
     if scale_label == "mixed":
         findings.append(
@@ -779,8 +780,15 @@ def _check_vertical_totals(
 ) -> None:
     subtotal_rows: list[tuple[int, Decimal]] = []
     running: list[Decimal] = []
+    expected_amount_count = _common_amount_count(rows)
     for row_index, row in enumerate(rows[1:], start=1):
         label = str(row[0]).lower() if row else ""
+        if _is_table_boundary_row(row):
+            running = []
+            continue
+        if expected_amount_count and _row_amount_count(row) not in {0, expected_amount_count}:
+            running = []
+            continue
         value = row[col] if col < len(row) else None
         if not isinstance(value, Decimal):
             continue
@@ -1225,6 +1233,49 @@ def _looks_like_total(label: str) -> bool:
 def _looks_like_amount_line(label: str) -> bool:
     excluded = ("note", "year", "date", "audited", "restated")
     return bool(label.strip()) and not any(word in label for word in excluded)
+
+
+def _is_table_boundary_row(row: list[str | Decimal | None]) -> bool:
+    text = " ".join(str(cell or "") for cell in row).strip()
+    lower = re.sub(r"\s+", " ", text.lower())
+    if not lower:
+        return True
+    heading_match = NOTE_HEADING_RE.match(text)
+    if heading_match and _valid_note_heading(heading_match.group(1), heading_match.group(2)):
+        return True
+    header_phrases = (
+        "note (s)",
+        "note(s)",
+        "n' 000",
+        "n'000",
+        "2025 2024",
+        "held to maturity",
+        "receivables & advances",
+        "receivables and advances",
+        "december 31",
+        "for the year ended",
+    )
+    if any(phrase in lower for phrase in header_phrases):
+        return True
+    label = str(row[0] or "").strip().lower() if row else ""
+    values = [cell for cell in row[1:] if isinstance(cell, Decimal)]
+    label_has_line_text = bool(re.search(r"[a-z]{3,}", label)) and _looks_like_amount_line(label)
+    if values and not label_has_line_text:
+        return True
+    if YEAR_RE.search(lower) and len(values) <= 1:
+        return True
+    return False
+
+
+def _common_amount_count(rows: list[list[str | Decimal | None]]) -> int:
+    counts = [_row_amount_count(row) for row in rows[1:] if _row_amount_count(row)]
+    if not counts:
+        return 0
+    return Counter(counts).most_common(1)[0][0]
+
+
+def _row_amount_count(row: list[str | Decimal | None]) -> int:
+    return sum(1 for cell in row[1:] if isinstance(cell, Decimal))
 
 
 def _check_adjacent_totals(

@@ -147,6 +147,63 @@ def test_generic_arithmetic_skips_ocr_reconstructed_tables():
     assert not any("does not agree" in finding.issue.lower() for finding in findings)
 
 
+def test_arithmetic_respects_repeated_table_headers_in_note_blocks():
+    document = PdfDocument(
+        [
+            PdfPage(
+                20,
+                "Notes to the financial statements\nN'000",
+                [
+                    [
+                        ["December", "31", "2025"],
+                        ["N'", "000", "000"],
+                        ["Trade and other receivable", "288,706", "288,706"],
+                        ["Cash", "875,869", "875,869"],
+                        ["Note (s) N'", "000", "000"],
+                        ["Trade and other payables", "141,411", "141,411"],
+                        ["Note (s) N'", "000", "000"],
+                        ["Trade and other payables", "154,819", "154,819"],
+                        ["Note (s) N'", "000", "000"],
+                        ["Trade and other payables", "141,411", "1", "54,819"],
+                        ["Total Liabilities", "141,411", "154,819"],
+                    ]
+                ],
+            )
+        ]
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert not any("does not agree" in finding.issue.lower() for finding in findings)
+
+
+def test_arithmetic_stops_when_new_note_heading_starts():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "",
+                [
+                    [
+                        ["Description", "2025"],
+                        ["Other payables", "127,575"],
+                        ["Withholding tax - State", "7,968"],
+                        ["Accrued fees", "5,869"],
+                        ["Total", "141,411"],
+                        ["20 Receivables & Advances", ""],
+                        ["Receivables", "2,000,000"],
+                        ["Total", "2,000,000"],
+                    ]
+                ],
+            )
+        ]
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert not any("visible sum 2,141,411" in finding.evidence for finding in findings)
+
+
 def test_notes_check_flags_missing_note_heading():
     document = PdfDocument([PdfPage(1, "Revenue Note 7 100\nProfit for the year 40", [])])
 
