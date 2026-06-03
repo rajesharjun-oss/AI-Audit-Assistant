@@ -300,6 +300,95 @@ def test_policy_check_flags_industry_mismatch_and_superseded_standard():
     assert any("superseded" in finding.issue.lower() for finding in findings)
 
 
+def test_currency_check_ignores_generic_policy_currency_words():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Accounting policies\nForeign currency transactions may be denominated in Dollar or Euro as examples.\nStatement of financial position\nPresented in N'000",
+                [],
+            )
+        ]
+    )
+
+    findings = check_formatting(document, CompanyProfile())
+
+    assert not any("currency marker" in finding.issue.lower() for finding in findings)
+
+
+def test_superseded_standard_context_classifies_current_policy_as_high_and_transition_as_low():
+    current_policy = PdfDocument(
+        [PdfPage(1, "Accounting policies\nFinancial instruments are accounted for under IAS 39.", [])]
+    )
+    transition_note = PdfDocument(
+        [PdfPage(2, "New and amended standards\nIAS 39 was replaced by IFRS 9 and is discussed as transition history.", [])]
+    )
+
+    current_findings = check_policy_relevance(current_policy, CompanyProfile())
+    transition_findings = check_policy_relevance(transition_note, CompanyProfile())
+
+    assert any(finding.severity == "High" and "Page 1" in finding.location for finding in current_findings)
+    assert any(finding.severity == "Low" and "Page 2" in finding.location for finding in transition_findings)
+    assert all("Context:" in finding.evidence for finding in current_findings if finding.category == "Accounting policies")
+
+
+def test_consolidation_policy_is_not_triggered_by_generic_group_wording():
+    document = PdfDocument(
+        [PdfPage(1, "Accounting policies\nThe group of standards issued by the IASB is reviewed annually.", [])]
+    )
+
+    findings = check_policy_relevance(document, CompanyProfile())
+
+    assert not any("consolidation-related" in finding.issue.lower() for finding in findings)
+
+
+def test_ocr_sfp_statement_specific_checks_run_only_on_confident_rows():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\n" + ("Non-current assets current assets total assets equity liabilities\n" * 80),
+                [
+                    [
+                        ["Description", "2025"],
+                        ["Non-current assets", "100"],
+                        ["Current assets", "50"],
+                        ["Total assets", "153"],
+                        ["Equity", "60"],
+                        ["Liabilities", "90"],
+                        ["Total equity and liabilities", "150"],
+                    ]
+                ],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert any("Non-current assets + current assets" in finding.issue for finding in findings)
+
+
+def test_ocr_sfp_statement_specific_checks_skip_low_confidence_rows():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nTotal assets ########",
+                [[["Description", "2025"], ["Non-current assets", "100 50"], ["Total assets", "150"]]],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert any("statement-specific ocr checks were skipped" in finding.issue.lower() for finding in findings)
+    assert not any(finding.category == "Totals and rounding" for finding in findings)
+
+
 def test_formatting_flags_missing_comparative_period():
     document = PdfDocument(
         [

@@ -388,13 +388,14 @@ def check_standard_checklist(document: PdfDocument, profile: CompanyProfile) -> 
         hits = [keyword for keyword in item.evidence_keywords if keyword in text]
         required_hits = len(item.evidence_keywords) if not item.applies_when else min(2, len(item.evidence_keywords))
         if len(hits) < required_hits:
+            location, snippet = _first_keyword_context(document, item.applies_when or item.evidence_keywords or (item.area,))
             findings.append(
                 Finding(
                     "Standards checklist",
                     item.severity,
-                    item.standard,
+                    f"{item.standard} | {location}",
                     f"Potential missing or incomplete {item.standard} disclosure: {item.area}.",
-                    f"Checklist expectation: {item.requirement} Detected evidence: {', '.join(hits) if hits else 'none'}.",
+                    f"Checklist expectation: {item.requirement} Detected evidence: {', '.join(hits) if hits else 'none'}. Context: {snippet}",
                     "Review the disclosure against the applicable standard and add the missing policy, note, reconciliation, or judgement disclosure if applicable.",
                 )
             )
@@ -436,6 +437,7 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                     "Use the reconstructed tables as review evidence, but rely on statement-specific checks or manual review for scanned statements.",
                 )
             )
+        findings.extend(_check_ocr_statement_of_financial_position(document, tolerance))
         return findings
 
     for page in document.pages:
@@ -470,10 +472,10 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
 def check_formatting(document: PdfDocument, profile: CompanyProfile) -> list[Finding]:
     text = document.text
     findings: list[Finding] = []
-    currency_symbols = re.findall(r"\bUSD\b|\bNGN\b|\bGBP\b|\bEUR\b|US\$|Naira|Dollar|Pound|Euro|\$", text, flags=re.I)
+    currency_symbols = _contextual_currency_markers(document)
     if profile.reporting_currency:
         expected = profile.reporting_currency.upper()
-        unexpected = [symbol for symbol in currency_symbols if symbol.upper() != expected]
+        unexpected = [symbol for symbol in currency_symbols if _normalise_currency_marker(symbol) != expected]
         if unexpected:
             findings.append(
                 Finding(
@@ -481,18 +483,18 @@ def check_formatting(document: PdfDocument, profile: CompanyProfile) -> list[Fin
                     "Medium",
                     "Document-wide",
                     "Multiple or unexpected currency markers appear in the report.",
-                    f"Expected {expected}; observed {dict(Counter(symbol.upper() for symbol in currency_symbols))}.",
+                    f"Expected {expected}; observed {dict(Counter(_normalise_currency_marker(symbol) for symbol in currency_symbols))}.",
                     "Confirm the presentation currency and standardise currency labels in statements, notes, and headers.",
                 )
             )
-    elif len(set(symbol.upper() for symbol in currency_symbols)) > 1:
+    elif len(set(_normalise_currency_marker(symbol) for symbol in currency_symbols)) > 1:
         findings.append(
             Finding(
                 "Formatting",
                 "Low",
                 "Document-wide",
                 "The report appears to use more than one currency marker.",
-                f"Observed {dict(Counter(symbol.upper() for symbol in currency_symbols))}.",
+                f"Observed in statement/table currency contexts: {dict(Counter(_normalise_currency_marker(symbol) for symbol in currency_symbols))}.",
                 "Confirm whether mixed currencies are intentional and clearly labelled.",
             )
         )
@@ -637,34 +639,36 @@ def check_policy_relevance(document: PdfDocument, profile: CompanyProfile) -> li
 
     for policy_name, rule in POLICY_RULES.items():
         policy_present = any(keyword in text for keyword in rule["policy"])
-        evidence_present = any(keyword in text for keyword in rule["evidence"])
+        evidence_present = _policy_evidence_present(policy_name, rule["evidence"], text)
         explicitly_expected = policy_name in expected or policy_name in significant
         if policy_present and not evidence_present and not explicitly_expected:
+            location, snippet = _first_keyword_context(document, rule["policy"])
             findings.append(
                 Finding(
                     "Accounting policies",
                     "Medium",
-                    "Accounting policies note",
+                    location,
                     f"The {policy_name} policy is disclosed, but matching balances or activity were not detected.",
-                    f"Policy indicators: {', '.join(rule['policy'][:3])}.",
+                    f"Policy indicators: {', '.join(rule['policy'][:3])}. Context: {snippet}",
                     "Remove boilerplate policy wording if it does not apply, or add the missing related disclosure if it does apply.",
                 )
             )
         if (evidence_present or explicitly_expected) and not policy_present:
+            location, snippet = _first_keyword_context(document, rule["evidence"])
             findings.append(
                 Finding(
                     "Accounting policies",
                     "Medium",
-                    "Accounting policies note",
+                    location,
                     f"The report contains {policy_name}-related balances or expected transactions, but the matching accounting policy was not detected.",
-                    f"Evidence indicators: {', '.join(rule['evidence'][:4])}.",
+                    f"Evidence indicators: {', '.join(rule['evidence'][:4])}. Context: {snippet}",
                     "Add or cross-reference the applicable accounting policy.",
                 )
             )
 
-    _check_industry_policy_fit(findings, text, profile)
-    _check_superseded_standards(findings, text)
-    _check_boilerplate_policy_language(findings, text)
+    _check_industry_policy_fit(findings, document, profile)
+    _check_superseded_standards(findings, document)
+    _check_boilerplate_policy_language(findings, document)
     if profile.company_name and profile.company_name.lower() not in text:
         findings.append(
             Finding(
@@ -1034,10 +1038,11 @@ def _check_depreciation_note(findings: list[Finding], ref: str, section: str, to
         )
 
 
-def _check_industry_policy_fit(findings: list[Finding], text: str, profile: CompanyProfile) -> None:
+def _check_industry_policy_fit(findings: list[Finding], document: PdfDocument, profile: CompanyProfile) -> None:
     industry = profile.industry.lower().strip()
     if not industry:
         return
+    text = document.text.lower()
     mismatches: tuple[str, ...] = ()
     for key, policies in INDUSTRY_POLICY_MISMATCHES.items():
         if key in industry:
@@ -1045,46 +1050,234 @@ def _check_industry_policy_fit(findings: list[Finding], text: str, profile: Comp
             break
     for policy in mismatches:
         if policy in text:
+            location, snippet = _first_keyword_context(document, (policy,))
             findings.append(
                 Finding(
                     "Accounting policies",
                     "High",
-                    "Accounting policies note",
+                    location,
                     f"The {policy} policy appears inconsistent with the stated industry.",
-                    f"Industry: {profile.industry}; detected policy phrase: {policy}.",
+                    f"Industry: {profile.industry}; detected policy phrase: {policy}. Context: {snippet}",
                     "Tailor the policy note to the entity and remove industry-irrelevant boilerplate unless the company actually has this activity.",
                 )
             )
 
 
-def _check_superseded_standards(findings: list[Finding], text: str) -> None:
+def _check_superseded_standards(findings: list[Finding], document: PdfDocument) -> None:
     for reference, message in SUPERSEDED_REFERENCES.items():
-        if reference in text:
+        for page in document.pages:
+            snippet = _snippet_around(page.text, reference)
+            if not snippet:
+                continue
+            context = _superseded_reference_context(snippet)
+            severity = "High" if context == "current policy" else "Low"
             findings.append(
                 Finding(
                     "Accounting policies",
-                    "High",
-                    "Accounting policies note",
-                    f"Reference to superseded accounting guidance detected: {reference.upper()}.",
-                    message,
-                    "Update the accounting policy wording to current applicable standards and confirm transition disclosures where relevant.",
+                    severity,
+                    f"Page {page.number}",
+                    f"Reference to superseded accounting guidance detected: {reference.upper()} ({context}).",
+                    f"{message} Context: {snippet}",
+                    "If this is current accounting policy wording, update it to current applicable standards. If it is transition history, confirm the disclosure is clearly historical.",
                 )
             )
+            break
 
 
-def _check_boilerplate_policy_language(findings: list[Finding], text: str) -> None:
+def _check_boilerplate_policy_language(findings: list[Finding], document: PdfDocument) -> None:
+    text = document.text.lower()
     hits = [phrase for phrase in GENERIC_POLICY_PHRASES if phrase in text]
     if len(hits) >= 2:
+        location, snippet = _first_keyword_context(document, tuple(hits))
         findings.append(
             Finding(
                 "Accounting policies",
                 "Low",
-                "Accounting policies note",
+                location,
                 "Policy wording appears generic or boilerplate.",
-                f"Detected generic phrases: {', '.join(hits[:4])}.",
+                f"Detected generic phrases: {', '.join(hits[:4])}. Context: {snippet}",
                 "Tailor the policy wording to the entity's actual transactions, estimates, judgements, and measurement bases.",
             )
         )
+
+
+def _contextual_currency_markers(document: PdfDocument) -> list[str]:
+    markers: list[str] = []
+    currency_re = re.compile(r"\bUSD\b|\bNGN\b|\bGBP\b|\bEUR\b|US\$|\bNaira\b|\bDollar\b|\bPound\b|\bEuro\b|\$", re.I)
+    context_re = re.compile(
+        r"statement of|presentation currency|functional currency|expressed in|presented in|currency:|n'000|ngn'000|usd'000",
+        re.I,
+    )
+    ignore_re = re.compile(r"accounting polic|ifrs|ias |risk|example|foreign currency translation|amendment|standard", re.I)
+    for page in document.pages:
+        for line in page.text.splitlines():
+            if not currency_re.search(line):
+                continue
+            if ignore_re.search(line) and not context_re.search(line):
+                continue
+            if context_re.search(line):
+                markers.extend(currency_re.findall(line))
+        for table in page.tables:
+            header_text = " ".join(" ".join(row) for row in table[:2])
+            if currency_re.search(header_text) or re.search(r"n' ?000|ngn", header_text, re.I):
+                markers.extend(currency_re.findall(header_text))
+    return markers
+
+
+def _normalise_currency_marker(marker: str) -> str:
+    marker_upper = marker.upper()
+    if marker_upper in {"NAIRA", "NGN"}:
+        return "NGN"
+    if marker_upper in {"DOLLAR", "US$", "$", "USD"}:
+        return "USD"
+    if marker_upper == "POUND":
+        return "GBP"
+    if marker_upper == "EURO":
+        return "EUR"
+    return marker_upper
+
+
+def _policy_evidence_present(policy_name: str, evidence_keywords: tuple[str, ...], text: str) -> bool:
+    if policy_name == "consolidation":
+        group_indicators = (
+            "consolidated statement",
+            "consolidated financial statements",
+            "non-controlling interest",
+            "investment in subsidiary",
+            "subsidiary investment",
+            "investment in subsidiaries",
+            "parent company",
+        )
+        return any(indicator in text for indicator in group_indicators)
+    return any(keyword in text for keyword in evidence_keywords)
+
+
+def _first_keyword_context(document: PdfDocument, keywords: tuple[str, ...]) -> tuple[str, str]:
+    for page in document.pages:
+        lower = page.text.lower()
+        for keyword in keywords:
+            if keyword and keyword.lower() in lower:
+                return f"Page {page.number}", _snippet_around(page.text, keyword)
+    return "Document-wide", "No specific page context located."
+
+
+def _snippet_around(text: str, needle: str, radius: int = 120) -> str:
+    match = re.search(re.escape(needle), text, flags=re.I)
+    if not match:
+        return ""
+    start = max(0, match.start() - radius)
+    end = min(len(text), match.end() + radius)
+    snippet = re.sub(r"\s+", " ", text[start:end]).strip()
+    return snippet[:280]
+
+
+def _superseded_reference_context(snippet: str) -> str:
+    lower = snippet.lower()
+    historical_terms = (
+        "new standard",
+        "new and amended",
+        "amendment",
+        "effective for annual",
+        "not yet effective",
+        "transition",
+        "replaced",
+        "superseded",
+        "prior year",
+        "previously",
+    )
+    policy_terms = ("accounted for", "is measured", "are measured", "recognised under", "recognized under", "policy")
+    if any(term in lower for term in historical_terms):
+        return "historical/new-standard discussion"
+    if any(term in lower for term in policy_terms):
+        return "current policy"
+    return "context requires review"
+
+
+def _check_ocr_statement_of_financial_position(document: PdfDocument, tolerance: Decimal) -> list[Finding]:
+    if document.extraction_confidence < 80:
+        return [
+            Finding(
+                "Extraction quality",
+                "Low",
+                "OCR statement-specific checks",
+                "Statement-specific OCR checks were skipped because extraction confidence is low.",
+                f"Extraction confidence: {document.extraction_confidence}%.",
+                "Improve OCR quality or use a clean text PDF before relying on scanned statement casting checks.",
+            )
+        ]
+    for page in document.pages:
+        if "statement of financial position" not in page.text.lower() and not _page_has_sfp_rows(page):
+            continue
+        for table_index, table in enumerate(page.tables, start=1):
+            row_map = _sfp_row_amounts(table)
+            required = ("non-current assets", "current assets", "total assets", "equity", "liabilities", "total equity and liabilities")
+            if not all(key in row_map for key in required):
+                continue
+            return _check_sfp_equations(page.number, table_index, row_map, tolerance)
+    return [
+        Finding(
+            "Extraction quality",
+            "Low",
+            "OCR statement-specific checks",
+            "Statement-specific OCR checks were skipped because a high-confidence SFP row set was not detected.",
+            "Required rows: non-current assets, current assets, total assets, equity, liabilities, and total equity and liabilities.",
+            "Use OCR output for navigation, but do not rely on scanned SFP arithmetic until row extraction is structured.",
+        )
+    ]
+
+
+def _page_has_sfp_rows(page: PdfPage) -> bool:
+    lower = page.text.lower()
+    return "total assets" in lower and "total equity" in lower and "liabilities" in lower
+
+
+def _sfp_row_amounts(table: list[list[str]]) -> dict[str, Decimal]:
+    if _table_has_merged_numeric_cells(table) or not _table_shape_confident(table):
+        return {}
+    rows = [_numeric_row(row, _note_columns(table)) for row in table]
+    mapped: dict[str, Decimal] = {}
+    for row in rows:
+        label = str(row[0] or "").lower()
+        values = [cell for cell in row[1:] if isinstance(cell, Decimal)]
+        if not values:
+            continue
+        amount = values[0]
+        if "non-current assets" in label or "non current assets" in label:
+            mapped["non-current assets"] = amount
+        elif "current assets" in label and "non" not in label:
+            mapped["current assets"] = amount
+        elif "total assets" in label:
+            mapped["total assets"] = amount
+        elif label.strip() in {"equity", "total equity", "shareholders' equity", "members fund", "members' fund"}:
+            mapped["equity"] = amount
+        elif label.strip() in {"liabilities", "total liabilities"}:
+            mapped["liabilities"] = amount
+        elif "total equity and liabilities" in label or "total liabilities and equity" in label:
+            mapped["total equity and liabilities"] = amount
+    return mapped
+
+
+def _check_sfp_equations(page_number: int, table_index: int, rows: dict[str, Decimal], tolerance: Decimal) -> list[Finding]:
+    findings: list[Finding] = []
+    equations = (
+        ("Non-current assets + current assets should equal total assets.", rows["non-current assets"] + rows["current assets"], rows["total assets"]),
+        ("Equity + liabilities should equal total equity and liabilities.", rows["equity"] + rows["liabilities"], rows["total equity and liabilities"]),
+        ("Total assets should equal total equity and liabilities.", rows["total assets"], rows["total equity and liabilities"]),
+    )
+    for issue, expected, reported in equations:
+        diff = reported - expected
+        if abs(diff) > tolerance:
+            findings.append(
+                Finding(
+                    "Totals and rounding",
+                    "High" if abs(diff) > tolerance * 5 else "Medium",
+                    f"Page {page_number}, OCR SFP table {table_index}",
+                    issue,
+                    f"Expected {expected:,}; reported {reported:,}; difference {diff:,}.",
+                    "Confirm the scanned statement rows and totals against the signed financial statement.",
+                )
+            )
+    return findings
 
 
 def _detect_rounding_scale(text: str) -> tuple[str, Decimal]:
