@@ -11,6 +11,7 @@ from reviewer import (
     check_policy_relevance,
     check_rounding_and_casting,
     check_standard_checklist,
+    normalize_reporting_currency,
     review_pdf,
 )
 
@@ -212,6 +213,58 @@ def test_notes_check_flags_missing_note_heading():
     assert any("note 7" in finding.issue.lower() for finding in findings)
 
 
+def test_note_reference_detection_rejects_years_and_large_numbers():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of profit or loss\nRevenue 2025 4001 3001\nOther Revenue 9 307,482 189,751",
+                [],
+            ),
+            PdfPage(2, "Notes\n9 Other Revenue\nFair value gain 307,482", []),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    assert not any("note 2025" in finding.issue.lower() for finding in findings)
+    assert not any("note 4001" in finding.issue.lower() for finding in findings)
+    assert not any("note 3001" in finding.issue.lower() for finding in findings)
+    assert not any("note 9" in finding.issue.lower() and "not found" in finding.issue.lower() for finding in findings)
+
+
+def test_note_heading_detection_handles_multiline_header_with_year_columns():
+    text = "NOTE 9 2025 2024\nOther Revenue N'000 N'000\nFair Value Gain 100 90"
+
+    headings = _note_headings(text)
+
+    assert headings["9"] == "Other Revenue"
+
+
+def test_disclosure_only_notes_are_not_flagged_as_unreferenced():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nCash Note 18 100",
+                [],
+            ),
+            PdfPage(
+                2,
+                "18 Cash and cash equivalents\nCash 100\n25 Capital commitments\nThere were no capital commitments.\n26 Contingent liabilities\nNone.\n27 Subsequent events disclosure\nThere were no subsequent events.\n28 Related party transactions\nNo transactions.",
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    assert not any("note 25 exists but was not referenced" in finding.issue.lower() for finding in findings)
+    assert not any("note 26 exists but was not referenced" in finding.issue.lower() for finding in findings)
+    assert not any("note 27 exists but was not referenced" in finding.issue.lower() for finding in findings)
+    assert not any("note 28 exists but was not referenced" in finding.issue.lower() for finding in findings)
+
+
 def test_notes_agreement_is_conservative_for_ocr_documents():
     document = PdfDocument(
         [
@@ -316,6 +369,15 @@ def test_currency_check_ignores_generic_policy_currency_words():
     assert not any("currency marker" in finding.issue.lower() for finding in findings)
 
 
+def test_currency_normalization_accepts_naira_aliases_and_rejects_invalid_code():
+    assert normalize_reporting_currency("NGN") == "NGN"
+    assert normalize_reporting_currency("Naira") == "NGN"
+    assert normalize_reporting_currency("₦") == "NGN"
+    assert normalize_reporting_currency("N’000") == "NGN"
+    assert normalize_reporting_currency("N000") == "NGN"
+    assert normalize_reporting_currency("NGB") == ""
+
+
 def test_superseded_standard_context_classifies_current_policy_as_high_and_transition_as_low():
     current_policy = PdfDocument(
         [PdfPage(1, "Accounting policies\nFinancial instruments are accounted for under IAS 39.", [])]
@@ -410,7 +472,9 @@ def test_notes_check_flags_eps_formula_difference():
         [
             PdfPage(
                 1,
-                "Statement of profit or loss\nProfit for the year Note 9 100\nNotes to the financial statements\n9 Earnings per share\nProfit attributable 100\nWeighted average shares 20\nBasic EPS 8",
+                "Statement of profit or loss\nProfit for the year Note 9 100\n"
+                + ("ordinary shares earnings per share disclosure\n" * 80)
+                + "Notes to the financial statements\n9 Earnings per share\nProfit attributable 100\nWeighted average shares 20\nBasic EPS 8",
                 [],
             )
         ]
@@ -426,7 +490,7 @@ def test_standard_checklist_flags_revenue_disclosure_gap():
         [
             PdfPage(
                 1,
-                "Statement of profit or loss\nRevenue 500\nNotes to the financial statements\nRevenue is recognised when control transfers.",
+                "Statement of profit or loss\nContract asset 500\nNotes to the financial statements\nRevenue is recognised when control transfers.",
                 [],
             )
         ]
@@ -435,6 +499,40 @@ def test_standard_checklist_flags_revenue_disclosure_gap():
     findings = check_standard_checklist(document, CompanyProfile())
 
     assert any(finding.category == "Standards checklist" and "IFRS 15" in finding.location for finding in findings)
+
+
+def test_standard_checklist_specific_triggers_avoid_irrelevant_eps_and_segments():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Customer segment credit risk ageing\nSegment by customer type\nOrdinary members attended training",
+                [],
+            )
+        ]
+    )
+
+    findings = check_standard_checklist(document, CompanyProfile())
+
+    assert not any("IAS 33" in finding.location for finding in findings)
+    assert not any("IFRS 8" in finding.location for finding in findings)
+
+
+def test_standard_checklist_suppresses_tax_exempt_and_no_subsequent_events():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "The entity is tax-exempt and not subject to income tax.\nSubsequent events\nThere were no subsequent events after the reporting period.",
+                [],
+            )
+        ]
+    )
+
+    findings = check_standard_checklist(document, CompanyProfile())
+
+    assert not any("IAS 12" in finding.location for finding in findings)
+    assert not any("IAS 10" in finding.location for finding in findings)
 
 
 def test_standard_checklist_can_be_forced_by_area():

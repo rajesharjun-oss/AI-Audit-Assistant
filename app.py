@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from models import CompanyProfile, ReviewOptions
-from reviewer import build_ai_review_memo, findings_to_markdown, review_pdf
+from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
 
 
 st.set_page_config(page_title="AI Audit Assistant", layout="wide", initial_sidebar_state="expanded")
@@ -388,7 +388,14 @@ with st.container(border=True):
     profile_cols = st.columns([1.2, 1, 0.8, 0.8])
     company_name = profile_cols[0].text_input("Company name")
     industry = profile_cols[1].text_input("Industry")
-    reporting_currency = profile_cols[2].text_input("Reporting currency", placeholder="Example: NGN")
+    currency_choice = profile_cols[2].selectbox(
+        "Reporting currency",
+        ["Not specified", "NGN", "USD", "GBP", "EUR", "ZAR", "GHS", "KES", "Other"],
+        index=1,
+    )
+    reporting_currency = currency_choice
+    if currency_choice == "Other":
+        reporting_currency = profile_cols[2].text_input("Custom currency", placeholder="Example: NGN")
     presentation_standard = profile_cols[3].selectbox("Presentation standard", ["IFRS", "Local GAAP"], index=0)
     detail_cols = st.columns(3)
     expected_policies_text = detail_cols[0].text_area(
@@ -474,10 +481,14 @@ if not uploaded:
 expected_policies = tuple(item.strip() for item in expected_policies_text.split(",") if item.strip())
 significant_transactions = tuple(item.strip() for item in significant_transactions_text.split(",") if item.strip())
 checklist_areas = tuple(item.strip() for item in checklist_areas_text.split(",") if item.strip())
+normalised_currency = "" if reporting_currency == "Not specified" else normalize_reporting_currency(reporting_currency)
+if reporting_currency != "Not specified" and not normalised_currency:
+    st.warning("Enter a valid reporting currency before running the review. Example: NGN, USD, GBP, EUR, ZAR, GHS, or KES.")
+    st.stop()
 profile = CompanyProfile(
     company_name=company_name.strip(),
     industry=industry.strip(),
-    reporting_currency=reporting_currency.strip(),
+    reporting_currency=normalised_currency,
     expected_policies=expected_policies,
     significant_transactions=significant_transactions,
     presentation_standard=presentation_standard,
@@ -527,6 +538,9 @@ st.download_button(
     file_name="financial_statement_review.md",
     mime="text/markdown",
 )
+
+with st.expander("Detected note headings", expanded=False):
+    st.code(str(result.metrics.get("note_headings", "No note headings detected.")))
 
 if not result.findings:
     st.success("No issues were detected by the automated checks.")

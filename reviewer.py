@@ -6,14 +6,16 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from extraction import extract_pdf, extract_pdf_with_ocr
-from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, ReviewOptions, ReviewResult
+from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage, ReviewOptions, ReviewResult
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
 YEAR_RE = re.compile(r"\b20\d{2}\b")
 NOTE_REF_RE = re.compile(r"\bnote\s+(\d+[A-Za-z]?)\b|\bnotes?\s+(\d+[A-Za-z]?)\b", re.I)
 NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s*[\).:-]?\s+(.{3,100})$", re.I)
+NOTE_NUMBER_ONLY_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s+((?:20\d{2}|N['’]?\s?000|\$?000s?|\d{4})[\s,]*)+$", re.I)
 ENTITY_SUFFIX_RE = re.compile(r"\b(?:limited|ltd|plc|inc|corp|corporation|company)\b", re.I)
+VALID_CURRENCIES = {"NGN", "USD", "GBP", "EUR", "ZAR", "GHS", "KES", "CAD", "AUD"}
 
 
 POLICY_RULES = {
@@ -121,14 +123,14 @@ STANDARD_CHECKLIST = (
         "judgements and estimates",
         "Significant judgements and key estimation uncertainty should be disclosed.",
         (),
-        ("significant judgement", "critical accounting judgement", "key source of estimation", "estimation uncertainty"),
+        ("significant judgement", "critical accounting judgement", "critical accounting estimates", "key source of estimation", "estimation uncertainty"),
         "Medium",
     ),
     ChecklistItem(
         "IFRS 15",
         "revenue",
         "Revenue disclosures should explain performance obligations, timing, and disaggregation where revenue is significant.",
-        ("revenue", "turnover", "sales", "contract asset", "contract liability"),
+        ("revenue from contracts", "contract asset", "contract liability", "performance obligation"),
         ("performance obligation", "disaggregated revenue", "contract balance", "contract asset", "contract liability"),
         "Medium",
     ),
@@ -263,6 +265,7 @@ def _build_result(document: PdfDocument, findings: list[Finding]) -> ReviewResul
         "high": sum(1 for item in findings if item.severity == "High"),
         "medium": sum(1 for item in findings if item.severity == "Medium"),
         "low": sum(1 for item in findings if item.severity == "Low"),
+        "note_headings": _format_note_heading_debug(document),
     }
     return ReviewResult(findings=findings, metrics=metrics)
 
@@ -385,8 +388,12 @@ def check_standard_checklist(document: PdfDocument, profile: CompanyProfile) -> 
         active = _checklist_item_applies(item, text, context, requested_areas)
         if not active:
             continue
+        if _checklist_item_satisfied_by_context(item, text):
+            continue
         hits = [keyword for keyword in item.evidence_keywords if keyword in text]
         required_hits = len(item.evidence_keywords) if not item.applies_when else min(2, len(item.evidence_keywords))
+        if item.standard == "IAS 1" and item.area == "judgements and estimates":
+            required_hits = 1
         if len(hits) < required_hits:
             location, snippet = _first_keyword_context(document, item.applies_when or item.evidence_keywords or (item.area,))
             findings.append(
@@ -474,7 +481,9 @@ def check_formatting(document: PdfDocument, profile: CompanyProfile) -> list[Fin
     findings: list[Finding] = []
     currency_symbols = _contextual_currency_markers(document)
     if profile.reporting_currency:
-        expected = profile.reporting_currency.upper()
+        expected = normalize_reporting_currency(profile.reporting_currency)
+        if not expected:
+            return findings
         unexpected = [symbol for symbol in currency_symbols if _normalise_currency_marker(symbol) != expected]
         if unexpected:
             findings.append(
@@ -559,7 +568,8 @@ def _looks_like_unformatted_amount(token: str) -> bool:
 def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1")) -> list[Finding]:
     text = document.text
     findings: list[Finding] = []
-    headings = _note_headings(text)
+    headings_with_pages = _note_headings_by_page(document)
+    headings = {ref: title for ref, (title, _page_number) in headings_with_pages.items()}
     statement_refs = _statement_note_references(document)
     if document.ocr_used:
         findings.append(
@@ -574,6 +584,7 @@ def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1
         )
         return findings
     heading_refs = set(headings)
+    detailed_note_checks_allowed = document.extraction_confidence >= 80
     for ref in sorted(statement_refs - heading_refs, key=_note_sort_key):
         findings.append(
             Finding(
@@ -585,24 +596,39 @@ def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1
                 "Add the missing note or correct the note reference in the primary statement.",
             )
         )
-    for ref in sorted(heading_refs - statement_refs, key=_note_sort_key):
-        if ref.isdigit() and int(ref) <= 3:
-            continue
+    if not detailed_note_checks_allowed:
         findings.append(
             Finding(
-                "Notes agreement",
+                "Extraction quality",
                 "Low",
-                f"Note {ref}",
-                f"Note {ref} exists but was not referenced from the extracted primary statements.",
-                headings[ref][:90],
-                "Confirm whether this is a required disclosure-only note or whether a statement reference is missing.",
+                "Notes agreement",
+                "Detailed note reference, amount, and subtotal checks were skipped because extraction confidence is below 80%.",
+                f"Extraction confidence: {document.extraction_confidence}%. Note headings were still detected for navigation and debug review.",
+                "Use the detected note heading debug output to inspect references, but do not rely on automated note agreement checks until table extraction is cleaner.",
             )
         )
+        return findings
+    if statement_refs:
+        for ref in sorted(heading_refs - statement_refs, key=_note_sort_key):
+            if ref.isdigit() and int(ref) <= 3:
+                continue
+            if _is_disclosure_only_note(headings[ref]):
+                continue
+            findings.append(
+                Finding(
+                    "Notes agreement",
+                    "Low",
+                    f"Note {ref}",
+                    f"Note {ref} exists but was not referenced from the extracted primary statements.",
+                    headings[ref][:90],
+                    "Confirm whether this is a required disclosure-only note or whether a statement reference is missing.",
+                )
+            )
 
     note_sections = _note_sections(text)
     for ref, line, amount in _statement_lines_with_note_refs(document):
         section = note_sections.get(ref, "")
-        if not section:
+        if not section or _is_disclosure_only_note(headings.get(ref, "")):
             continue
         note_amounts = _amounts_in_text(section)
         if note_amounts and not any(abs(note_amount - amount) <= tolerance for note_amount in note_amounts):
@@ -641,6 +667,8 @@ def check_policy_relevance(document: PdfDocument, profile: CompanyProfile) -> li
         policy_present = any(keyword in text for keyword in rule["policy"])
         evidence_present = _policy_evidence_present(policy_name, rule["evidence"], text)
         explicitly_expected = policy_name in expected or policy_name in significant
+        if policy_name == "consolidation" and not evidence_present and not explicitly_expected:
+            continue
         if policy_present and not evidence_present and not explicitly_expected:
             location, snippet = _first_keyword_context(document, rule["policy"])
             findings.append(
@@ -768,10 +796,40 @@ def _checklist_item_applies(
 ) -> bool:
     if item.area in requested_areas or item.standard.lower() in requested_areas:
         return True
+    if item.standard == "IAS 33":
+        return bool(re.search(r"\b(eps|earnings per share)\b", text))
+    if item.standard == "IFRS 8":
+        return "operating segment" in text or "segment revenue" in text or "chief operating decision maker" in text
+    if item.standard == "IFRS 16":
+        lease_balance_terms = ("lease liability", "right-of-use", "right of use asset", "rou asset", "leased property", "material lease")
+        return any(term in text for term in lease_balance_terms)
+    if item.standard == "IAS 12":
+        tax_balance_terms = ("tax expense", "current tax", "deferred tax", "tax payable", "income tax expense")
+        return any(term in text for term in tax_balance_terms) and not _tax_exempt_context(text)
+    if item.standard == "IAS 12" and _tax_exempt_context(text):
+        return False
     if not item.applies_when:
         return True
     trigger_text = f"{text} {context}"
     return any(trigger in trigger_text for trigger in item.applies_when) or item.area in context
+
+
+def _checklist_item_satisfied_by_context(item: ChecklistItem, text: str) -> bool:
+    if item.standard == "IAS 10":
+        return bool(
+            re.search(
+                r"(no|not aware of|none|there (?:were|are) no).{0,80}(subsequent events|events after)",
+                text,
+                flags=re.I,
+            )
+        )
+    if item.standard == "IAS 12" and _tax_exempt_context(text):
+        return True
+    return False
+
+
+def _tax_exempt_context(text: str) -> bool:
+    return bool(re.search(r"tax[- ]?exempt|exempt from income tax|non[- ]?taxable|not subject to income tax", text, flags=re.I))
 
 
 def _check_vertical_totals(
@@ -922,6 +980,8 @@ def _check_required_statement_names(findings: list[Finding], document: PdfDocume
 
 
 def _check_note_internal_total(findings: list[Finding], ref: str, title: str, section: str, tolerance: Decimal) -> None:
+    if _skip_note_subtotal_checks(title, section):
+        return
     lines = [line for line in section.splitlines() if line.strip()]
     running: list[Decimal] = []
     for line in lines:
@@ -949,6 +1009,9 @@ def _check_note_internal_total(findings: list[Finding], ref: str, title: str, se
 
 
 def _check_segment_note(findings: list[Finding], ref: str, section: str, tolerance: Decimal) -> None:
+    lower_section = section.lower()
+    if "operating segment" not in lower_section and "segment revenue" not in lower_section:
+        return
     for line in section.splitlines():
         lower = line.lower()
         if "total" not in lower:
@@ -1001,6 +1064,31 @@ def _check_eps_note(findings: list[Finding], ref: str, section: str) -> None:
                 "Review the EPS note manually and ensure both basic and diluted EPS are supported.",
             )
         )
+
+
+def _skip_note_subtotal_checks(title: str, section: str) -> bool:
+    lower = f"{title}\n{section}".lower()
+    skip_terms = (
+        "financial instruments - risk",
+        "financial risk",
+        "risk management",
+        "maturity",
+        "liquidity risk",
+        "credit risk",
+        "expected credit loss",
+        " ecl",
+        "ageing",
+        "aging",
+        "value added",
+        "five year",
+        "5 year",
+        "narrative disclosure",
+        "contingent liabilities",
+        "capital commitments",
+        "subsequent events",
+        "related party",
+    )
+    return any(term in lower for term in skip_terms)
 
 
 def _check_tax_note(findings: list[Finding], ref: str, section: str, tolerance: Decimal) -> None:
@@ -1103,7 +1191,7 @@ def _check_boilerplate_policy_language(findings: list[Finding], document: PdfDoc
 
 def _contextual_currency_markers(document: PdfDocument) -> list[str]:
     markers: list[str] = []
-    currency_re = re.compile(r"\bUSD\b|\bNGN\b|\bGBP\b|\bEUR\b|US\$|\bNaira\b|\bDollar\b|\bPound\b|\bEuro\b|\$", re.I)
+    currency_re = re.compile(r"\bUSD\b|\bNGN\b|\bGBP\b|\bEUR\b|US\$|\bNaira\b|\bDollar\b|\bPound\b|\bEuro\b|₦|N['’]?\s?000|N000|\$", re.I)
     context_re = re.compile(
         r"statement of|presentation currency|functional currency|expressed in|presented in|currency:|n'000|ngn'000|usd'000",
         re.I,
@@ -1125,8 +1213,8 @@ def _contextual_currency_markers(document: PdfDocument) -> list[str]:
 
 
 def _normalise_currency_marker(marker: str) -> str:
-    marker_upper = marker.upper()
-    if marker_upper in {"NAIRA", "NGN"}:
+    marker_upper = re.sub(r"\s+", "", marker.upper().replace("’", "'"))
+    if marker_upper in {"NAIRA", "NGN", "₦", "N'000", "N000"}:
         return "NGN"
     if marker_upper in {"DOLLAR", "US$", "$", "USD"}:
         return "USD"
@@ -1135,6 +1223,34 @@ def _normalise_currency_marker(marker: str) -> str:
     if marker_upper == "EURO":
         return "EUR"
     return marker_upper
+
+
+def normalize_reporting_currency(value: str) -> str:
+    cleaned = re.sub(r"\s+", "", value.strip().upper().replace("’", "'"))
+    aliases = {
+        "": "",
+        "NAIRA": "NGN",
+        "NIGERIANNAIRA": "NGN",
+        "NGN": "NGN",
+        "₦": "NGN",
+        "N'000": "NGN",
+        "N000": "NGN",
+        "N'000S": "NGN",
+        "USD": "USD",
+        "US$": "USD",
+        "$": "USD",
+        "DOLLAR": "USD",
+        "GBP": "GBP",
+        "POUND": "GBP",
+        "EUR": "EUR",
+        "EURO": "EUR",
+        "ZAR": "ZAR",
+        "GHS": "GHS",
+        "KES": "KES",
+        "CAD": "CAD",
+        "AUD": "AUD",
+    }
+    return aliases.get(cleaned, cleaned if cleaned in VALID_CURRENCIES else "")
 
 
 def _policy_evidence_present(policy_name: str, evidence_keywords: tuple[str, ...], text: str) -> bool:
@@ -1494,14 +1610,40 @@ def _check_adjacent_totals(
 
 
 def _note_headings(text: str) -> dict[str, str]:
-    headings: dict[str, str] = {}
-    for line in text.splitlines():
-        match = NOTE_HEADING_RE.match(line.strip())
-        if match:
-            number, title = match.groups()
-            if _valid_note_heading(number, title):
-                headings[number.upper()] = title.strip()
+    page = PdfPage(1, text, [])
+    return {ref: title for ref, (title, _page_number) in _note_headings_by_page(PdfDocument([page])).items()}
+
+
+def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
+    headings: dict[str, tuple[str, int]] = {}
+    for page in document.pages:
+        lines = page.text.splitlines()
+        for index, raw_line in enumerate(lines):
+            line = raw_line.strip()
+            match = NOTE_HEADING_RE.match(line)
+            if match:
+                number, title = match.groups()
+                if _valid_note_heading(number, title):
+                    headings[number.upper()] = (_clean_note_title(title), page.number)
+                    continue
+            number_only = NOTE_NUMBER_ONLY_RE.match(line)
+            if number_only and index + 1 < len(lines):
+                number = number_only.group(1)
+                title = lines[index + 1].strip()
+                if _valid_note_heading(number, title):
+                    headings[number.upper()] = (_clean_note_title(title), page.number)
     return headings
+
+
+def _format_note_heading_debug(document: PdfDocument) -> str:
+    headings = _note_headings_by_page(document)
+    if not headings:
+        return "No note headings detected."
+    parts = []
+    for ref in sorted(headings, key=_note_sort_key):
+        title, page_number = headings[ref]
+        parts.append(f"Note {ref} | Page {page_number} | {title}")
+    return "\n".join(parts)
 
 
 def _statement_note_references(document: PdfDocument) -> set[str]:
@@ -1510,6 +1652,7 @@ def _statement_note_references(document: PdfDocument) -> set[str]:
         if _is_notes_page(page.text):
             continue
         refs.update(_refs_in_text(page.text))
+        refs.update(_note_refs_from_tables(page.tables))
     return refs
 
 
@@ -1519,7 +1662,7 @@ def _statement_lines_with_note_refs(document: PdfDocument) -> list[tuple[str, st
         if _is_notes_page(page.text):
             continue
         for line in page.text.splitlines():
-            refs = _refs_in_text(line)
+            refs = _refs_in_text(line) | _note_refs_from_statement_line(line)
             amount = _last_amount(line)
             if refs and amount is not None:
                 for ref in refs:
@@ -1530,17 +1673,62 @@ def _statement_lines_with_note_refs(document: PdfDocument) -> list[tuple[str, st
 def _refs_in_text(text: str) -> set[str]:
     refs = set()
     for match in NOTE_REF_RE.finditer(text):
-        refs.add((match.group(1) or match.group(2)).upper())
+        ref = (match.group(1) or match.group(2)).upper()
+        if _valid_note_number(ref):
+            refs.add(ref)
+    return refs
+
+
+def _note_refs_from_statement_lines(text: str) -> set[str]:
+    refs: set[str] = set()
+    for line in text.splitlines():
+        refs.update(_note_refs_from_statement_line(line))
+    return refs
+
+
+def _note_refs_from_statement_line(line: str) -> set[str]:
+    refs: set[str] = set()
+    if not _looks_like_primary_statement_line(line):
+        return refs
+    for match in re.finditer(r"\b(\d{1,2}[A-C]?)\b(?=\s+\(?-?\d[\d,\s]*\)?)", line, flags=re.I):
+        ref = match.group(1).upper()
+        if _valid_note_number(ref):
+            refs.add(ref)
+            break
+    return refs
+
+
+def _note_refs_from_tables(tables: list[list[list[str]]]) -> set[str]:
+    refs: set[str] = set()
+    for table in tables:
+        note_cols = _note_columns(table)
+        for row in table[1:]:
+            for index in note_cols:
+                if index < len(row):
+                    raw = str(row[index]).strip().upper()
+                    if _valid_note_number(raw):
+                        refs.add(raw)
     return refs
 
 
 def _note_sections(text: str) -> dict[str, str]:
     sections: dict[str, list[str]] = defaultdict(list)
     current: str | None = None
+    pending_number: str | None = None
     for line in text.splitlines():
-        match = NOTE_HEADING_RE.match(line.strip())
+        stripped = line.strip()
+        match = NOTE_HEADING_RE.match(stripped)
         if match and _valid_note_heading(match.group(1), match.group(2)):
             current = match.group(1).upper()
+            pending_number = None
+        else:
+            number_only = NOTE_NUMBER_ONLY_RE.match(stripped)
+            if number_only and _valid_note_number(number_only.group(1)):
+                pending_number = number_only.group(1).upper()
+                continue
+            if pending_number and _valid_note_heading(pending_number, stripped):
+                current = pending_number
+                pending_number = None
         if current:
             sections[current].append(line)
     return {number: "\n".join(lines) for number, lines in sections.items()}
@@ -1555,17 +1743,7 @@ def _valid_note_heading(number: str, title: str) -> bool:
     number = number.upper().strip()
     title_clean = re.sub(r"^[^\w(]+", "", title.strip())
     title_lower = title_clean.lower()
-    suffix_match = re.fullmatch(r"\d{1,2}([A-Z])", number)
-    if YEAR_RE.fullmatch(number):
-        return False
-    if re.fullmatch(r"\d{2,}[A-Z]", number):
-        return False
-    if not re.fullmatch(r"\d{1,2}[A-Z]?", number):
-        return False
-    if suffix_match and suffix_match.group(1) not in {"A", "B", "C", "D"}:
-        return False
-    numeric = int(re.match(r"\d+", number).group(0))
-    if numeric < 1 or numeric > 80:
+    if not _valid_note_number(number):
         return False
     if title_lower.startswith(("to the", "are", "and", "for the year", "in thousands", "n'000")):
         return False
@@ -1576,9 +1754,59 @@ def _valid_note_heading(number: str, title: str) -> bool:
     words = title_clean.split()
     if ENTITY_SUFFIX_RE.search(title_clean) and len(words) <= 4:
         return False
+    if title_lower in {"december", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november"}:
+        return False
     if YEAR_RE.search(title_clean) and len(words) <= 8:
         return False
     return bool(re.search(r"[A-Za-z]{3,}", title_clean))
+
+
+def _valid_note_number(value: str) -> bool:
+    value = value.upper().strip()
+    if YEAR_RE.fullmatch(value):
+        return False
+    match = re.fullmatch(r"(\d{1,2})([A-C]?)", value)
+    if not match:
+        return False
+    numeric = int(match.group(1))
+    return 1 <= numeric <= 60
+
+
+def _clean_note_title(title: str) -> str:
+    title = re.sub(r"^[^\w(]+", "", title.strip())
+    title = re.sub(r"\s+(?:20\d{2}\s+){1,2}$", "", title)
+    title = re.sub(r"\s+(?:N['’]?\s?000|\$?000s?)(?:\s+(?:N['’]?\s?000|\$?000s?))*$", "", title, flags=re.I)
+    return title.strip()
+
+
+def _looks_like_primary_statement_line(line: str) -> bool:
+    lower = line.lower()
+    if not any(keyword in lower for keyword in ("revenue", "assets", "liabilities", "equity", "cash", "cost", "surplus", "deficit", "payables", "receivables", "fund")):
+        return False
+    if len(NUMBER_RE.findall(line)) < 2:
+        return False
+    return not _is_notes_page(line)
+
+
+def _is_disclosure_only_note(title: str) -> bool:
+    lower = title.lower()
+    disclosure_terms = (
+        "accounting polic",
+        "basis of preparation",
+        "basis of measurement",
+        "critical accounting estimates",
+        "estimates and judgements",
+        "financial instruments - risk",
+        "financial risk",
+        "risk management",
+        "capital commitments",
+        "contingent liabilities",
+        "subsequent events",
+        "events after",
+        "related party",
+        "corporate information",
+    )
+    return any(term in lower for term in disclosure_terms)
 
 
 def _last_amount(line: str) -> Decimal | None:
