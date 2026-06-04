@@ -267,7 +267,15 @@ def review_pdf(
     note_findings = check_notes_agreement(document, cautious_low_confidence=options.run_cautious_note_agreement)
     findings.extend(note_findings)
     if options.run_cautious_note_agreement and document.table_extraction_confidence < 80 and not document.ocr_used:
-        checks_performed.append("Cautious note-reference validation run despite low table confidence.")
+        note_reference_prompts = [
+            finding
+            for finding in note_findings
+            if finding.metadata and finding.metadata.get("referenced_note")
+        ]
+        if note_reference_prompts:
+            checks_performed.append("Cautious note-reference validation performed in review-prompt mode; possible note-reference prompts added to the exception register.")
+        else:
+            checks_performed.append("Cautious note-reference validation performed in review-prompt mode; no possible wrong note references detected.")
         checks_skipped.append("Detailed note agreement skipped because table extraction confidence is below threshold.")
     elif any(finding.location == "Notes agreement" and finding.category == "Extraction quality" for finding in note_findings):
         checks_performed.append("Basic note heading existence checks completed where statement note references were clearly detected.")

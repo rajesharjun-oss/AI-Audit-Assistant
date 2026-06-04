@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 import extraction
+import reviewer
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
@@ -510,6 +511,26 @@ def test_cautious_note_reference_validation_flags_explicit_missing_note_as_revie
     assert missing[0].severity == "Low"
     assert missing[0].metadata["line_item"] == "Cash"
     assert missing[0].metadata["referenced_note"] == "18"
+
+
+def test_review_pdf_reports_cautious_note_reference_override_as_performed(monkeypatch):
+    noisy_table = [["Description", "2025", "2024"]]
+    noisy_table.extend([["Line item", "100 90", ""] for _ in range(40)])
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of income and expenditure\nRevenue 100 90\n" * 80,
+                [noisy_table],
+            )
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert "Cautious note-reference validation performed in review-prompt mode; no possible wrong note references detected." in result.metrics["checks_performed"]
+    assert "Cautious note-reference validation skipped" not in result.metrics["checks_skipped"]
 
 
 def test_notes_agreement_is_conservative_for_ocr_documents():

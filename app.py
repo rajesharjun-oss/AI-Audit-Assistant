@@ -768,7 +768,7 @@ with st.container(border=True):
         help="Higher DPI can improve OCR accuracy but takes longer.",
     )
     cautious_note_agreement = st.toggle(
-        "Run cautious note-reference validation even when confidence is low",
+        "Run cautious note-reference validation anyway",
         value=False,
         help=(
             "When note/table confidence is below 80%, detailed note-reference validation is normally skipped. "
