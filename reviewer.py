@@ -155,7 +155,7 @@ STANDARD_CHECKLIST = (
         "IFRS 16",
         "leases",
         "Lease disclosures should identify right-of-use assets, lease liabilities, depreciation, interest, and maturity information where leases exist.",
-        ("lease", "right-of-use", "right of use", "lease liability"),
+        ("right-of-use asset", "right of use asset", "lease liability", "lease expense", "lease maturity", "depreciation of right-of-use", "depreciation of rou"),
         ("right-of-use", "right of use", "lease liability", "lease maturity", "interest on lease", "depreciation of right"),
         "Medium",
     ),
@@ -466,7 +466,10 @@ def _notes_heading_in_text(text: str) -> bool:
     if re.search(r"\bnotes\s+to\s+the\s+financial\s+statements?\b", text, flags=re.I):
         return True
     head = "\n".join(text.splitlines()[:10])
-    return _fuzzy_contains(head, "notes to the financial statements", threshold=0.84)
+    normalized_head = _normalise_match_words(head)
+    if not all(term in normalized_head for term in ("notes", "financial", "statements")):
+        return False
+    return _fuzzy_contains(head, "notes to the financial statements", threshold=0.88)
 
 
 def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
@@ -1546,7 +1549,18 @@ def _checklist_item_applies(
     if item.standard == "IFRS 8":
         return "operating segment" in text or "segment revenue" in text or "chief operating decision maker" in text
     if item.standard == "IFRS 16":
-        lease_balance_terms = ("lease liability", "right-of-use", "right of use asset", "rou asset", "leased property", "material lease")
+        lease_balance_terms = (
+            "right-of-use asset",
+            "right of use asset",
+            "rou asset",
+            "lease liability",
+            "lease expense",
+            "lease maturity",
+            "depreciation of right-of-use",
+            "depreciation of rou",
+            "lease arrangement",
+            "lease contracts",
+        )
         return any(term in text for term in lease_balance_terms)
     if item.standard == "IAS 12":
         tax_balance_terms = ("tax expense", "current tax", "deferred tax", "tax payable", "income tax expense")
@@ -2204,13 +2218,95 @@ def _statement_rows(text: str) -> dict[str, list[Decimal]]:
     rows: dict[str, list[Decimal]] = {}
     for line in text.splitlines():
         amounts = _amounts_from_statement_line(line)
-        if len(amounts) < 2:
+        if len(amounts) < 1:
             continue
         label = _statement_label(line)
         label = _canonical_statement_label(label)
-        if label:
+        if label and _statement_row_label_allowed(label):
             rows[label] = amounts[-2:]
     return rows
+
+
+def _statement_row_label_allowed(label: str) -> bool:
+    normalized = _normalise_match_words(label)
+    if not normalized:
+        return False
+    blocked_terms = (
+        "financial statements",
+        "annual report",
+        "year ended",
+        "for the year ended",
+        "date",
+        "page",
+        "director",
+        "auditor",
+        "corporate information",
+    )
+    if any(term in normalized for term in blocked_terms):
+        return False
+    allowed_exact = {
+        "revenue",
+        "turnover",
+        "sales",
+        "profit before tax",
+        "loss before tax",
+        "taxation",
+        "profit after tax",
+        "loss after tax",
+        "non current assets",
+        "current assets",
+        "total assets",
+        "equity",
+        "liabilities",
+        "total liabilities",
+        "total equity and liabilities",
+        "cash at beginning",
+        "cash at end",
+        "net increase in cash and cash equivalents",
+        "subscriptions",
+        "registrations",
+        "operating revenue",
+        "gross operating revenue",
+        "operating expenditure",
+        "gross revenue",
+        "other revenue",
+        "finance income",
+        "total income",
+        "office accommodation costs",
+        "personnel costs",
+        "administrative costs",
+        "finance expenses",
+        "total expenditure",
+        "surplus of income over expenditure",
+        "total comprehensive income",
+        "investment property",
+        "property plant and equipment",
+        "intangible assets",
+        "inventories",
+        "trade and other receivables",
+        "cash and cash equivalents",
+        "total non current assets",
+        "total current assets",
+        "total members fund",
+        "trade and other payables",
+        "total funds and liabilities",
+        "net cash inflow from operating activities",
+        "net cash absorbed in investing activities",
+        "net cash inflow from financing activities",
+    }
+    if normalized in {_normalise_match_words(item) for item in allowed_exact}:
+        return True
+    allowed_prefixes = (
+        "profit before",
+        "loss before",
+        "profit after",
+        "loss after",
+        "income tax",
+        "tax expense",
+        "share capital",
+        "capital and reserves",
+    )
+    return any(normalized.startswith(prefix) for prefix in allowed_prefixes)
 
 
 def _statement_label(line: str) -> str:
@@ -2268,10 +2364,10 @@ def _canonical_statement_label(label: str) -> str:
         ("total equity and liabilities", ("total equity and liabilities", "total equity and liability", "total liabilities and equity", "total liability and equity", "total equity liabilities", "equity and liabilities")),
         ("total assets", ("total assets",)),
         ("non-current assets", ("non current assets", "noncurrent assets", "total non current assets", "non current asset")),
-        ("revenue", ("revenue", "turnover", "sales")),
         ("profit before tax", ("profit before tax", "profit before taxation", "loss before tax", "loss before taxation", "profit loss before tax")),
+        ("profit after tax", ("profit after tax", "profit after taxation", "profit for year", "profit for the year", "loss after tax", "loss after taxation", "loss for year", "loss for the year")),
         ("taxation", ("taxation", "income tax", "tax expense", "tax credit", "income tax expense")),
-        ("profit after tax", ("profit after tax", "profit for year", "profit for the year", "loss after tax", "loss for year", "loss for the year")),
+        ("revenue", ("revenue", "turnover", "sales")),
         ("current assets", ("current assets", "total current assets")),
         ("equity", ("equity", "total equity", "shareholders equity", "shareholder funds", "net assets", "capital and reserves", "share capital and reserves")),
         ("liabilities", ("liabilities", "total liabilities")),
@@ -2435,7 +2531,37 @@ def _accounting_policy_map(document: PdfDocument) -> dict[str, bool]:
         detected[policy_name] = any(keyword in search_text for keyword in rule["policy"])
     if re.search(r"revenue\s+from\s+contracts\s+with\s+customers", search_text, flags=re.I):
         detected["revenue"] = True
+    detected["leases"] = _lease_policy_applies(search_text)
     return detected
+
+
+def _lease_policy_applies(text: str) -> bool:
+    actual_lease_terms = (
+        "right-of-use asset",
+        "right of use asset",
+        "rou asset",
+        "lease liability",
+        "lease expense",
+        "lease maturity",
+        "depreciation of right-of-use",
+        "depreciation of rou",
+        "lease contracts",
+        "lease arrangement",
+        "leased asset",
+    )
+    if any(term in text for term in actual_lease_terms):
+        return True
+    if "ifrs 16" not in text and "leases" not in text:
+        return False
+    generic_context = (
+        "new standards",
+        "amendments",
+        "annual improvements",
+        "effective for annual periods",
+        "issued but not effective",
+        "standards and interpretations",
+    )
+    return not any(term in text for term in generic_context)
 
 
 def _check_superseded_standards(findings: list[Finding], document: PdfDocument) -> None:
@@ -2938,6 +3064,8 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
         return headings
     in_notes = not strict_notes_start
     for page in document.pages:
+        if notes_start_page is not None and page.number < notes_start_page:
+            continue
         if strict_notes_start and _notes_heading_in_text(page.text):
             in_notes = True
         if strict_notes_start and not in_notes:
@@ -3175,9 +3303,9 @@ def _check_possible_wrong_note_references(
         for candidate_ref in headings:
             if candidate_ref == item.ref or _is_disclosure_only_note(headings.get(candidate_ref, "")):
                 continue
-            if not _alternative_note_semantically_allowed(item.line_item, headings.get(candidate_ref, "")):
-                continue
             section = note_sections.get(candidate_ref, "")
+            if not _alternative_note_semantically_allowed(item.line_item, headings.get(candidate_ref, ""), section):
+                continue
             match = _note_match_strength(item, headings.get(candidate_ref, ""), section, tolerance, all_sections=note_sections)
             heading_score = _wording_match_score(item.line_item, headings.get(candidate_ref, ""))
             stronger_heading = heading_score >= 0.82 and heading_score > referenced_heading_score + 0.12
@@ -3202,6 +3330,8 @@ def _check_possible_wrong_note_references(
         confidence = "High" if best_match["wording"] and best_match["amount"] else "Medium" if best_match["amount"] else "Low"
         if cautious_review_prompt and confidence == "High":
             confidence = "Medium"
+        if cautious_review_prompt and confidence == "Low":
+            continue
         reason = _note_reference_reason(best_match, best_ref, cautious_review_prompt)
         findings.append(_note_reference_review_prompt(item, best_ref, confidence, reason, cautious_review_prompt))
         flagged.add((item.ref, item.line))
@@ -3396,7 +3526,7 @@ def _alternative_note_for_missing_amounts(
     for ref, section in note_sections.items():
         if ref == item.ref or _is_disclosure_only_note(headings.get(ref, "")):
             continue
-        if not _alternative_note_semantically_allowed(item.line_item, headings.get(ref, "")):
+        if not _alternative_note_semantically_allowed(item.line_item, headings.get(ref, ""), section):
             continue
         wording = _wording_match_score(item.line_item, headings.get(ref, ""))
         if wording < 0.82:
@@ -3409,11 +3539,15 @@ def _alternative_note_for_missing_amounts(
     return best_ref if best_count else ""
 
 
-def _alternative_note_semantically_allowed(line_item: str, note_heading: str) -> bool:
+def _alternative_note_semantically_allowed(line_item: str, note_heading: str, note_section: str = "") -> bool:
     item = _normalise_match_words(line_item)
     heading = _normalise_match_words(note_heading)
+    section = _normalise_match_words(note_section[:1200])
     if any(term in item for term in ("cash", "bank", "cash equivalents")):
         return any(term in heading for term in ("cash", "bank", "cash equivalents"))
+    if any(term in item for term in ("revenue", "income", "turnover", "sales")):
+        revenue_terms = ("revenue", "rental income", "rent income", "operating income", "income", "turnover", "sales")
+        return any(term in heading for term in revenue_terms) or any(term in section for term in revenue_terms)
     return True
 
 
@@ -3630,7 +3764,22 @@ def _valid_note_heading(number: str, title: str) -> bool:
         return False
     if title_lower.startswith(("financial statements for the year ended", "audited financial statements")):
         return False
-    if title_lower in {"directors", "director", "report of the directors", "corporate information"}:
+    front_matter_terms = (
+        "directors",
+        "director",
+        "report of the directors",
+        "directors interests",
+        "directors' interests",
+        "interest in shares",
+        "interests in shares",
+        "employment and employees",
+        "employees",
+        "corporate information",
+        "auditor",
+        "auditors",
+        "independent auditor",
+    )
+    if title_lower in set(front_matter_terms) or any(term in title_lower for term in front_matter_terms):
         return False
     words = title_clean.split()
     if ENTITY_SUFFIX_RE.search(title_clean) and len(words) <= 4:

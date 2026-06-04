@@ -553,8 +553,7 @@ def test_wrong_note_reference_check_respects_low_confidence_gate():
     cautious_findings = check_notes_agreement(document, cautious_low_confidence=True)
 
     assert not any("possible wrong note reference" in finding.issue.lower() for finding in normal_findings)
-    assert any("possible wrong note reference" in finding.issue.lower() for finding in cautious_findings)
-    assert all(finding.severity in {"Low", "Medium"} for finding in cautious_findings if "possible wrong note reference" in finding.issue.lower())
+    assert not any("possible wrong note reference" in finding.issue.lower() for finding in cautious_findings)
 
 
 def test_cautious_note_reference_validation_uses_detected_headings_when_sections_are_weak():
@@ -572,11 +571,7 @@ def test_cautious_note_reference_validation_uses_detected_headings_when_sections
     findings = check_notes_agreement(document, cautious_low_confidence=True)
     wrong_ref = [finding for finding in findings if "possible wrong note reference" in finding.issue.lower()]
 
-    assert wrong_ref
-    assert wrong_ref[0].severity == "Low"
-    assert wrong_ref[0].metadata["referenced_note"] == "7"
-    assert wrong_ref[0].metadata["suggested_note"] == "9"
-    assert wrong_ref[0].metadata["reason"]
+    assert wrong_ref == []
 
 
 def test_cautious_note_reference_validation_flags_explicit_missing_note_as_review_prompt():
@@ -732,6 +727,32 @@ def test_cash_note_reference_does_not_suggest_non_cash_alternative(monkeypatch):
     assert not any(
         finding.metadata
         and finding.metadata.get("line_item") == "Cash At End Of The Year"
+        and finding.metadata.get("suggested_note") == "3"
+        for finding in result.findings
+    )
+
+
+def test_revenue_note_reference_does_not_suggest_investment_property_without_revenue_context(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of profit or loss\nRevenue Note 13 707,189 297,041", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n3 Investment property\nFair value movement 707,189 297,041\n13 Revenue\nNarrative only\n"
+                + ("Additional OCR note text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert not any(
+        finding.metadata
+        and finding.metadata.get("line_item") == "Revenue"
         and finding.metadata.get("suggested_note") == "3"
         for finding in result.findings
     )
@@ -972,6 +993,23 @@ def test_ocr_note_heading_detection_ignores_directors_report_before_notes_sectio
     assert all("directors" not in title.lower() for title, _page in headings.values())
 
 
+def test_ocr_note_headings_never_include_pages_before_notes_start_page():
+    document = PdfDocument(
+        [
+            PdfPage(5, "Directors' report\n7 Directors' interests in shares\n11 Employment and employees", []),
+            PdfPage(14, "Notes to the financial statements\n1 Accounting policies\n3 Investment property\n13 Revenue\n", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["13"] == ("Revenue", 14)
+    assert "7" not in headings
+    assert "11" not in headings
+
+
 def test_ocr_note_validation_skips_when_notes_section_start_is_not_detected():
     document = PdfDocument(
         [
@@ -1179,6 +1217,24 @@ def test_revenue_policy_recognises_revenue_from_contracts_with_customers():
     assert not any("revenue-related balances" in finding.issue.lower() for finding in findings)
 
 
+def test_ifrs_16_not_triggered_by_generic_standards_amendments_text():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Notes to the financial statements\nNew standards and amendments\nIFRS 16 Leases amendments are effective for annual periods beginning after the reporting date.",
+                [],
+            )
+        ]
+    )
+
+    policy_findings = check_policy_relevance(document, CompanyProfile())
+    checklist_findings = check_standard_checklist(document, CompanyProfile())
+
+    assert not any("leases policy" in finding.issue.lower() for finding in policy_findings)
+    assert not any("IFRS 16" in finding.location for finding in checklist_findings)
+
+
 def test_ocr_sfp_statement_specific_checks_run_only_on_confident_rows():
     document = PdfDocument(
         [
@@ -1300,6 +1356,61 @@ def test_review_report_includes_ocr_statement_rows_debug(monkeypatch):
 
     assert "non-current assets" in result.metrics["ocr_statement_rows"]
     assert "total equity and liabilities" in result.metrics["ocr_statement_rows"]
+    assert "Statement of financial position: equity and liabilities equation checked" in result.metrics["checks_performed"]
+
+
+def test_ocr_statement_rows_ignore_title_and_date_lines(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Funtierra Limited financial statements for the year ended 31 December 2021 2020",
+                        "Statement of profit or loss and other comprehensive income",
+                        "Revenue 707,189 297,041",
+                        "Loss before taxation (173,516) (681,559)",
+                        "Taxation 253,124",
+                        "Loss after taxation (120,389) (428,435)",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Statement of financial position as at 31 December 2021 2020",
+                        "Non-current assets 1,200,000 1,100,000",
+                        "Current assets 300,000 250,000",
+                        "Total assets 1,500,000 1,350,000",
+                        "Equity 900,000 850,000",
+                        "Liabilities 600,000 500,000",
+                        "Total equity and liabilities 1,500,000 1,350,000",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    rows = result.metrics["ocr_statement_rows"]
+
+    assert "revenue | 707,189 | 297,041" in rows
+    assert "profit before tax | -173,516 | -681,559" in rows
+    assert "taxation | 253,124" in rows
+    assert "profit after tax | -120,389 | -428,435" in rows
+    assert "non-current assets | 1,200,000 | 1,100,000" in rows
+    assert "total equity and liabilities | 1,500,000 | 1,350,000" in rows
+    assert "financial statements for the year ended" not in rows.lower()
     assert "Statement of financial position: equity and liabilities equation checked" in result.metrics["checks_performed"]
 
 
