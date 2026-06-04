@@ -531,6 +531,11 @@ def test_review_pdf_reports_cautious_note_reference_override_as_performed(monkey
 
     assert "Cautious note-reference validation performed in review-prompt mode; no possible wrong note references detected." in result.metrics["checks_performed"]
     assert "Cautious note-reference validation skipped" not in result.metrics["checks_skipped"]
+    assert result.metrics["cautious_note_validation_enabled"] is True
+    assert result.metrics["note_validation_mode"] == "review_prompt"
+    assert result.metrics["note_reference_rows_detected"] == 0
+    assert result.metrics["note_headings_detected"] == 0
+    assert result.metrics["note_reference_findings"] == 0
 
 
 def test_notes_agreement_is_conservative_for_ocr_documents():

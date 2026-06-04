@@ -109,6 +109,11 @@ def _build_excel_export(result) -> bytes:
         {"Metric": "Low findings", "Value": result.metrics.get("low", 0)},
         {"Metric": "Extraction confidence", "Value": result.metrics.get("extraction_confidence", "0%")},
         {"Metric": "Table confidence", "Value": result.metrics.get("table_confidence", "0%")},
+        {"Metric": "cautious_note_validation_enabled", "Value": result.metrics.get("cautious_note_validation_enabled", False)},
+        {"Metric": "note_validation_mode", "Value": result.metrics.get("note_validation_mode", "skipped")},
+        {"Metric": "note_reference_rows_detected", "Value": result.metrics.get("note_reference_rows_detected", 0)},
+        {"Metric": "note_headings_detected", "Value": result.metrics.get("note_headings_detected", 0)},
+        {"Metric": "note_reference_findings", "Value": result.metrics.get("note_reference_findings", 0)},
     ]
     checks_performed = [{"Check performed": item} for item in _metric_lines(result.metrics.get("checks_performed"), "No deterministic checks completed.")]
     checks_skipped = [{"Check skipped": item} for item in _metric_lines(result.metrics.get("checks_skipped"), "No major checks skipped.")]
@@ -913,6 +918,17 @@ with st.expander("Notes detected (debug)", expanded=False):
         st.dataframe(pd.DataFrame(note_rows), use_container_width=True, hide_index=True)
     else:
         st.write("No note headings detected.")
+
+with st.expander("Note validation debug", expanded=False):
+    st.json(
+        {
+            "cautious_note_validation_enabled": result.metrics.get("cautious_note_validation_enabled", False),
+            "note_validation_mode": result.metrics.get("note_validation_mode", "skipped"),
+            "note_reference_rows_detected": result.metrics.get("note_reference_rows_detected", 0),
+            "note_headings_detected": result.metrics.get("note_headings_detected", 0),
+            "note_reference_findings": result.metrics.get("note_reference_findings", 0),
+        }
+    )
 
 with st.expander("Developer/debug Markdown export", expanded=False):
     markdown_report = findings_to_markdown(result)

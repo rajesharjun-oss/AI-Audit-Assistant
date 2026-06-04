@@ -251,10 +251,12 @@ def review_pdf(
     findings: list[Finding] = []
     checks_performed: list[str] = []
     checks_skipped: list[str] = []
+    note_validation_debug = _note_validation_debug(document, options.run_cautious_note_agreement, [])
     findings.extend(check_extraction_quality(document))
     if _requires_ocr(document):
         checks_skipped.append("Primary statement checks skipped because PDF extraction is unreliable.")
-        return _build_result(document, findings, checks_performed, checks_skipped)
+        note_validation_debug["note_validation_mode"] = "skipped"
+        return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug)
     if _extraction_unreliable(document):
         checks_skipped.append("Document-level extraction quality is low; detailed table checks are limited to clean page/table evidence.")
     statement_findings, statement_performed, statement_skipped = check_primary_statement_consistency(document)
@@ -266,6 +268,7 @@ def review_pdf(
     findings.extend(check_formatting(document, profile))
     note_findings = check_notes_agreement(document, cautious_low_confidence=options.run_cautious_note_agreement)
     findings.extend(note_findings)
+    note_validation_debug = _note_validation_debug(document, options.run_cautious_note_agreement, note_findings)
     if options.run_cautious_note_agreement and document.table_extraction_confidence < 80 and not document.ocr_used:
         note_reference_prompts = [
             finding
@@ -288,7 +291,7 @@ def review_pdf(
     findings.extend(check_standard_checklist(document, profile))
     if totals_findings:
         checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables where indicated in extraction findings.")
-    return _build_result(document, findings, checks_performed, checks_skipped)
+    return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug)
 
 
 def _build_result(
@@ -296,10 +299,12 @@ def _build_result(
     findings: list[Finding],
     checks_performed: list[str] | None = None,
     checks_skipped: list[str] | None = None,
+    note_validation_debug: dict[str, int | str | bool] | None = None,
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     checks_skipped_list = list(dict.fromkeys(checks_skipped or []))
     positive_assurance = _positive_assurance_text(findings, checks_performed_list)
+    note_validation_debug = note_validation_debug or _note_validation_debug(document, False, [])
     metrics = {
         "pages": len(document.pages),
         "text_pages": document.text_pages,
@@ -326,8 +331,28 @@ def _build_result(
         "checks_passed_count": len(checks_performed_list) if positive_assurance else 0,
         "checks_skipped_count": len(checks_skipped_list),
         "positive_assurance": positive_assurance,
+        **note_validation_debug,
     }
     return ReviewResult(findings=findings, metrics=metrics)
+
+
+def _note_validation_debug(
+    document: PdfDocument,
+    enabled: bool,
+    note_findings: list[Finding],
+) -> dict[str, int | str | bool]:
+    note_reference_findings = sum(1 for finding in note_findings if finding.metadata and finding.metadata.get("referenced_note"))
+    if enabled and not document.ocr_used:
+        mode = "review_prompt" if document.table_extraction_confidence < 80 else "strict"
+    else:
+        mode = "skipped" if document.table_extraction_confidence < 80 or document.ocr_used else "strict"
+    return {
+        "cautious_note_validation_enabled": bool(enabled),
+        "note_validation_mode": mode,
+        "note_reference_rows_detected": len(_statement_note_lines(document)) if document.pages else 0,
+        "note_headings_detected": len(_note_headings_by_page(document)) if document.pages else 0,
+        "note_reference_findings": note_reference_findings,
+    }
 
 
 def _positive_assurance_text(findings: list[Finding], checks_performed: list[str]) -> str:
@@ -1089,6 +1114,11 @@ def findings_to_markdown(result: ReviewResult) -> str:
         f"Checks skipped: {result.metrics.get('checks_skipped_count', 0)}",
         f"Findings: {result.metrics['findings']} "
         f"(High {result.metrics['high']}, Medium {result.metrics['medium']}, Low {result.metrics['low']})",
+        f"cautious_note_validation_enabled: {str(result.metrics.get('cautious_note_validation_enabled', False)).lower()}",
+        f"note_validation_mode: {result.metrics.get('note_validation_mode', 'skipped')}",
+        f"note_reference_rows_detected: {result.metrics.get('note_reference_rows_detected', 0)}",
+        f"note_headings_detected: {result.metrics.get('note_headings_detected', 0)}",
+        f"note_reference_findings: {result.metrics.get('note_reference_findings', 0)}",
         "",
         "## Review dimensions",
         "",
