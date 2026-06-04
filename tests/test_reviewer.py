@@ -758,6 +758,31 @@ def test_revenue_note_reference_does_not_suggest_investment_property_without_rev
     )
 
 
+def test_ocr_revenue_heading_prompt_stays_in_note_results_not_exception_register(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of profit or loss\nRevenue Note 13 707,189 297,041", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n3 Rental income\nRental income 707,189 297,041\n13 Investment property\nNarrative only\n"
+                + ("Additional OCR note text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Revenue")
+
+    assert row["Alternative note found"] == "3"
+    assert row["Match confidence"] == "Low"
+    assert row["Result"] == "Review prompt"
+    assert not any(finding.metadata and finding.metadata.get("line_item") == "Revenue" for finding in result.findings)
+
+
 def test_cautious_face_to_note_amount_agreement_skips_non_face_linked_lines(monkeypatch):
     document = PdfDocument(
         [
@@ -1008,6 +1033,22 @@ def test_ocr_note_headings_never_include_pages_before_notes_start_page():
     assert headings["13"] == ("Revenue", 14)
     assert "7" not in headings
     assert "11" not in headings
+
+
+def test_notes_start_page_requires_actual_notes_heading_not_front_matter_phrase(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(2, "Independent auditor's report\nThe notes to the financial statements are part of our audit.", []),
+            PdfPage(14, "Notes to the financial statements\n1 Accounting policies\n13 Revenue", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["notes_section_start_page"] == 14
 
 
 def test_ocr_note_validation_skips_when_notes_section_start_is_not_detected():
@@ -1308,6 +1349,25 @@ def test_confidence_metrics_separate_ocr_text_from_statement_structure(monkeypat
     assert result.metrics["ocr_tables"] == 3
 
 
+def test_statement_structure_confidence_reflects_checkable_rows_not_headings_only(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of profit or loss\nRevenue text without amounts\n" + ("OCR filler\n" * 80), []),
+            PdfPage(2, "Statement of financial position\nTotal assets 500 400\n" + ("OCR filler\n" * 80), []),
+            PdfPage(3, "Statement of changes in equity\nMovement narrative only\n" + ("OCR filler\n" * 80), []),
+            PdfPage(4, "Statement of cash flows\nCash flow narrative only\n" + ("OCR filler\n" * 80), []),
+        ],
+        ocr_used=True,
+        ocr_pages=4,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert int(result.metrics["statement_structure_confidence"].rstrip("%")) < 40
+    assert "Statement of financial position: equity and liabilities equation checked" not in result.metrics["checks_performed"]
+
+
 def test_fuzzy_ocr_statement_page_detection_classifies_distorted_headings(monkeypatch):
     document = PdfDocument(
         [
@@ -1388,6 +1448,9 @@ def test_ocr_statement_rows_ignore_title_and_date_lines(monkeypatch):
                         "Total assets 1,500,000 1,350,000",
                         "Equity 900,000 850,000",
                         "Liabilities 600,000 500,000",
+                        "Trade and other receivables 1,910,631 131,254",
+                        "Cash and cash equivalents 739,387 193,627",
+                        "Financial liabilities 5,356,392 4,555,742",
                         "Total equity and liabilities 1,500,000 1,350,000",
                     ]
                 )
@@ -1409,6 +1472,9 @@ def test_ocr_statement_rows_ignore_title_and_date_lines(monkeypatch):
     assert "taxation | 253,124" in rows
     assert "profit after tax | -120,389 | -428,435" in rows
     assert "non-current assets | 1,200,000 | 1,100,000" in rows
+    assert "trade and other receivables | 1,910,631 | 131,254" in rows
+    assert "cash and cash equivalents | 739,387 | 193,627" in rows
+    assert "financial liabilities | 5,356,392 | 4,555,742" in rows
     assert "total equity and liabilities | 1,500,000 | 1,350,000" in rows
     assert "financial statements for the year ended" not in rows.lower()
     assert "Statement of financial position: equity and liabilities equation checked" in result.metrics["checks_performed"]

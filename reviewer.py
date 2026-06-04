@@ -378,10 +378,9 @@ def _statement_structure_confidence(document: PdfDocument) -> int:
     pages = _classified_primary_statement_pages(document)
     if not pages:
         return 0
-    row_counts = [_statement_row_confidence(page.text) for _name, page in pages.items()]
-    score = min(100, 15 * len(pages) + sum(row_counts))
-    if document.ocr_used:
-        score = min(score, 85)
+    score = sum(_statement_parse_success_score(name, page.text) for name, page in pages.items())
+    detected_page_bonus = min(20, len(pages) * 4)
+    score = min(100, score + detected_page_bonus)
     return max(0, score)
 
 
@@ -405,6 +404,36 @@ def _statement_row_confidence(text: str) -> int:
         )
     )
     return min(40, important * 8)
+
+
+def _statement_parse_success_score(statement_name: str, text: str) -> int:
+    rows = _statement_rows(text)
+    name = statement_name.lower()
+    if "financial position" in name:
+        score = 0
+        if _has_rows(rows, ("non-current assets", "current assets", "total assets")):
+            score += 18
+        if _row_amounts_any(rows, ("equity", "total equity")) and _row_amounts_any(rows, ("liabilities", "financial liabilities", "total liabilities")) and _row_amounts_any(rows, ("total equity and liabilities", "total funds and liabilities")):
+            score += 18
+        return score
+    if "income" in name or "profit" in name:
+        score = 0
+        if "revenue" in rows or "operating revenue" in rows:
+            score += 8
+        if "profit before tax" in rows:
+            score += 8
+        if "taxation" in rows:
+            score += 5
+        if "profit after tax" in rows:
+            score += 8
+        return score
+    if "cash flow" in name:
+        if _row_amounts_any(rows, ("cash at beginning", "cash and cash equivalents at the beginning of the year")) and _row_amounts_any(rows, ("cash at end", "cash and cash equivalents as at the end of the year")):
+            return 18
+        return 0
+    if "changes" in name:
+        return 12 if any("balance as at" in line.lower() for line in text.splitlines()) else 0
+    return _statement_row_confidence(text)
 
 
 def _note_structure_confidence(document: PdfDocument) -> int:
@@ -463,13 +492,22 @@ def _notes_start_page(document: PdfDocument) -> int | None:
 
 
 def _notes_heading_in_text(text: str) -> bool:
-    if re.search(r"\bnotes\s+to\s+the\s+financial\s+statements?\b", text, flags=re.I):
-        return True
-    head = "\n".join(text.splitlines()[:10])
-    normalized_head = _normalise_match_words(head)
-    if not all(term in normalized_head for term in ("notes", "financial", "statements")):
-        return False
-    return _fuzzy_contains(head, "notes to the financial statements", threshold=0.88)
+    for line in text.splitlines()[:18]:
+        stripped = re.sub(r"\s+", " ", line.strip())
+        if re.fullmatch(r"notes\s+to\s+the\s+financial\s+statements?", stripped, flags=re.I):
+            return True
+        normalized = _normalise_match_words(line)
+        if not normalized:
+            continue
+        if any(term in normalized for term in ("refer notes", "see notes", "forming part", "part our audit", "part audit", "auditor report")):
+            continue
+        words = normalized.split()
+        if normalized.startswith("notes to the financial statements") and len(words) <= 8:
+            return True
+        if normalized.startswith("notes") and all(term in normalized for term in ("notes", "financial", "statements")) and len(words) <= 5:
+            if _fuzzy_contains(line, "notes to the financial statements", threshold=0.88):
+                return True
+    return False
 
 
 def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
@@ -478,9 +516,19 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     if not statement_lines:
         return rows
     if document.ocr_used:
+        headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
+        page_ranges = _note_section_page_ranges(document)
+        note_sections = _note_sections(document.text) if _notes_start_page(document) else {}
         for item in statement_lines:
             current_amount = item.amounts[0] if item.amounts else None
             prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+            alternative_ref = _weak_semantic_alternative_note(item, headings, note_sections)
+            result = "Review prompt" if alternative_ref else "Skipped"
+            reason = (
+                f"Heading-only OCR review prompt: Note {alternative_ref} appears semantically closer, but OCR note/table confidence is too low for an exception."
+                if alternative_ref
+                else "Skipped because the document was OCR-assisted and note amount extraction is not reliable."
+            )
             rows.append(
                 _note_agreement_result_row(
                     item,
@@ -488,13 +536,13 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                     prior_amount,
                     "N/A",
                     "N/A",
-                    "",
+                    alternative_ref,
                     "Low",
-                    "Skipped",
-                    "Skipped because the document was OCR-assisted and note amount extraction is not reliable.",
+                    result,
+                    reason,
                     "",
-                    "",
-                    "",
+                    page_ranges.get(item.ref, ""),
+                    "heading match" if alternative_ref else "",
                 )
             )
         return rows
@@ -2040,25 +2088,30 @@ def _check_sfp_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Finding], l
             tolerance,
         )
         performed.append("Statement of financial position: total assets checked from line-extracted rows.")
-    if _has_rows(rows, ("equity", "liabilities", "total equity and liabilities")):
+    equity_amounts = _row_amounts_any(rows, ("equity", "total equity", "share capital and reserves", "capital and reserves"))
+    liability_amounts = _row_amounts_any(rows, ("liabilities", "financial liabilities", "total liabilities"))
+    total_equity_liabilities = _row_amounts_any(rows, ("total equity and liabilities", "total funds and liabilities", "total equity and liability"))
+    if equity_amounts and liability_amounts and total_equity_liabilities:
         _check_vector_equation(
             findings,
             page.number,
             "Statement of financial position",
             "Equity plus liabilities equals total equity and liabilities.",
-            [a + b for a, b in zip(_row_amounts(rows, "equity"), _row_amounts(rows, "liabilities"))],
-            _row_amounts(rows, "total equity and liabilities"),
+            [a + b for a, b in zip(equity_amounts, liability_amounts)],
+            total_equity_liabilities,
             tolerance,
         )
-        _check_vector_equation(
-            findings,
-            page.number,
-            "Statement of financial position",
-            "Total assets equals total equity and liabilities.",
-            _row_amounts(rows, "total assets"),
-            _row_amounts(rows, "total equity and liabilities"),
-            tolerance,
-        )
+        total_assets = _row_amounts(rows, "total assets")
+        if total_assets:
+            _check_vector_equation(
+                findings,
+                page.number,
+                "Statement of financial position",
+                "Total assets equals total equity and liabilities.",
+                total_assets,
+                total_equity_liabilities,
+                tolerance,
+            )
         performed.append("Statement of financial position: equity and liabilities equation checked from line-extracted rows.")
     if performed:
         return findings, performed, skipped
@@ -2258,7 +2311,10 @@ def _statement_row_label_allowed(label: str) -> bool:
         "total assets",
         "equity",
         "liabilities",
+        "financial liabilities",
         "total liabilities",
+        "share capital and reserves",
+        "capital and reserves",
         "total equity and liabilities",
         "cash at beginning",
         "cash at end",
@@ -2289,6 +2345,9 @@ def _statement_row_label_allowed(label: str) -> bool:
         "total current assets",
         "total members fund",
         "trade and other payables",
+        "financial liabilities",
+        "share capital and reserves",
+        "capital and reserves",
         "total funds and liabilities",
         "net cash inflow from operating activities",
         "net cash absorbed in investing activities",
@@ -2352,7 +2411,10 @@ def _canonical_statement_label(label: str) -> str:
         "total members fund",
         "total members' fund",
         "trade and other payables",
+        "financial liabilities",
         "total liabilities",
+        "share capital and reserves",
+        "capital and reserves",
         "total funds and liabilities",
         "net cash inflow from operating activities",
         "net cash absorbed in investing activities",
@@ -2427,6 +2489,14 @@ def _has_rows(rows: dict[str, list[Decimal]], labels: tuple[str, ...]) -> bool:
 
 def _row_amounts(rows: dict[str, list[Decimal]], label: str) -> list[Decimal]:
     return rows.get(label, [])[-2:]
+
+
+def _row_amounts_any(rows: dict[str, list[Decimal]], labels: tuple[str, ...]) -> list[Decimal]:
+    for label in labels:
+        amounts = _row_amounts(rows, label)
+        if amounts:
+            return amounts
+    return []
 
 
 def _check_sum_rows(
@@ -3537,6 +3607,38 @@ def _alternative_note_for_missing_amounts(
             best_count = count
             best_wording = wording
     return best_ref if best_count else ""
+
+
+def _weak_semantic_alternative_note(
+    item: StatementNoteLine,
+    headings: dict[str, str],
+    note_sections: dict[str, str],
+) -> str:
+    referenced_heading = headings.get(item.ref, "")
+    referenced_score = _wording_match_score(item.line_item, referenced_heading)
+    best_ref = ""
+    best_score = referenced_score
+    for ref, heading in headings.items():
+        if ref == item.ref:
+            continue
+        if not _alternative_note_semantically_allowed(item.line_item, heading, note_sections.get(ref, "")):
+            continue
+        score = max(_wording_match_score(item.line_item, heading), _semantic_heading_score(item.line_item, heading))
+        if score >= 0.82 and score > best_score + 0.12:
+            best_ref = ref
+            best_score = score
+    return best_ref
+
+
+def _semantic_heading_score(line_item: str, note_heading: str) -> float:
+    item = _normalise_match_words(line_item)
+    heading = _normalise_match_words(note_heading)
+    revenue_terms = ("revenue", "rental income", "rent income", "operating income", "income", "turnover", "sales")
+    if any(term in item for term in ("revenue", "income", "turnover", "sales")) and any(term in heading for term in revenue_terms):
+        return 0.86
+    if any(term in item for term in ("cash", "bank", "cash equivalents")) and any(term in heading for term in ("cash", "bank", "cash equivalents")):
+        return 0.86
+    return 0.0
 
 
 def _alternative_note_semantically_allowed(line_item: str, note_heading: str, note_section: str = "") -> bool:
