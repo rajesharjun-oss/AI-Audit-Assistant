@@ -524,8 +524,8 @@ def test_cautious_face_to_note_amount_agreement_flags_amount_found_elsewhere():
                         "Notes to the financial statements",
                         "18 Cash and cash equivalents",
                         "Bank balances 100,000 90,000",
-                        "19 Trade and other payables",
-                        "Other payables 875,869 605,645",
+                        "19 Cash balances",
+                        "Bank balances 875,869 605,645",
                     ]
                 ),
                 [],
@@ -547,7 +547,7 @@ def test_cautious_face_to_note_amount_agreement_flags_amount_found_elsewhere():
     assert amount_prompts[0].metadata["amount_match_confidence"] == "Medium"
 
 
-def test_cautious_face_to_note_amount_agreement_flags_amount_not_located():
+def test_cautious_face_to_note_amount_agreement_keeps_low_amount_not_located_out_of_findings(monkeypatch):
     document = PdfDocument(
         [
             PdfPage(1, "Statement of income and expenditure\nOther Revenue Note 9 307,482 189,751", []),
@@ -558,17 +558,20 @@ def test_cautious_face_to_note_amount_agreement_flags_amount_not_located():
             ),
         ]
     )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
 
     findings = check_notes_agreement(document, cautious_low_confidence=True)
     amount_prompts = [finding for finding in findings if "amount not located in referenced note" in finding.issue.lower()]
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    rows = result.metrics["note_agreement_results"]
 
-    assert amount_prompts
-    assert amount_prompts[0].severity == "Low"
-    assert amount_prompts[0].metadata["referenced_note"] == "9"
-    assert amount_prompts[0].metadata["alternative_note_found"] == ""
-    assert amount_prompts[0].metadata["current_year_amount_found"] == "No"
-    assert amount_prompts[0].metadata["prior_year_amount_found"] == "No"
-    assert amount_prompts[0].metadata["amount_found_in_note"] == ""
+    assert not amount_prompts
+    assert any(
+        row["Line item"] == "Other Revenue"
+        and row["Result"] == "Review prompt"
+        and row["Reason"] == "Amount not located in referenced note."
+        for row in rows
+    )
 
 
 def test_cautious_face_to_note_amount_agreement_does_not_flag_when_amounts_are_in_referenced_note():
@@ -583,6 +586,62 @@ def test_cautious_face_to_note_amount_agreement_does_not_flag_when_amounts_are_i
 
     assert not any("amount not located" in finding.issue.lower() for finding in findings)
     assert not any("amount appears in another note" in finding.issue.lower() for finding in findings)
+
+
+def test_cautious_face_to_note_amount_agreement_matches_normalized_visible_amounts(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of income and expenditure\nOperating Revenue Note 7 2,783,064 2,029,846", []),
+            PdfPage(2, "Notes to the financial statements\n7 Operating Revenue\nSubscriptions 2 ,783,064\nPrior year 2\n,029,846", []),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Operating Revenue")
+
+    assert row["Result"] == "Passed"
+    assert row["Current year amount found in referenced note?"] == "Yes"
+    assert row["Prior year amount found in referenced note?"] == "Yes"
+    assert "normalized amount" in row["Matching method"]
+    assert "2 ,783,064" in row["Matched text snippet from referenced note"]
+
+
+def test_cautious_face_to_note_amount_agreement_does_not_suggest_amount_only_alternative(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of income and expenditure\nOperating Revenue Note 7 2,783,064 2,029,846", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n7 Operating Revenue\nSubscriptions 100,000 90,000\n8 Operating Expenditure\nExpenses 2,783,064 2,029,846",
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Operating Revenue")
+
+    assert row["Alternative note found"] == ""
+    assert row["Result"] == "Review prompt"
+    assert not any("Operating Revenue amount appears in Note 8" in finding.issue for finding in result.findings)
+
+
+def test_cautious_face_to_note_amount_agreement_skips_non_face_linked_lines(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nCurrent liabilities Note 19 141,411 154,819", []),
+            PdfPage(2, "Notes to the financial statements\n19 Trade and other payables\nOther payables 141,411 154,819", []),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Current Liabilities")
+
+    assert row["Result"] == "Skipped"
+    assert row["Reason"] == "Skipped - not a face-linked note line"
 
 
 def test_cautious_face_to_note_amount_agreement_does_not_treat_amount_digits_as_note_refs():

@@ -15,6 +15,10 @@ NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\
 YEAR_RE = re.compile(r"\b20\d{2}\b")
 NOTE_REF_RE = re.compile(r"\bnote\s+(\d+[A-Za-z]?)\b|\bnotes?\s+(\d+[A-Za-z]?)\b", re.I)
 NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)(?:\s*\([a-z]\))?\s*[\).:-]?\s+(.{3,100})$", re.I)
+NORMALIZED_AMOUNT_RE = re.compile(
+    r"\(?-?\d{1,3}(?:\s*,\s*\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?",
+    re.M,
+)
 NOTE_NUMBER_ONLY_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s+((?:20\d{2}|N['’]?\s?000|\$?000s?|\d{4})[\s,]*)+$", re.I)
 ENTITY_SUFFIX_RE = re.compile(r"\b(?:limited|ltd|plc|inc|corp|corporation|company)\b", re.I)
 VALID_CURRENCIES = {"NGN", "USD", "GBP", "EUR", "ZAR", "GHS", "KES", "CAD", "AUD"}
@@ -357,6 +361,17 @@ def _note_validation_debug(
     }
 
 
+def _note_section_page_ranges(document: PdfDocument) -> dict[str, str]:
+    headings = _note_headings_by_page(document)
+    ordered = sorted(headings.items(), key=lambda item: (_note_sort_key(item[0]), item[1][1]))
+    ranges: dict[str, str] = {}
+    for index, (ref, (_title, start_page)) in enumerate(ordered):
+        next_page = ordered[index + 1][1][1] if index + 1 < len(ordered) else start_page
+        end_page = max(start_page, next_page - 1)
+        ranges[ref] = f"Page {start_page}" if end_page == start_page else f"Pages {start_page}-{end_page}"
+    return ranges
+
+
 def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     statement_lines = _statement_note_lines(document)
@@ -377,16 +392,39 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                     "Low",
                     "Skipped",
                     "Skipped because the document was OCR-assisted and note amount extraction is not reliable.",
+                    "",
+                    "",
+                    "",
                 )
             )
         return rows
     note_sections = _note_sections(document.text)
     headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
+    page_ranges = _note_section_page_ranges(document)
     _scale_label, tolerance = _detect_rounding_scale(document.text)
     low_confidence = document.table_extraction_confidence < 80
     for item in statement_lines:
         current_amount = item.amounts[0] if item.amounts else None
         prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+        skip_reason = _note_agreement_skip_reason(item)
+        if skip_reason:
+            rows.append(
+                _note_agreement_result_row(
+                    item,
+                    current_amount,
+                    prior_amount,
+                    "N/A",
+                    "N/A",
+                    "",
+                    "Low",
+                    "Skipped",
+                    f"Skipped - {skip_reason}",
+                    "",
+                    page_ranges.get(item.ref, ""),
+                    "",
+                )
+            )
+            continue
         referenced_section = note_sections.get(item.ref, "")
         if _is_disclosure_only_note(headings.get(item.ref, "")):
             rows.append(
@@ -400,6 +438,9 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                     "Low",
                     "Skipped",
                     "Skipped because the referenced note is disclosure-only.",
+                    "",
+                    page_ranges.get(item.ref, ""),
+                    "",
                 )
             )
             continue
@@ -415,11 +456,18 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                     "Low",
                     "Review prompt" if low_confidence else "Skipped",
                     "Referenced note section was not detected.",
+                    "",
+                    page_ranges.get(item.ref, ""),
+                    "",
                 )
             )
             continue
-        current_found = _single_amount_in_section(current_amount, referenced_section, tolerance)
-        prior_found = _single_amount_in_section(prior_amount, referenced_section, tolerance)
+        current_match = _amount_match_in_section(current_amount, referenced_section, tolerance)
+        prior_match = _amount_match_in_section(prior_amount, referenced_section, tolerance)
+        current_found = bool(current_match["found"])
+        prior_found = bool(prior_match["found"])
+        matched_snippet = str(current_match["snippet"] or prior_match["snippet"] or "")
+        matching_method = _combined_matching_method(current_match, prior_match)
         if current_found and (prior_amount is None or prior_found):
             rows.append(
                 _note_agreement_result_row(
@@ -432,6 +480,9 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                     "High",
                     "Passed",
                     "Current and prior year amounts were located in the referenced note section.",
+                    matched_snippet,
+                    page_ranges.get(item.ref, ""),
+                    matching_method,
                 )
             )
             continue
@@ -447,6 +498,9 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                 _amount_match_confidence(current_found, prior_found, alternative_ref, cautious_review_prompt=low_confidence),
                 "Review prompt" if low_confidence else "Review prompt",
                 f"Amount appears in another note: Note {alternative_ref}." if alternative_ref else "Amount not located in referenced note.",
+                matched_snippet,
+                page_ranges.get(item.ref, ""),
+                f"heading match / {matching_method or 'normalized amount'}" if alternative_ref else (matching_method or "not found"),
             )
         )
     return rows
@@ -462,6 +516,9 @@ def _note_agreement_result_row(
     confidence: str,
     result: str,
     reason: str,
+    matched_snippet: str,
+    page_range: str,
+    matching_method: str,
 ) -> dict[str, str]:
     return {
         "Statement": item.statement_name,
@@ -475,6 +532,9 @@ def _note_agreement_result_row(
         "Match confidence": confidence,
         "Result": result,
         "Reason": reason,
+        "Matched text snippet from referenced note": matched_snippet,
+        "Note section page range": page_range,
+        "Matching method": matching_method,
     }
 
 
@@ -1120,7 +1180,6 @@ def check_notes_agreement(
                 headings,
                 tolerance,
                 cautious_review_prompt=True,
-                suppressed_lines={(finding.metadata or {}).get("line_key", "") for finding in misref_findings},
             )
         )
         return findings
@@ -2416,8 +2475,8 @@ def _parse_decimal(value: object) -> Decimal | None:
 
 
 def _amounts_in_text(text: str) -> list[Decimal]:
-    amounts = [_parse_decimal(match.group(0)) for match in NUMBER_RE.finditer(text)]
-    return [amount for amount in amounts if amount is not None]
+    amounts = [amount for amount, _snippet, _method in _normalized_amount_candidates(text)]
+    return amounts
 
 
 def _amount_near(text: str, labels: tuple[str, ...]) -> Decimal | None:
@@ -2655,6 +2714,35 @@ def _clean_statement_line_item(text: str) -> str:
     return cleaned
 
 
+def _note_agreement_skip_reason(item: StatementNoteLine) -> str:
+    statement = item.statement_name.lower()
+    label = _normalise_match_words(item.line_item)
+    raw_label = item.line_item.lower()
+    if "value added" in statement or "five year" in statement or "financial summary" in statement:
+        return "not a face-linked note line"
+    broad_labels = {
+        "current liabilities",
+        "liabilities",
+        "total liabilities",
+        "current assets",
+        "total current assets",
+        "total assets",
+        "total equity liabilities",
+        "surplus year",
+        "surplus for year",
+        "net cash",
+        "cash generated operations",
+        "cash used operations",
+    }
+    if label in broad_labels:
+        return "not a face-linked note line"
+    if raw_label.startswith(("total ", "net cash", "surplus for the year")) and not item.explicit_ref:
+        return "not a face-linked note line"
+    if "cash flow" in statement and re.search(r"\b(total|net|cash generated|cash used|increase|decrease)\b", raw_label):
+        return "not a face-linked note line"
+    return ""
+
+
 def _check_possible_wrong_note_references(
     statement_lines: list[StatementNoteLine],
     note_sections: dict[str, str],
@@ -2665,6 +2753,8 @@ def _check_possible_wrong_note_references(
     findings: list[Finding] = []
     flagged: set[tuple[str, str]] = set()
     for item in statement_lines:
+        if _note_agreement_skip_reason(item):
+            continue
         referenced = note_sections.get(item.ref, "")
         referenced_heading = headings.get(item.ref, "")
         if _is_disclosure_only_note(referenced_heading):
@@ -2765,6 +2855,8 @@ def _check_cautious_face_note_amount_agreement(
         line_key = f"{item.ref}|{item.line}"
         if line_key in suppressed_lines or _is_disclosure_only_note(headings.get(item.ref, "")):
             continue
+        if _note_agreement_skip_reason(item):
+            continue
         if not item.amounts or len(item.amounts) < 1:
             continue
         referenced_section = note_sections.get(item.ref, "")
@@ -2772,8 +2864,10 @@ def _check_cautious_face_note_amount_agreement(
             continue
         current_amount = item.amounts[0] if len(item.amounts) >= 1 else None
         prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
-        current_found = _single_amount_in_section(current_amount, referenced_section, tolerance)
-        prior_found = _single_amount_in_section(prior_amount, referenced_section, tolerance)
+        current_match = _amount_match_in_section(current_amount, referenced_section, tolerance)
+        prior_match = _amount_match_in_section(prior_amount, referenced_section, tolerance)
+        current_found = current_match["found"]
+        prior_found = prior_match["found"]
         if current_found and (prior_amount is None or prior_found):
             continue
         heading_score = _wording_match_score(item.line_item, headings.get(item.ref, ""))
@@ -2786,6 +2880,8 @@ def _check_cautious_face_note_amount_agreement(
             else f"Amount not located in referenced note: {item.line_item.title()} references Note {item.ref}."
         )
         confidence = _amount_match_confidence(current_found, prior_found, alternative_ref, cautious_review_prompt)
+        if confidence == "Low":
+            continue
         findings.append(
             Finding(
                 "Notes agreement",
@@ -2819,9 +2915,68 @@ def _check_cautious_face_note_amount_agreement(
 
 
 def _single_amount_in_section(amount: Decimal | None, section: str, tolerance: Decimal) -> bool:
+    return _amount_match_in_section(amount, section, tolerance)["found"]
+
+
+def _amount_match_in_section(amount: Decimal | None, section: str, tolerance: Decimal) -> dict[str, object]:
     if amount is None or amount == 0 or abs(amount) <= tolerance * 5:
-        return True
-    return any(abs(note_amount - amount) <= tolerance for note_amount in _amounts_in_text(section))
+        return {"found": True, "snippet": "", "method": "not material"}
+    for candidate, snippet, method in _normalized_amount_candidates(section):
+        if abs(candidate - amount) <= tolerance:
+            return {"found": True, "snippet": snippet, "method": method}
+        if amount < 0 and abs(abs(candidate) - abs(amount)) <= tolerance:
+            return {"found": True, "snippet": snippet, "method": f"{method} / absolute value"}
+    return {"found": False, "snippet": "", "method": "not found"}
+
+
+def _normalized_amount_candidates(text: str) -> list[tuple[Decimal, str, str]]:
+    candidates: list[tuple[Decimal, str, str]] = []
+    seen: set[tuple[Decimal, str]] = set()
+
+    def add_candidate(raw: str, start: int, end: int) -> None:
+        parsed = _parse_normalized_amount(raw)
+        if parsed is None:
+            return
+        normalized_raw = _normalize_amount_token(raw)
+        method = "exact amount" if raw.strip() == f"{parsed:,}" else "normalized amount"
+        key = (parsed, normalized_raw)
+        if key not in seen:
+            candidates.append((parsed, _amount_snippet_around(text, start, end), method))
+            seen.add(key)
+
+    for match in re.finditer(r"(?<![\d,])\d\s+\d{1,2},\d{3}\b", text):
+        add_candidate(match.group(0), match.start(), match.end())
+    for match in NORMALIZED_AMOUNT_RE.finditer(text):
+        raw = match.group(0)
+        add_candidate(raw, match.start(), match.end())
+    return candidates
+
+
+def _parse_normalized_amount(value: str) -> Decimal | None:
+    raw = str(value or "").strip()
+    if not raw or raw in {"-", "--"}:
+        return None
+    negative = raw.startswith("(") and raw.endswith(")")
+    raw = _normalize_amount_token(raw)
+    raw = raw.strip("()")
+    try:
+        amount = Decimal(raw)
+    except InvalidOperation:
+        return None
+    return -amount if negative else amount
+
+
+def _normalize_amount_token(value: str) -> str:
+    token = re.sub(r"\s*[,]\s*", ",", value.strip())
+    token = re.sub(r"\b(\d)\s+(\d{1,2},\d{3})\b", r"\1\2", token)
+    token = re.sub(r"(?<=\d)\s*\n\s*(?=\d{3}\b)", ",", token)
+    token = re.sub(r"(?<=\d)\s+(?=\d{3}\b)", "", token)
+    return token.replace(",", "").replace(" ", "")
+
+
+def _amount_snippet_around(text: str, start: int, end: int, window: int = 70) -> str:
+    snippet = text[max(0, start - window) : min(len(text), end + window)]
+    return re.sub(r"\s+", " ", snippet).strip()
 
 
 def _alternative_note_for_missing_amounts(
@@ -2839,9 +2994,10 @@ def _alternative_note_for_missing_amounts(
     for ref, section in note_sections.items():
         if ref == item.ref or _is_disclosure_only_note(headings.get(ref, "")):
             continue
-        amounts = _amounts_in_text(section)
-        count = sum(1 for amount in meaningful if any(abs(note_amount - amount) <= tolerance for note_amount in amounts))
         wording = _wording_match_score(item.line_item, headings.get(ref, ""))
+        if wording < 0.82:
+            continue
+        count = sum(1 for amount in meaningful if _amount_match_in_section(amount, section, tolerance)["found"])
         if count > best_count or (count == best_count and count > 0 and wording > best_wording):
             best_ref = ref
             best_count = count
@@ -2859,6 +3015,15 @@ def _amount_match_confidence(current_found: bool, prior_found: bool, alternative
 
 def _yes_no(value: bool) -> str:
     return "Yes" if value else "No"
+
+
+def _combined_matching_method(current_match: dict[str, object], prior_match: dict[str, object]) -> str:
+    methods = [
+        str(match.get("method", ""))
+        for match in (current_match, prior_match)
+        if match.get("found") and match.get("method") not in {"", "not material"}
+    ]
+    return " / ".join(dict.fromkeys(methods))
 
 
 def _note_reference_reason(match: dict[str, bool], suggested_ref: str, cautious_review_prompt: bool) -> str:
@@ -2922,11 +3087,10 @@ def _amounts_match_note(
     meaningful = [amount for amount in amounts if abs(amount) > tolerance * 5 and amount != 0]
     if not meaningful:
         return False
-    section_amounts = _amounts_in_text(note_section)
     matched = [
         amount
         for amount in meaningful
-        if any(abs(note_amount - amount) <= tolerance for note_amount in section_amounts)
+        if _amount_match_in_section(amount, note_section, tolerance)["found"]
     ]
     if not matched:
         return False
@@ -2937,7 +3101,7 @@ def _amounts_match_note(
         occurrence_count = sum(
             1
             for section in all_sections.values()
-            if any(abs(note_amount - amount) <= tolerance for note_amount in _amounts_in_text(section))
+            if _amount_match_in_section(amount, section, tolerance)["found"]
         )
         if occurrence_count > 2:
             return False

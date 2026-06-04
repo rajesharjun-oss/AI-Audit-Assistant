@@ -30,6 +30,8 @@ def _finding_rows(result) -> list[dict[str, str]]:
     rows = []
     for index, finding in enumerate(result.findings, start=1):
         metadata = finding.metadata or {}
+        if finding.category == "Notes agreement" and metadata.get("match_confidence") == "Low":
+            continue
         rows.append(
             {
             "ID": f"EX-{index:03d}",
@@ -177,6 +179,9 @@ def _build_excel_export(result) -> bytes:
                 "Match confidence": "",
                 "Result": "Skipped",
                 "Reason": "No statement lines with note references were detected.",
+                "Matched text snippet from referenced note": "",
+                "Note section page range": "",
+                "Matching method": "",
             }
         ]
         pd.DataFrame(note_agreement_rows).to_excel(writer, sheet_name="Note agreement results", index=False)
