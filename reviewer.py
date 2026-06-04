@@ -325,6 +325,7 @@ def _build_result(
         "medium": sum(1 for item in findings if item.severity == "Medium"),
         "low": sum(1 for item in findings if item.severity == "Low"),
         "note_headings": _format_note_heading_debug(document),
+        "note_agreement_results": _note_agreement_result_rows(document),
         "detected_profile": infer_detected_profile(document),
         "checks_performed": "\n".join(checks_performed_list) or "No deterministic checks completed.",
         "checks_skipped": "\n".join(checks_skipped_list) or "No major checks skipped.",
@@ -354,6 +355,133 @@ def _note_validation_debug(
         "note_headings_detected": len(_note_headings_by_page(document)) if document.pages else 0,
         "note_reference_findings": note_reference_findings,
     }
+
+
+def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    statement_lines = _statement_note_lines(document)
+    if not statement_lines:
+        return rows
+    if document.ocr_used:
+        for item in statement_lines:
+            current_amount = item.amounts[0] if item.amounts else None
+            prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+            rows.append(
+                _note_agreement_result_row(
+                    item,
+                    current_amount,
+                    prior_amount,
+                    "N/A",
+                    "N/A",
+                    "",
+                    "Low",
+                    "Skipped",
+                    "Skipped because the document was OCR-assisted and note amount extraction is not reliable.",
+                )
+            )
+        return rows
+    note_sections = _note_sections(document.text)
+    headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
+    _scale_label, tolerance = _detect_rounding_scale(document.text)
+    low_confidence = document.table_extraction_confidence < 80
+    for item in statement_lines:
+        current_amount = item.amounts[0] if item.amounts else None
+        prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+        referenced_section = note_sections.get(item.ref, "")
+        if _is_disclosure_only_note(headings.get(item.ref, "")):
+            rows.append(
+                _note_agreement_result_row(
+                    item,
+                    current_amount,
+                    prior_amount,
+                    "N/A",
+                    "N/A",
+                    "",
+                    "Low",
+                    "Skipped",
+                    "Skipped because the referenced note is disclosure-only.",
+                )
+            )
+            continue
+        if not referenced_section:
+            rows.append(
+                _note_agreement_result_row(
+                    item,
+                    current_amount,
+                    prior_amount,
+                    "No",
+                    "No" if prior_amount is not None else "N/A",
+                    "",
+                    "Low",
+                    "Review prompt" if low_confidence else "Skipped",
+                    "Referenced note section was not detected.",
+                )
+            )
+            continue
+        current_found = _single_amount_in_section(current_amount, referenced_section, tolerance)
+        prior_found = _single_amount_in_section(prior_amount, referenced_section, tolerance)
+        if current_found and (prior_amount is None or prior_found):
+            rows.append(
+                _note_agreement_result_row(
+                    item,
+                    current_amount,
+                    prior_amount,
+                    "Yes",
+                    "Yes" if prior_amount is not None else "N/A",
+                    "",
+                    "High",
+                    "Passed",
+                    "Current and prior year amounts were located in the referenced note section.",
+                )
+            )
+            continue
+        alternative_ref = _alternative_note_for_missing_amounts(item, note_sections, headings, tolerance)
+        rows.append(
+            _note_agreement_result_row(
+                item,
+                current_amount,
+                prior_amount,
+                _yes_no(current_found),
+                _yes_no(prior_found) if prior_amount is not None else "N/A",
+                alternative_ref,
+                _amount_match_confidence(current_found, prior_found, alternative_ref, cautious_review_prompt=low_confidence),
+                "Review prompt" if low_confidence else "Review prompt",
+                f"Amount appears in another note: Note {alternative_ref}." if alternative_ref else "Amount not located in referenced note.",
+            )
+        )
+    return rows
+
+
+def _note_agreement_result_row(
+    item: StatementNoteLine,
+    current_amount: Decimal | None,
+    prior_amount: Decimal | None,
+    current_found: str,
+    prior_found: str,
+    alternative_ref: str,
+    confidence: str,
+    result: str,
+    reason: str,
+) -> dict[str, str]:
+    return {
+        "Statement": item.statement_name,
+        "Line item": item.line_item.title(),
+        "Referenced note": item.ref,
+        "Current year amount": _format_decimal_for_export(current_amount),
+        "Prior year amount": _format_decimal_for_export(prior_amount),
+        "Current year amount found in referenced note?": current_found,
+        "Prior year amount found in referenced note?": prior_found,
+        "Alternative note found": alternative_ref,
+        "Match confidence": confidence,
+        "Result": result,
+        "Reason": reason,
+    }
+
+
+def _format_decimal_for_export(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    return f"{value:,.0f}"
 
 
 def _positive_assurance_text(findings: list[Finding], checks_performed: list[str]) -> str:

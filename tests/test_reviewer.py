@@ -624,6 +624,45 @@ def test_review_pdf_reports_cautious_note_reference_override_as_performed(monkey
     assert result.metrics["note_reference_findings"] == 0
 
 
+def test_note_agreement_results_include_passed_and_review_prompt_rows(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Cash Note 18 875,869 605,645",
+                        "Trade payables Note 19 141,411 154,819",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "18 Cash and cash equivalents",
+                        "Cash at bank 875,869 605,645",
+                        "19 Trade and other payables",
+                        "Other payables 141,411 100,000",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    rows = result.metrics["note_agreement_results"]
+
+    assert any(row["Line item"] == "Cash" and row["Result"] == "Passed" for row in rows)
+    assert any(row["Line item"] == "Trade Payables" and row["Result"] == "Review prompt" for row in rows)
+    assert any(row["Prior year amount found in referenced note?"] == "No" for row in rows)
+
+
 def test_notes_agreement_is_conservative_for_ocr_documents():
     document = PdfDocument(
         [

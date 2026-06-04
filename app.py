@@ -102,6 +102,13 @@ def _note_heading_rows(result) -> list[dict[str, str]]:
     return rows
 
 
+def _note_agreement_result_rows(result) -> list[dict[str, str]]:
+    rows = result.metrics.get("note_agreement_results", [])
+    if isinstance(rows, list):
+        return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
 def _build_excel_export(result) -> bytes:
     output = BytesIO()
     summary_rows = [
@@ -157,6 +164,22 @@ def _build_excel_export(result) -> bytes:
             }
         ]
         pd.DataFrame(exception_rows).to_excel(writer, sheet_name="Exception register", index=False)
+        note_agreement_rows = _note_agreement_result_rows(result) or [
+            {
+                "Statement": "",
+                "Line item": "",
+                "Referenced note": "",
+                "Current year amount": "",
+                "Prior year amount": "",
+                "Current year amount found in referenced note?": "",
+                "Prior year amount found in referenced note?": "",
+                "Alternative note found": "",
+                "Match confidence": "",
+                "Result": "Skipped",
+                "Reason": "No statement lines with note references were detected.",
+            }
+        ]
+        pd.DataFrame(note_agreement_rows).to_excel(writer, sheet_name="Note agreement results", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
         pd.DataFrame(_note_heading_rows(result)).to_excel(writer, sheet_name="Notes detected", index=False)
@@ -171,7 +194,23 @@ def _build_excel_export(result) -> bytes:
                 max_length = max((len(str(cell.value or "")) for cell in column_cells), default=10)
                 worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 70)
         _format_exception_register_sheet(writer.book["Exception register"])
+        _format_excel_table_sheet(writer.book["Note agreement results"], "NoteAgreementResults")
     return output.getvalue()
+
+
+def _format_excel_table_sheet(worksheet, table_name: str) -> None:
+    max_row = max(worksheet.max_row, 2)
+    max_col = worksheet.max_column
+    table_ref = f"A1:{get_column_letter(max_col)}{max_row}"
+    table = Table(displayName=table_name, ref=table_ref)
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    worksheet.add_table(table)
 
 
 def _format_exception_register_sheet(worksheet) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
@@ -110,7 +111,7 @@ class Finding:
 @dataclass
 class ReviewResult:
     findings: list[Finding]
-    metrics: dict[str, int | str | dict[str, str]]
+    metrics: dict[str, Any]
 
 
 @dataclass
