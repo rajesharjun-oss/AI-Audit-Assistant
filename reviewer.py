@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from extraction import extract_pdf, extract_pdf_with_ocr
@@ -16,6 +18,16 @@ NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s*[\).:-]?\s+(.{3,
 NOTE_NUMBER_ONLY_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s+((?:20\d{2}|N['’]?\s?000|\$?000s?|\d{4})[\s,]*)+$", re.I)
 ENTITY_SUFFIX_RE = re.compile(r"\b(?:limited|ltd|plc|inc|corp|corporation|company)\b", re.I)
 VALID_CURRENCIES = {"NGN", "USD", "GBP", "EUR", "ZAR", "GHS", "KES", "CAD", "AUD"}
+
+
+@dataclass(frozen=True)
+class StatementNoteLine:
+    ref: str
+    line_item: str
+    line: str
+    amounts: tuple[Decimal, ...]
+    page_number: int
+    statement_name: str
 
 
 POLICY_RULES = {
@@ -942,7 +954,16 @@ def check_notes_agreement(
             )
 
     note_sections = _note_sections(text)
+    misref_findings, misreferenced_lines = _check_possible_wrong_note_references(
+        _statement_note_lines(document),
+        note_sections,
+        headings,
+        tolerance,
+    )
+    findings.extend(misref_findings)
     for ref, line, amount in _statement_lines_with_note_refs(document):
+        if (ref, line) in misreferenced_lines:
+            continue
         section = note_sections.get(ref, "")
         if not section or _is_disclosure_only_note(headings.get(ref, "")):
             continue
@@ -2337,18 +2358,179 @@ def _statement_note_references(document: PdfDocument) -> set[str]:
     return refs
 
 
-def _statement_lines_with_note_refs(document: PdfDocument) -> list[tuple[str, str, Decimal]]:
-    lines: list[tuple[str, str, Decimal]] = []
+def _statement_note_lines(document: PdfDocument) -> list[StatementNoteLine]:
+    items: list[StatementNoteLine] = []
     for page in document.pages:
         if _is_notes_page(page.text):
             continue
+        statement_name = _statement_name_from_page(page.text)
         for line in page.text.splitlines():
-            refs = _refs_in_text(line) | _note_refs_from_statement_line(line)
-            amount = _last_amount(line)
-            if refs and amount is not None:
-                for ref in refs:
-                    lines.append((ref, line, amount))
+            parsed = _parse_statement_note_line(line, page.number, statement_name)
+            if parsed:
+                items.append(parsed)
+    return items
+
+
+def _statement_lines_with_note_refs(document: PdfDocument) -> list[tuple[str, str, Decimal]]:
+    lines: list[tuple[str, str, Decimal]] = []
+    for item in _statement_note_lines(document):
+        if item.amounts:
+            lines.append((item.ref, item.line, item.amounts[-1]))
     return lines
+
+
+def _parse_statement_note_line(line: str, page_number: int, statement_name: str) -> StatementNoteLine | None:
+    if not _looks_like_primary_statement_line(line):
+        return None
+    explicit_ref = next(iter(_refs_in_text(line)), "")
+    note_match = NOTE_REF_RE.search(line)
+    implicit_match = None
+    if not explicit_ref:
+        implicit_match = re.search(r"\b(\d{1,2}[A-C]?)\b(?=\s+\(?-?\d[\d,\s]*\)?)", line, flags=re.I)
+    ref = explicit_ref or (implicit_match.group(1).upper() if implicit_match else "")
+    if not ref or not _valid_note_number(ref):
+        return None
+    amounts = tuple(_amounts_from_statement_line(line)[-2:])
+    if not amounts:
+        return None
+    ref_start = note_match.start() if note_match else (implicit_match.start() if implicit_match else len(line))
+    label = _clean_statement_line_item(line[:ref_start])
+    if not label:
+        return None
+    return StatementNoteLine(ref.upper(), label, line.strip(), amounts, page_number, statement_name)
+
+
+def _statement_name_from_page(text: str) -> str:
+    for line in text.splitlines()[:12]:
+        clean = re.sub(r"\s+", " ", line).strip()
+        if re.search(r"^statement of", clean, flags=re.I):
+            return clean
+    return "Primary statements"
+
+
+def _clean_statement_line_item(text: str) -> str:
+    cleaned = _statement_label(text)
+    cleaned = re.sub(r"\b(total|net)\b", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
+    return cleaned
+
+
+def _check_possible_wrong_note_references(
+    statement_lines: list[StatementNoteLine],
+    note_sections: dict[str, str],
+    headings: dict[str, str],
+    tolerance: Decimal,
+) -> tuple[list[Finding], set[tuple[str, str]]]:
+    findings: list[Finding] = []
+    flagged: set[tuple[str, str]] = set()
+    for item in statement_lines:
+        referenced = note_sections.get(item.ref, "")
+        if not referenced or _is_disclosure_only_note(headings.get(item.ref, "")):
+            continue
+        referenced_match = _note_match_strength(item, headings.get(item.ref, ""), referenced, tolerance)
+        if referenced_match["wording"] or referenced_match["amount"]:
+            continue
+        best_ref = ""
+        best_score = -1
+        best_match: dict[str, bool] = {"wording": False, "amount": False}
+        for candidate_ref, section in note_sections.items():
+            if candidate_ref == item.ref or _is_disclosure_only_note(headings.get(candidate_ref, "")):
+                continue
+            match = _note_match_strength(item, headings.get(candidate_ref, ""), section, tolerance, all_sections=note_sections)
+            if not (match["wording"] or match["amount"]):
+                continue
+            score = (2 if match["wording"] else 0) + (3 if match["amount"] else 0)
+            if score > best_score:
+                best_ref = candidate_ref
+                best_score = score
+                best_match = match
+        if not best_ref:
+            continue
+        confidence = "High" if best_match["wording"] and best_match["amount"] else "Medium" if best_match["amount"] else "Low"
+        findings.append(
+            Finding(
+                "Notes agreement",
+                confidence,
+                f"Page {item.page_number} | {item.statement_name}",
+                "Possible wrong note reference detected.",
+                (
+                    f"Statement line '{item.line_item}' references Note {item.ref}, but the matching "
+                    f"item/amount appears to be in Note {best_ref}. Line: {item.line[:160]}. "
+                    f"Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}."
+                ),
+                "Review the face statement note reference and correct it if the linked note number is wrong.",
+            )
+        )
+        flagged.add((item.ref, item.line))
+    return findings, flagged
+
+
+def _note_match_strength(
+    item: StatementNoteLine,
+    note_title: str,
+    note_section: str,
+    tolerance: Decimal,
+    all_sections: dict[str, str] | None = None,
+) -> dict[str, bool]:
+    wording = _wording_matches_note(item.line_item, note_title, note_section)
+    amount = _amounts_match_note(item.amounts, note_section, tolerance, all_sections)
+    return {"wording": wording, "amount": amount}
+
+
+def _wording_matches_note(line_item: str, note_title: str, note_section: str) -> bool:
+    target = _normalise_match_words(line_item)
+    if len(target) < 4:
+        return False
+    candidates = [_normalise_match_words(note_title)]
+    for line in note_section.splitlines()[:40]:
+        clean = _normalise_match_words(line)
+        if clean:
+            candidates.append(clean)
+    return any(
+        target in candidate
+        or candidate in target
+        or SequenceMatcher(None, target, candidate).ratio() >= 0.82
+        for candidate in candidates
+        if len(candidate) >= 4
+    )
+
+
+def _amounts_match_note(
+    amounts: tuple[Decimal, ...],
+    note_section: str,
+    tolerance: Decimal,
+    all_sections: dict[str, str] | None = None,
+) -> bool:
+    meaningful = [amount for amount in amounts if abs(amount) > tolerance * 5 and amount != 0]
+    if not meaningful:
+        return False
+    section_amounts = _amounts_in_text(note_section)
+    matched = [
+        amount
+        for amount in meaningful
+        if any(abs(note_amount - amount) <= tolerance for note_amount in section_amounts)
+    ]
+    if not matched:
+        return False
+    if len(meaningful) > 1:
+        return len(matched) >= 2
+    amount = meaningful[0]
+    if all_sections:
+        occurrence_count = sum(
+            1
+            for section in all_sections.values()
+            if any(abs(note_amount - amount) <= tolerance for note_amount in _amounts_in_text(section))
+        )
+        if occurrence_count > 2:
+            return False
+    return True
+
+
+def _normalise_match_words(text: str) -> str:
+    text = re.sub(r"[^a-z0-9& ]", " ", text.lower())
+    stop_words = {"the", "and", "or", "of", "to", "from"}
+    words = [word for word in text.split() if word not in stop_words and not word.isdigit()]
+    return " ".join(words)
 
 
 def _refs_in_text(text: str) -> set[str]:

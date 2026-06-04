@@ -376,6 +376,51 @@ def test_disclosure_only_notes_are_not_flagged_as_unreferenced():
     assert not any("note 28 exists but was not referenced" in finding.issue.lower() for finding in findings)
 
 
+def test_notes_check_flags_possible_wrong_note_reference_when_item_is_in_another_note():
+    filler = "Revenue 100 90\n" * 80
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of income and expenditure\nOther Revenue 7 307,482 189,751\n" + filler,
+                [],
+            ),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n7 Operating revenue\nSubscriptions 242,511 120,424\nRegistrations 75,392 81,050\n9 Other Revenue\nFair value gain 307,482 189,751\n",
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    wrong_ref = [finding for finding in findings if "possible wrong note reference" in finding.issue.lower()]
+    assert wrong_ref
+    assert wrong_ref[0].severity == "High"
+    assert "references Note 7" in wrong_ref[0].evidence
+    assert "Note 9" in wrong_ref[0].evidence
+
+
+def test_wrong_note_reference_check_respects_low_confidence_gate():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of income and expenditure\nOther Revenue 7 307,482 189,751", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n7 Operating revenue\nSubscriptions 242,511\n9 Other Revenue\nFair value gain 307,482",
+                [],
+            ),
+        ]
+    )
+
+    normal_findings = check_notes_agreement(document)
+    cautious_findings = check_notes_agreement(document, cautious_low_confidence=True)
+
+    assert not any("possible wrong note reference" in finding.issue.lower() for finding in normal_findings)
+    assert any("possible wrong note reference" in finding.issue.lower() for finding in cautious_findings)
+
+
 def test_notes_agreement_is_conservative_for_ocr_documents():
     document = PdfDocument(
         [
