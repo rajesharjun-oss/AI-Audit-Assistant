@@ -89,6 +89,17 @@ def _page_reference(location: str, evidence: str = "") -> str:
     return "Pages " + ", ".join(str(page) for page in pages)
 
 
+def _export_file_stem(result) -> str:
+    detected = result.metrics.get("detected_profile", {})
+    company_name = ""
+    if isinstance(detected, dict):
+        company_name = str(detected.get("Company name", "") or "").strip()
+    if not company_name:
+        company_name = "financial_statement"
+    stem = re.sub(r"[^A-Za-z0-9]+", "_", company_name).strip("_").lower()
+    return stem[:90] or "financial_statement"
+
+
 def _note_heading_rows(result) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for line in _metric_lines(result.metrics.get("note_headings"), "No note headings detected."):
@@ -952,17 +963,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+export_stem = _export_file_stem(result)
 download_cols = st.columns(2)
 download_cols[0].download_button(
     "Download Excel Exception Register",
     _build_excel_export(result),
-    file_name="audit_exception_register.xlsx",
+    file_name=f"{export_stem}_exception_register.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 download_cols[1].download_button(
     "Download Word Review Memo",
     _build_word_memo_export(result),
-    file_name="audit_review_memo.docx",
+    file_name=f"{export_stem}_review_memo.docx",
     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 )
 
@@ -989,7 +1001,7 @@ with st.expander("Developer/debug Markdown export", expanded=False):
     st.download_button(
         "Download Markdown Developer Report",
         markdown_report,
-        file_name="financial_statement_review_debug.md",
+        file_name=f"{export_stem}_review_debug.md",
         mime="text/markdown",
     )
 
