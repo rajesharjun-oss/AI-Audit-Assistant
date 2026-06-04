@@ -8,6 +8,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 import streamlit as st
+from openpyxl.formatting.rule import FormulaRule
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.styles import Alignment, Font, PatternFill
 
 from models import CompanyProfile, ReviewOptions
 from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
@@ -23,15 +28,39 @@ def _metric_lines(value: object, empty: str) -> list[str]:
 def _finding_rows(result) -> list[dict[str, str]]:
     return [
         {
+            "ID": f"EX-{index:03d}",
+            "Status": "Open",
             "Severity": finding.severity,
             "Category": finding.category,
+            "Check type": finding.category,
+            "Confidence": _finding_confidence(finding),
+            "Page reference": _page_reference(finding.location),
             "Location": finding.location,
             "Issue": finding.issue,
             "Evidence": finding.evidence,
             "Recommendation": finding.recommendation,
+            "Reviewer comment": "",
+            "Prepared by": "",
+            "Reviewed by": "",
+            "Date cleared": "",
         }
-        for finding in result.findings
+        for index, finding in enumerate(result.findings, start=1)
     ]
+
+
+def _finding_confidence(finding) -> str:
+    if finding.category == "Extraction quality":
+        return "Review prompt"
+    if finding.severity == "High":
+        return "High"
+    if finding.severity == "Medium":
+        return "Medium"
+    return "Low"
+
+
+def _page_reference(location: str) -> str:
+    match = pd.Series([location]).str.extract(r"(Page\s+\d+)").iloc[0, 0]
+    return "" if pd.isna(match) else str(match)
 
 
 def _note_heading_rows(result) -> list[dict[str, str]]:
@@ -68,17 +97,88 @@ def _build_excel_export(result) -> bytes:
     profile_rows = [{"Field": key, "Detected value": value} for key, value in detected_profile.items()] if isinstance(detected_profile, dict) else []
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
-        pd.DataFrame(_finding_rows(result)).to_excel(writer, sheet_name="Exception register", index=False)
+        exception_rows = _finding_rows(result) or [
+            {
+                "ID": "",
+                "Status": "Noted",
+                "Severity": "",
+                "Category": "",
+                "Check type": "",
+                "Confidence": "",
+                "Page reference": "",
+                "Location": "",
+                "Issue": "No automated findings were identified.",
+                "Evidence": "",
+                "Recommendation": "",
+                "Reviewer comment": "",
+                "Prepared by": "",
+                "Reviewed by": "",
+                "Date cleared": "",
+            }
+        ]
+        pd.DataFrame(exception_rows).to_excel(writer, sheet_name="Exception register", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
         pd.DataFrame(_note_heading_rows(result)).to_excel(writer, sheet_name="Notes detected", index=False)
         pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
+            for cell in worksheet[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="1F2937")
+                cell.alignment = Alignment(wrap_text=True, vertical="center")
             for column_cells in worksheet.columns:
                 max_length = max((len(str(cell.value or "")) for cell in column_cells), default=10)
                 worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 70)
+        _format_exception_register_sheet(writer.book["Exception register"])
     return output.getvalue()
+
+
+def _format_exception_register_sheet(worksheet) -> None:
+    max_row = max(worksheet.max_row, 2)
+    max_col = worksheet.max_column
+    table_ref = f"A1:{get_column_letter(max_col)}{max_row}"
+    table = Table(displayName="ExceptionRegister", ref=table_ref)
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    worksheet.add_table(table)
+    headers = {str(cell.value): cell.column for cell in worksheet[1]}
+    status_col = headers.get("Status")
+    severity_col = headers.get("Severity")
+    if status_col:
+        status_letter = get_column_letter(status_col)
+        validation = DataValidation(type="list", formula1='"Open,Cleared,False Positive,Noted"', allow_blank=True)
+        worksheet.add_data_validation(validation)
+        validation.add(f"{status_letter}2:{status_letter}500")
+    if severity_col:
+        severity_letter = get_column_letter(severity_col)
+        color_map = {
+            "High": ("FEE2E2", "991B1B"),
+            "Medium": ("FEF3C7", "92400E"),
+            "Low": ("DBEAFE", "1E40AF"),
+        }
+        for severity, (fill, font) in color_map.items():
+            worksheet.conditional_formatting.add(
+                f"{severity_letter}2:{severity_letter}{max_row}",
+                FormulaRule(
+                    formula=[f'${severity_letter}2="{severity}"'],
+                    fill=PatternFill("solid", fgColor=fill),
+                    font=Font(color=font, bold=True),
+                ),
+            )
+    for header in ("Evidence", "Recommendation", "Issue", "Reviewer comment"):
+        column = headers.get(header)
+        if column:
+            letter = get_column_letter(column)
+            worksheet.column_dimensions[letter].width = 55 if header in {"Evidence", "Recommendation", "Issue"} else 32
+            for row in range(2, max_row + 1):
+                worksheet[f"{letter}{row}"].alignment = Alignment(wrap_text=True, vertical="top")
+    worksheet.auto_filter.ref = table_ref
 
 
 def _docx_paragraph(text: str, style: str = "") -> str:
@@ -86,23 +186,71 @@ def _docx_paragraph(text: str, style: str = "") -> str:
     return f"<w:p>{style_xml}<w:r><w:t>{xml_escape(text)}</w:t></w:r></w:p>"
 
 
+def _docx_table(rows: list[list[object]]) -> str:
+    table_rows = []
+    for row_index, row in enumerate(rows):
+        cells = []
+        for value in row:
+            shading = '<w:shd w:fill="1F2937"/>' if row_index == 0 else ""
+            color = '<w:color w:val="FFFFFF"/>' if row_index == 0 else ""
+            bold = "<w:b/>" if row_index == 0 else ""
+            cells.append(
+                "<w:tc>"
+                f"<w:tcPr>{shading}</w:tcPr>"
+                f"<w:p><w:r><w:rPr>{bold}{color}</w:rPr><w:t>{xml_escape(str(value or ''))}</w:t></w:r></w:p>"
+                "</w:tc>"
+            )
+        table_rows.append(f"<w:tr>{''.join(cells)}</w:tr>")
+    return (
+        "<w:tbl>"
+        '<w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="0" w:type="auto"/></w:tblPr>'
+        f"{''.join(table_rows)}"
+        "</w:tbl>"
+    )
+
+
+def _detected_profile_rows(result) -> list[list[str]]:
+    detected = result.metrics.get("detected_profile", {})
+    if not isinstance(detected, dict):
+        detected = {}
+    wanted = ("Company name", "Year end", "Currency", "Framework", "Entity type", "Extraction confidence")
+    return [["Field", "Detected value"], *[[field, str(detected.get(field, "Not detected"))] for field in wanted]]
+
+
 def _build_word_memo_export(result) -> bytes:
     memo = build_ai_review_memo(result)
     assurance = str(result.metrics.get("positive_assurance", ""))
+    disclaimer = (
+        "This automated review supports financial statement review procedures but does not replace professional "
+        "judgement, firm methodology, or the auditor's responsibility to evaluate the report and underlying evidence."
+    )
     body_parts = [
         _docx_paragraph("AI Audit Assistant Review Memo", "Title"),
+        _docx_paragraph("Detected Company Profile", "Heading1"),
+        _docx_table(_detected_profile_rows(result)),
+        _docx_paragraph("Executive Memo", "Heading1"),
         _docx_paragraph(memo),
+        _docx_paragraph(disclaimer),
     ]
     if assurance:
         body_parts.append(_docx_paragraph(assurance))
     body_parts.extend(
         [
             _docx_paragraph("Dashboard", "Heading1"),
-            _docx_paragraph(f"Checks performed: {result.metrics.get('checks_performed_count', 0)}"),
-            _docx_paragraph(f"Checks passed: {result.metrics.get('checks_passed_count', 0)}"),
-            _docx_paragraph(f"Checks skipped: {result.metrics.get('checks_skipped_count', 0)}"),
-            _docx_paragraph(f"Findings: {result.metrics.get('findings', 0)}"),
-            _docx_paragraph(f"Extraction confidence: {result.metrics.get('extraction_confidence', '0%')}"),
+            _docx_table(
+                [
+                    ["Metric", "Value"],
+                    ["Checks performed", result.metrics.get("checks_performed_count", 0)],
+                    ["Checks passed", result.metrics.get("checks_passed_count", 0)],
+                    ["Checks skipped", result.metrics.get("checks_skipped_count", 0)],
+                    ["Findings", result.metrics.get("findings", 0)],
+                    ["High findings", result.metrics.get("high", 0)],
+                    ["Medium findings", result.metrics.get("medium", 0)],
+                    ["Low findings", result.metrics.get("low", 0)],
+                    ["Extraction confidence", result.metrics.get("extraction_confidence", "0%")],
+                    ["Table confidence", result.metrics.get("table_confidence", "0%")],
+                ]
+            ),
             _docx_paragraph("Checks Performed", "Heading1"),
         ]
     )
@@ -112,11 +260,16 @@ def _build_word_memo_export(result) -> bytes:
     body_parts.extend(_docx_paragraph(item) for item in skipped) if skipped else body_parts.append(_docx_paragraph("No major checks skipped."))
     body_parts.append(_docx_paragraph("Findings Summary", "Heading1"))
     if result.findings:
+        grouped: dict[tuple[str, str], list[object]] = {}
         for finding in result.findings:
-            body_parts.append(_docx_paragraph(f"{finding.severity} | {finding.category} | {finding.location}", "Heading2"))
-            body_parts.append(_docx_paragraph(f"Issue: {finding.issue}"))
-            body_parts.append(_docx_paragraph(f"Evidence: {finding.evidence}"))
-            body_parts.append(_docx_paragraph(f"Recommendation: {finding.recommendation}"))
+            grouped.setdefault((finding.severity, finding.category), []).append(finding)
+        severity_order = {"High": 0, "Medium": 1, "Low": 2}
+        for (severity, category), findings in sorted(grouped.items(), key=lambda item: (severity_order.get(item[0][0], 9), item[0][1])):
+            body_parts.append(_docx_paragraph(f"{severity} | {category}", "Heading2"))
+            for finding in findings:
+                body_parts.append(_docx_paragraph(f"{finding.location}: {finding.issue}"))
+                body_parts.append(_docx_paragraph(f"Evidence: {finding.evidence}"))
+                body_parts.append(_docx_paragraph(f"Recommendation: {finding.recommendation}"))
     else:
         body_parts.append(_docx_paragraph("No automated findings were identified."))
     document_xml = (
@@ -706,13 +859,13 @@ st.markdown(
 
 download_cols = st.columns(2)
 download_cols[0].download_button(
-    "Download Excel exception register",
+    "Download Excel Exception Register",
     _build_excel_export(result),
     file_name="audit_exception_register.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 download_cols[1].download_button(
-    "Download Word review memo",
+    "Download Word Review Memo",
     _build_word_memo_export(result),
     file_name="audit_review_memo.docx",
     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -728,7 +881,7 @@ with st.expander("Notes detected (debug)", expanded=False):
 with st.expander("Developer/debug Markdown export", expanded=False):
     markdown_report = findings_to_markdown(result)
     st.download_button(
-        "Download Markdown debug report",
+        "Download Markdown Developer Report",
         markdown_report,
         file_name="financial_statement_review_debug.md",
         mime="text/markdown",

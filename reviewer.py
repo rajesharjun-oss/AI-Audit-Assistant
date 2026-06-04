@@ -1067,12 +1067,13 @@ def build_ai_review_memo(result: ReviewResult) -> str:
             f"Priority: start with {first_priority.category.lower()} at {first_priority.location}. "
             f"{first_priority.issue}"
         )
+        next_step = "Recommended next step: clear high-severity items first, then re-run the review on the final PDF."
     else:
-        first_priority = result.findings[0]
         priority = (
-            f"Priority: no high-severity issue was detected; start with {first_priority.category.lower()} "
-            f"at {first_priority.location}."
+            "No high-severity exceptions were identified. Review the medium extraction-quality findings "
+            "and rerun detailed note agreement after table extraction confidence improves."
         )
+        next_step = "Recommended next step: review extraction-quality findings, then rerun detailed note agreement after table extraction confidence improves."
     likely_causes = []
     categories = set(by_category)
     if "Totals and rounding" in categories:
@@ -1089,7 +1090,7 @@ def build_ai_review_memo(result: ReviewResult) -> str:
         f"{assurance + ' ' if assurance else ''}"
         f"{result.metrics['findings']} findings were identified across {top_categories}. "
         f"{priority} Likely causes include {cause_text}. "
-        "Recommended next step: clear high-severity items first, then re-run the review on the final PDF."
+        f"{next_step}"
     )
 
 

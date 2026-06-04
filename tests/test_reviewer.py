@@ -13,6 +13,7 @@ from reviewer import (
     check_policy_relevance,
     check_rounding_and_casting,
     check_standard_checklist,
+    build_ai_review_memo,
     infer_detected_profile,
     normalize_reporting_currency,
     review_pdf,
@@ -41,6 +42,34 @@ def test_rounding_check_flags_bad_visible_total():
 
     assert findings
     assert findings[0].category == "Totals and rounding"
+
+
+def test_review_memo_zero_high_uses_extraction_quality_next_step():
+    from models import Finding, ReviewResult
+
+    result = ReviewResult(
+        findings=[
+            Finding(
+                "Extraction quality",
+                "Medium",
+                "Table extraction",
+                "Some extracted table cells appear to contain multiple merged values.",
+                "Detected merged cells.",
+                "Review extraction quality.",
+            )
+        ],
+        metrics={
+            "findings": 1,
+            "high": 0,
+            "positive_assurance": "No exceptions noted from line-based checks on primary statements.",
+        },
+    )
+
+    memo = build_ai_review_memo(result)
+
+    assert "clear high-severity items first" not in memo
+    assert "No high-severity exceptions were identified" in memo
+    assert "rerun detailed note agreement after table extraction confidence improves" in memo
 
 
 def test_note_column_is_not_treated_as_amount_column():
