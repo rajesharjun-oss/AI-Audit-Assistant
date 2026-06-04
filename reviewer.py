@@ -271,8 +271,9 @@ def _build_result(
     checks_performed: list[str] | None = None,
     checks_skipped: list[str] | None = None,
 ) -> ReviewResult:
-    checks_performed = checks_performed or []
-    checks_skipped = checks_skipped or []
+    checks_performed_list = list(dict.fromkeys(checks_performed or []))
+    checks_skipped_list = list(dict.fromkeys(checks_skipped or []))
+    positive_assurance = _positive_assurance_text(findings, checks_performed_list)
     metrics = {
         "pages": len(document.pages),
         "text_pages": document.text_pages,
@@ -293,10 +294,30 @@ def _build_result(
         "low": sum(1 for item in findings if item.severity == "Low"),
         "note_headings": _format_note_heading_debug(document),
         "detected_profile": infer_detected_profile(document),
-        "checks_performed": "\n".join(dict.fromkeys(checks_performed)) or "No deterministic checks completed.",
-        "checks_skipped": "\n".join(dict.fromkeys(checks_skipped)) or "No major checks skipped.",
+        "checks_performed": "\n".join(checks_performed_list) or "No deterministic checks completed.",
+        "checks_skipped": "\n".join(checks_skipped_list) or "No major checks skipped.",
+        "checks_performed_count": len(checks_performed_list),
+        "checks_passed_count": len(checks_performed_list) if positive_assurance else 0,
+        "checks_skipped_count": len(checks_skipped_list),
+        "positive_assurance": positive_assurance,
     }
     return ReviewResult(findings=findings, metrics=metrics)
+
+
+def _positive_assurance_text(findings: list[Finding], checks_performed: list[str]) -> str:
+    primary_checks = [item for item in checks_performed if item.startswith(("Income statement", "Statement of "))]
+    primary_exceptions = [
+        finding
+        for finding in findings
+        if finding.category == "Totals and rounding"
+        and any(
+            marker in finding.location.lower()
+            for marker in ("income statement", "financial position", "accumulated fund", "cash flows")
+        )
+    ]
+    if primary_checks and not primary_exceptions:
+        return "No exceptions noted from line-based checks on primary statements."
+    return ""
 
 
 def _profile_with_detected_defaults(profile: CompanyProfile, document: PdfDocument) -> CompanyProfile:
@@ -637,21 +658,15 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
         findings.extend(_check_ocr_statement_of_financial_position(document, tolerance))
         return findings
 
+    skipped_tables: list[str] = []
     for page in document.pages:
         for table_index, table in enumerate(page.tables, start=1):
             if len(table) < 3:
                 continue
             table_quality = _classify_table_for_arithmetic(table)
             if not table_quality["can_run_arithmetic"]:
-                findings.append(
-                    Finding(
-                        "Extraction quality",
-                        "Low",
-                        f"Page {page.number}, table {table_index}",
-                        "Arithmetic checks were skipped for a low-confidence or non-standard table.",
-                        f"Table type: {table_quality['type']}; reason: {table_quality['reason']}.",
-                        "Review this table manually or improve table extraction before relying on automated casting checks.",
-                    )
+                skipped_tables.append(
+                    f"Page {page.number}, table {table_index}: {table_quality['type']} ({table_quality['reason']})"
                 )
                 continue
             note_cols = _note_columns(table)
@@ -663,6 +678,18 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                 _check_vertical_totals(findings, page.number, table_index, rows, col, tolerance)
             _check_cross_footings(findings, page.number, table_index, rows, tolerance)
             _check_column_consistency(findings, page.number, table_index, table)
+    if skipped_tables:
+        details = "\n".join(skipped_tables)
+        findings.append(
+            Finding(
+                "Extraction quality",
+                "Low",
+                "Table extraction",
+                f"{len(skipped_tables)} table(s) skipped due to low confidence or non-standard structure.",
+                details,
+                "Review skipped table details only where the table is material. Primary statement line-based checks can still be relied on when listed as performed.",
+            )
+        )
     return findings
 
 
@@ -965,6 +992,9 @@ def findings_to_markdown(result: ReviewResult) -> str:
         "",
         f"Pages reviewed: {result.metrics['pages']}",
         f"Tables reviewed: {result.metrics['tables']}",
+        f"Checks performed: {result.metrics.get('checks_performed_count', 0)}",
+        f"Checks passed: {result.metrics.get('checks_passed_count', 0)}",
+        f"Checks skipped: {result.metrics.get('checks_skipped_count', 0)}",
         f"Findings: {result.metrics['findings']} "
         f"(High {result.metrics['high']}, Medium {result.metrics['medium']}, Low {result.metrics['low']})",
         "",
@@ -977,6 +1007,8 @@ def findings_to_markdown(result: ReviewResult) -> str:
         "- Standards checklist: triggered IFRS disclosure checks for presentation, policies, and transaction-specific notes.",
         "",
         "## Checks performed",
+        "",
+        str(result.metrics.get("positive_assurance", "")),
         "",
         str(result.metrics.get("checks_performed", "No deterministic checks completed.")),
         "",
@@ -1003,9 +1035,10 @@ def findings_to_markdown(result: ReviewResult) -> str:
 
 
 def build_ai_review_memo(result: ReviewResult) -> str:
+    assurance = str(result.metrics.get("positive_assurance", ""))
     if not result.findings:
         return (
-            "AI review memo: No automated exceptions were detected. Perform a final manual review of scanned pages, "
+            f"AI review memo: {assurance or 'No automated exceptions were detected.'} Perform a final manual review of scanned pages, "
             "judgemental disclosures, and any areas where PDF extraction may have missed tables."
         )
     by_category = Counter(finding.category for finding in result.findings)
@@ -1036,6 +1069,7 @@ def build_ai_review_memo(result: ReviewResult) -> str:
     cause_text = "; ".join(likely_causes) if likely_causes else "presentation or extraction exceptions"
     return (
         "AI review memo: "
+        f"{assurance + ' ' if assurance else ''}"
         f"{result.metrics['findings']} findings were identified across {top_categories}. "
         f"{priority} Likely causes include {cause_text}. "
         "Recommended next step: clear high-severity items first, then re-run the review on the final PDF."

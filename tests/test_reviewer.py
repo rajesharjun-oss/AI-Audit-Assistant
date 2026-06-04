@@ -188,6 +188,28 @@ def test_arithmetic_skips_value_added_statement():
     assert not any("does not agree" in finding.issue.lower() for finding in findings)
 
 
+def test_low_confidence_table_skips_are_grouped():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "",
+                [
+                    [["Value added statement", "2025", "2024"], ["Revenue", "100", "90"], ["Total", "100", "90"]],
+                    [["Five year financial summary", "2025", "2024"], ["Assets", "300", "280"], ["Equity", "200", "190"]],
+                ],
+            )
+        ]
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+    grouped = [finding for finding in findings if "table(s) skipped" in finding.issue.lower()]
+
+    assert len(grouped) == 1
+    assert "Page 1, table 1" in grouped[0].evidence
+    assert "Page 1, table 2" in grouped[0].evidence
+
+
 def test_generic_arithmetic_skips_ocr_reconstructed_tables():
     document = PdfDocument(
         [

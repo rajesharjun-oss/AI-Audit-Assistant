@@ -519,17 +519,21 @@ finally:
     temp_path.unlink(missing_ok=True)
 
 st.markdown('<div class="section-label">Review dashboard</div>', unsafe_allow_html=True)
-metric_cols = st.columns(10)
-metric_cols[0].metric("Pages", result.metrics["pages"])
-metric_cols[1].metric("Text coverage", result.metrics.get("extraction_coverage", "0%"))
-metric_cols[2].metric("Text confidence", result.metrics.get("extraction_confidence", "0%"))
-metric_cols[3].metric("Table confidence", result.metrics.get("table_confidence", "0%"))
-metric_cols[4].metric("OCR pages", result.metrics.get("ocr_pages", 0))
-metric_cols[5].metric("OCR tables", result.metrics.get("ocr_tables", 0))
-metric_cols[6].metric("Tables", result.metrics["tables"])
-metric_cols[7].metric("Findings", result.metrics["findings"])
-metric_cols[8].metric("High", result.metrics["high"])
-metric_cols[9].metric("Medium", result.metrics["medium"])
+review_cols = st.columns(4)
+review_cols[0].metric("Checks performed", result.metrics.get("checks_performed_count", 0))
+review_cols[1].metric("Checks passed", result.metrics.get("checks_passed_count", 0))
+review_cols[2].metric("Checks skipped", result.metrics.get("checks_skipped_count", 0))
+review_cols[3].metric("Findings", result.metrics["findings"])
+
+risk_cols = st.columns(8)
+risk_cols[0].metric("High", result.metrics["high"])
+risk_cols[1].metric("Medium", result.metrics["medium"])
+risk_cols[2].metric("Low", result.metrics["low"])
+risk_cols[3].metric("Pages", result.metrics["pages"])
+risk_cols[4].metric("Text confidence", result.metrics.get("extraction_confidence", "0%"))
+risk_cols[5].metric("Table confidence", result.metrics.get("table_confidence", "0%"))
+risk_cols[6].metric("OCR pages", result.metrics.get("ocr_pages", 0))
+risk_cols[7].metric("Tables", result.metrics["tables"])
 
 detected_profile = result.metrics.get("detected_profile", {})
 if isinstance(detected_profile, dict):
@@ -564,6 +568,9 @@ with st.expander("Detected note headings", expanded=False):
 status_cols = st.columns(2)
 with status_cols[0]:
     with st.expander("Checks performed", expanded=True):
+        assurance = str(result.metrics.get("positive_assurance", ""))
+        if assurance:
+            st.success(assurance)
         st.write(str(result.metrics.get("checks_performed", "No deterministic checks completed.")))
 with status_cols[1]:
     with st.expander("Checks skipped", expanded=False):
