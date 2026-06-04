@@ -767,14 +767,17 @@ with st.container(border=True):
         value=200,
         help="Higher DPI can improve OCR accuracy but takes longer.",
     )
-    cautious_note_agreement = st.toggle(
-        "Run cautious note-reference validation anyway",
-        value=False,
-        help=(
-            "When note/table confidence is below 80%, detailed note-reference validation is normally skipped. "
-            "Enable this only to inspect possible wrong-note references manually; results are Low/Medium review prompts, not confirmed exceptions."
-        ),
-    )
+    with st.expander("Advanced settings", expanded=review_mode == "Advanced Review"):
+        cautious_note_agreement = st.checkbox(
+            "Run cautious note-reference validation anyway",
+            value=False,
+            key="run_cautious_note_reference_validation_anyway",
+            help=(
+                "When note/table confidence is below 80%, detailed note-reference validation is normally skipped. "
+                "Enable this to run a heading-based review-prompt check using detected note headings and line-extracted primary statement rows. "
+                "Detailed amount agreement remains skipped until table confidence improves."
+            ),
+        )
 
 st.markdown('<div class="section-label">Audit review modules</div>', unsafe_allow_html=True)
 st.markdown(
