@@ -1,6 +1,7 @@
 streamlit
 pdfplumber
 pandas
+openpyxl
 pypdf
 pymupdf
 pytesseract

@@ -251,9 +251,11 @@ def review_pdf(
     totals_findings = check_totals_and_rounding(document)
     findings.extend(totals_findings)
     findings.extend(check_formatting(document, profile))
-    note_findings = check_notes_agreement(document)
+    note_findings = check_notes_agreement(document, cautious_low_confidence=options.run_cautious_note_agreement)
     findings.extend(note_findings)
-    if any(finding.location == "Notes agreement" and finding.category == "Extraction quality" for finding in note_findings):
+    if options.run_cautious_note_agreement and document.table_extraction_confidence < 80 and not document.ocr_used:
+        checks_performed.append("Cautious detailed note agreement checks run despite low table confidence.")
+    elif any(finding.location == "Notes agreement" and finding.category == "Extraction quality" for finding in note_findings):
         checks_performed.append("Basic note heading existence checks completed where statement note references were clearly detected.")
         checks_skipped.append("Detailed note agreement skipped because table extraction confidence is below threshold.")
     else:
@@ -833,7 +835,11 @@ def _ignore_formatting_line(line: str) -> bool:
     )
 
 
-def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1")) -> list[Finding]:
+def check_notes_agreement(
+    document: PdfDocument,
+    tolerance: Decimal = Decimal("1"),
+    cautious_low_confidence: bool = False,
+) -> list[Finding]:
     text = document.text
     findings: list[Finding] = []
     headings_with_pages = _note_headings_by_page(document)
@@ -864,7 +870,7 @@ def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1
                 "Add the missing note or correct the note reference in the primary statement.",
             )
         )
-    if not detailed_note_checks_allowed:
+    if not detailed_note_checks_allowed and not cautious_low_confidence:
         findings.append(
             Finding(
                 "Extraction quality",
@@ -876,6 +882,17 @@ def check_notes_agreement(document: PdfDocument, tolerance: Decimal = Decimal("1
             )
         )
         return findings
+    if not detailed_note_checks_allowed and cautious_low_confidence:
+        findings.append(
+            Finding(
+                "Extraction quality",
+                "Low",
+                "Notes agreement",
+                "Cautious detailed note agreement was run despite low table extraction confidence.",
+                f"Table confidence: {document.table_extraction_confidence}%. Treat any note mismatch findings as review prompts, not confirmed exceptions.",
+                "Use this mode for manual investigation only; rerun on a cleaner PDF before treating detailed note findings as audit exceptions.",
+            )
+        )
     if statement_refs:
         for ref in sorted(heading_refs - statement_refs, key=_note_sort_key):
             if ref.isdigit() and int(ref) <= 3:

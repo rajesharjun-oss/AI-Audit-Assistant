@@ -1,13 +1,150 @@
 from __future__ import annotations
 
+from io import BytesIO
 import tempfile
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 import streamlit as st
 
 from models import CompanyProfile, ReviewOptions
 from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
+
+
+def _metric_lines(value: object, empty: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text or text == empty:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _finding_rows(result) -> list[dict[str, str]]:
+    return [
+        {
+            "Severity": finding.severity,
+            "Category": finding.category,
+            "Location": finding.location,
+            "Issue": finding.issue,
+            "Evidence": finding.evidence,
+            "Recommendation": finding.recommendation,
+        }
+        for finding in result.findings
+    ]
+
+
+def _note_heading_rows(result) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for line in _metric_lines(result.metrics.get("note_headings"), "No note headings detected."):
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) >= 3:
+            rows.append(
+                {
+                    "Note": parts[0].replace("Note ", "", 1).strip(),
+                    "Page": parts[1].replace("Page ", "", 1).strip(),
+                    "Heading": " | ".join(parts[2:]).strip(),
+                }
+            )
+    return rows
+
+
+def _build_excel_export(result) -> bytes:
+    output = BytesIO()
+    summary_rows = [
+        {"Metric": "Checks performed", "Value": result.metrics.get("checks_performed_count", 0)},
+        {"Metric": "Checks passed", "Value": result.metrics.get("checks_passed_count", 0)},
+        {"Metric": "Checks skipped", "Value": result.metrics.get("checks_skipped_count", 0)},
+        {"Metric": "Findings", "Value": result.metrics.get("findings", 0)},
+        {"Metric": "High findings", "Value": result.metrics.get("high", 0)},
+        {"Metric": "Medium findings", "Value": result.metrics.get("medium", 0)},
+        {"Metric": "Low findings", "Value": result.metrics.get("low", 0)},
+        {"Metric": "Extraction confidence", "Value": result.metrics.get("extraction_confidence", "0%")},
+        {"Metric": "Table confidence", "Value": result.metrics.get("table_confidence", "0%")},
+    ]
+    checks_performed = [{"Check performed": item} for item in _metric_lines(result.metrics.get("checks_performed"), "No deterministic checks completed.")]
+    checks_skipped = [{"Check skipped": item} for item in _metric_lines(result.metrics.get("checks_skipped"), "No major checks skipped.")]
+    detected_profile = result.metrics.get("detected_profile", {})
+    profile_rows = [{"Field": key, "Detected value": value} for key, value in detected_profile.items()] if isinstance(detected_profile, dict) else []
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
+        pd.DataFrame(_finding_rows(result)).to_excel(writer, sheet_name="Exception register", index=False)
+        pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
+        pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
+        pd.DataFrame(_note_heading_rows(result)).to_excel(writer, sheet_name="Notes detected", index=False)
+        pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
+        for worksheet in writer.book.worksheets:
+            worksheet.freeze_panes = "A2"
+            for column_cells in worksheet.columns:
+                max_length = max((len(str(cell.value or "")) for cell in column_cells), default=10)
+                worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 70)
+    return output.getvalue()
+
+
+def _docx_paragraph(text: str, style: str = "") -> str:
+    style_xml = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
+    return f"<w:p>{style_xml}<w:r><w:t>{xml_escape(text)}</w:t></w:r></w:p>"
+
+
+def _build_word_memo_export(result) -> bytes:
+    memo = build_ai_review_memo(result)
+    assurance = str(result.metrics.get("positive_assurance", ""))
+    body_parts = [
+        _docx_paragraph("AI Audit Assistant Review Memo", "Title"),
+        _docx_paragraph(memo),
+    ]
+    if assurance:
+        body_parts.append(_docx_paragraph(assurance))
+    body_parts.extend(
+        [
+            _docx_paragraph("Dashboard", "Heading1"),
+            _docx_paragraph(f"Checks performed: {result.metrics.get('checks_performed_count', 0)}"),
+            _docx_paragraph(f"Checks passed: {result.metrics.get('checks_passed_count', 0)}"),
+            _docx_paragraph(f"Checks skipped: {result.metrics.get('checks_skipped_count', 0)}"),
+            _docx_paragraph(f"Findings: {result.metrics.get('findings', 0)}"),
+            _docx_paragraph(f"Extraction confidence: {result.metrics.get('extraction_confidence', '0%')}"),
+            _docx_paragraph("Checks Performed", "Heading1"),
+        ]
+    )
+    body_parts.extend(_docx_paragraph(item) for item in _metric_lines(result.metrics.get("checks_performed"), "No deterministic checks completed."))
+    body_parts.append(_docx_paragraph("Checks Skipped", "Heading1"))
+    skipped = _metric_lines(result.metrics.get("checks_skipped"), "No major checks skipped.")
+    body_parts.extend(_docx_paragraph(item) for item in skipped) if skipped else body_parts.append(_docx_paragraph("No major checks skipped."))
+    body_parts.append(_docx_paragraph("Findings Summary", "Heading1"))
+    if result.findings:
+        for finding in result.findings:
+            body_parts.append(_docx_paragraph(f"{finding.severity} | {finding.category} | {finding.location}", "Heading2"))
+            body_parts.append(_docx_paragraph(f"Issue: {finding.issue}"))
+            body_parts.append(_docx_paragraph(f"Evidence: {finding.evidence}"))
+            body_parts.append(_docx_paragraph(f"Recommendation: {finding.recommendation}"))
+    else:
+        body_parts.append(_docx_paragraph("No automated findings were identified."))
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{''.join(body_parts)}<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/></w:sectPr></w:body>"
+        "</w:document>"
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        "</Types>"
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+        "</Relationships>"
+    )
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as docx:
+        docx.writestr("[Content_Types].xml", content_types)
+        docx.writestr("_rels/.rels", rels)
+        docx.writestr("word/document.xml", document_xml)
+    return output.getvalue()
 
 
 st.set_page_config(page_title="AI Audit Assistant", layout="wide", initial_sidebar_state="expanded")
@@ -444,6 +581,14 @@ with st.container(border=True):
         value=200,
         help="Higher DPI can improve OCR accuracy but takes longer.",
     )
+    cautious_note_agreement = st.toggle(
+        "Run cautious note agreement anyway",
+        value=False,
+        help=(
+            "When table confidence is below 80%, detailed note agreement is normally skipped. "
+            "Enable this only to inspect possible note mismatches manually; results are review prompts, not confirmed exceptions."
+        ),
+    )
 
 st.markdown('<div class="section-label">Audit review modules</div>', unsafe_allow_html=True)
 st.markdown(
@@ -513,31 +658,36 @@ try:
         result = review_pdf(
             temp_path,
             profile,
-            ReviewOptions(use_ocr=use_ocr, ocr_max_pages=int(ocr_max_pages), ocr_dpi=int(ocr_dpi)),
+            ReviewOptions(
+                use_ocr=use_ocr,
+                ocr_max_pages=int(ocr_max_pages),
+                ocr_dpi=int(ocr_dpi),
+                run_cautious_note_agreement=cautious_note_agreement,
+            ),
         )
 finally:
     temp_path.unlink(missing_ok=True)
 
 st.markdown('<div class="section-label">Review dashboard</div>', unsafe_allow_html=True)
-review_cols = st.columns(4)
+review_cols = st.columns(5)
 review_cols[0].metric("Checks performed", result.metrics.get("checks_performed_count", 0))
 review_cols[1].metric("Checks passed", result.metrics.get("checks_passed_count", 0))
 review_cols[2].metric("Checks skipped", result.metrics.get("checks_skipped_count", 0))
 review_cols[3].metric("Findings", result.metrics["findings"])
+review_cols[4].metric("Extraction confidence", result.metrics.get("extraction_confidence", "0%"))
 
-risk_cols = st.columns(8)
+risk_cols = st.columns(7)
 risk_cols[0].metric("High", result.metrics["high"])
 risk_cols[1].metric("Medium", result.metrics["medium"])
 risk_cols[2].metric("Low", result.metrics["low"])
 risk_cols[3].metric("Pages", result.metrics["pages"])
-risk_cols[4].metric("Text confidence", result.metrics.get("extraction_confidence", "0%"))
-risk_cols[5].metric("Table confidence", result.metrics.get("table_confidence", "0%"))
-risk_cols[6].metric("OCR pages", result.metrics.get("ocr_pages", 0))
-risk_cols[7].metric("Tables", result.metrics["tables"])
+risk_cols[4].metric("Table confidence", result.metrics.get("table_confidence", "0%"))
+risk_cols[5].metric("OCR pages", result.metrics.get("ocr_pages", 0))
+risk_cols[6].metric("Tables", result.metrics["tables"])
 
 detected_profile = result.metrics.get("detected_profile", {})
 if isinstance(detected_profile, dict):
-    st.markdown('<div class="section-label">Detected profile</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Detected profile after upload</div>', unsafe_allow_html=True)
     profile_rows = [
         {"Field": key, "Detected value": value}
         for key, value in detected_profile.items()
@@ -554,16 +704,35 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-markdown_report = findings_to_markdown(result)
-st.download_button(
-    "Download review report",
-    markdown_report,
-    file_name="financial_statement_review.md",
-    mime="text/markdown",
+download_cols = st.columns(2)
+download_cols[0].download_button(
+    "Download Excel exception register",
+    _build_excel_export(result),
+    file_name="audit_exception_register.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+download_cols[1].download_button(
+    "Download Word review memo",
+    _build_word_memo_export(result),
+    file_name="audit_review_memo.docx",
+    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 )
 
-with st.expander("Detected note headings", expanded=False):
-    st.code(str(result.metrics.get("note_headings", "No note headings detected.")))
+with st.expander("Notes detected (debug)", expanded=False):
+    note_rows = _note_heading_rows(result)
+    if note_rows:
+        st.dataframe(pd.DataFrame(note_rows), use_container_width=True, hide_index=True)
+    else:
+        st.write("No note headings detected.")
+
+with st.expander("Developer/debug Markdown export", expanded=False):
+    markdown_report = findings_to_markdown(result)
+    st.download_button(
+        "Download Markdown debug report",
+        markdown_report,
+        file_name="financial_statement_review_debug.md",
+        mime="text/markdown",
+    )
 
 status_cols = st.columns(2)
 with status_cols[0]:
