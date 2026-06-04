@@ -534,7 +534,7 @@ def test_cautious_face_to_note_amount_agreement_flags_amount_found_elsewhere():
     )
 
     findings = check_notes_agreement(document, cautious_low_confidence=True)
-    amount_prompts = [finding for finding in findings if "wrong note placement/reference" in finding.issue.lower()]
+    amount_prompts = [finding for finding in findings if "amount appears in another note" in finding.issue.lower()]
 
     assert amount_prompts
     assert amount_prompts[0].severity == "Medium"
@@ -582,7 +582,7 @@ def test_cautious_face_to_note_amount_agreement_does_not_flag_when_amounts_are_i
     findings = check_notes_agreement(document, cautious_low_confidence=True)
 
     assert not any("amount not located" in finding.issue.lower() for finding in findings)
-    assert not any("wrong note placement/reference" in finding.issue.lower() for finding in findings)
+    assert not any("amount appears in another note" in finding.issue.lower() for finding in findings)
 
 
 def test_cautious_face_to_note_amount_agreement_does_not_treat_amount_digits_as_note_refs():
@@ -614,6 +614,7 @@ def test_review_pdf_reports_cautious_note_reference_override_as_performed(monkey
 
     result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
 
+    assert "Cautious face-to-note amount agreement performed in review-prompt mode." in result.metrics["checks_performed"]
     assert "Cautious note-reference validation performed in review-prompt mode; no possible wrong note references detected." in result.metrics["checks_performed"]
     assert "Cautious note-reference validation skipped" not in result.metrics["checks_skipped"]
     assert result.metrics["cautious_note_validation_enabled"] is True

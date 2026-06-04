@@ -275,6 +275,7 @@ def review_pdf(
             for finding in note_findings
             if finding.metadata and finding.metadata.get("referenced_note")
         ]
+        checks_performed.append("Cautious face-to-note amount agreement performed in review-prompt mode.")
         if note_reference_prompts:
             checks_performed.append("Cautious note-reference and amount-agreement validation performed in review-prompt mode; possible prompts added to the exception register.")
         else:
@@ -2652,7 +2653,7 @@ def _check_cautious_face_note_amount_agreement(
             continue
         alternative_ref = _alternative_note_for_missing_amounts(item, note_sections, headings, tolerance)
         issue = (
-            f"Possible wrong note placement/reference: {item.line_item.title()} amount appears in Note {alternative_ref}."
+            f"Amount appears in another note: {item.line_item.title()} references Note {item.ref}, but the amount appears in Note {alternative_ref}."
             if alternative_ref
             else f"Amount not located in referenced note: {item.line_item.title()} references Note {item.ref}."
         )
