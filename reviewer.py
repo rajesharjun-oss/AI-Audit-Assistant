@@ -1902,6 +1902,19 @@ def _check_income_statement_text(page: PdfPage, tolerance: Decimal) -> tuple[lis
     gross_operating = ("subscriptions", "registrations", "operating revenue")
     total_income = ("gross revenue", "other revenue", "finance income")
     expenditure = ("office accommodation costs", "personnel costs", "administrative costs", "finance expenses")
+    if _has_rows(rows, ("revenue", "profit before tax", "taxation", "profit after tax")):
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Income statement",
+            "Profit after tax agrees to profit before tax less taxation.",
+            [a + b for a, b in zip(_row_amounts(rows, "profit before tax"), _row_amounts(rows, "taxation"))],
+            _row_amounts(rows, "profit after tax"),
+            tolerance,
+        )
+        performed.append("Income statement: revenue, tax, and profit/loss after tax checked from line-extracted rows.")
+    elif any(label in rows for label in ("revenue", "profit before tax", "taxation", "profit after tax")):
+        skipped.append("Income statement: profit/loss after tax skipped because revenue, tax, or profit rows were not confidently parsed.")
     if _has_rows(rows, (*gross_operating, "gross operating revenue")):
         _check_sum_rows(findings, page.number, "Income statement", "Gross operating revenue", rows, gross_operating, "gross operating revenue", tolerance)
         performed.append("Income statement: gross operating revenue checked from line-extracted rows.")
@@ -2127,6 +2140,24 @@ def _check_cash_flow_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Findi
             tolerance,
         )
         performed.append("Statement of cash flows: closing cash movement checked.")
+    elif _has_rows(rows, ("cash at beginning", "net increase in cash and cash equivalents", "cash at end")):
+        expected = [
+            a + b
+            for a, b in zip(
+                _row_amounts(rows, "cash at beginning"),
+                _row_amounts(rows, "net increase in cash and cash equivalents"),
+            )
+        ]
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of cash flows",
+            "Cash at end agrees to cash at beginning plus net cash movement.",
+            expected,
+            _row_amounts(rows, "cash at end"),
+            tolerance,
+        )
+        performed.append("Statement of cash flows: cash at beginning/end checked from line-extracted rows.")
     else:
         skipped.append("Statement of cash flows: closing cash movement skipped because rows were not confidently parsed.")
     return findings, performed, skipped
@@ -2139,6 +2170,7 @@ def _statement_rows(text: str) -> dict[str, list[Decimal]]:
         if len(amounts) < 2:
             continue
         label = _statement_label(line)
+        label = _canonical_statement_label(label)
         if label:
             rows[label] = amounts[-2:]
     return rows
@@ -2152,6 +2184,89 @@ def _statement_label(line: str) -> str:
     cleaned = re.sub(r"[^A-Za-z&/ -]", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
     return cleaned.strip(" -")
+
+
+def _canonical_statement_label(label: str) -> str:
+    normalized = _normalise_match_words(label)
+    if not normalized:
+        return ""
+    protected_labels = {
+        "subscriptions",
+        "registrations",
+        "operating revenue",
+        "gross operating revenue",
+        "operating expenditure",
+        "gross revenue",
+        "other revenue",
+        "finance income",
+        "total income",
+        "office accommodation costs",
+        "personnel costs",
+        "administrative costs",
+        "finance expenses",
+        "total expenditure",
+        "surplus of income over expenditure",
+        "total comprehensive income",
+        "investment property",
+        "property plant and equipment",
+        "intangible assets",
+        "inventories",
+        "trade and other receivables",
+        "cash and cash equivalents",
+        "total non current assets",
+        "total non-current assets",
+        "total current assets",
+        "total members fund",
+        "total members' fund",
+        "trade and other payables",
+        "total liabilities",
+        "total funds and liabilities",
+        "net cash inflow from operating activities",
+        "net cash absorbed in investing activities",
+        "net cash inflow from financing activities",
+    }
+    if normalized in {_normalise_match_words(item) for item in protected_labels}:
+        return label
+    patterns: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("total equity and liabilities", ("total equity and liabilities", "total liabilities and equity", "total equity liabilities", "equity and liabilities")),
+        ("total assets", ("total assets",)),
+        ("non-current assets", ("non current assets", "noncurrent assets", "total non current assets", "non current asset")),
+        ("revenue", ("revenue", "turnover", "sales")),
+        ("profit before tax", ("profit before tax", "profit before taxation", "loss before tax", "loss before taxation", "profit loss before tax")),
+        ("taxation", ("taxation", "income tax", "tax expense", "tax credit", "income tax expense")),
+        ("profit after tax", ("profit after tax", "profit for year", "profit for the year", "loss after tax", "loss for year", "loss for the year")),
+        ("current assets", ("current assets", "total current assets")),
+        ("equity", ("equity", "total equity", "shareholders equity", "shareholder funds", "net assets", "capital and reserves")),
+        ("liabilities", ("liabilities", "total liabilities")),
+        ("cash at beginning", ("cash at beginning", "cash and cash equivalents at beginning", "cash and cash equivalents at beginning of year", "cash cash equivalents beginning", "cash equivalents beginning year")),
+        ("cash at end", ("cash at end", "cash and cash equivalents at end", "cash and cash equivalents at end of year", "cash cash equivalents end", "cash equivalents end year")),
+        ("net increase in cash and cash equivalents", ("net increase in cash", "net decrease in cash", "increase in cash and cash equivalents", "decrease in cash and cash equivalents")),
+    )
+    for canonical, aliases in patterns:
+        if any(_label_matches(normalized, alias) for alias in aliases):
+            return canonical
+    return label
+
+
+def _label_matches(normalized_label: str, alias: str) -> bool:
+    normalized_alias = _normalise_match_words(alias)
+    if not normalized_alias:
+        return False
+    if normalized_label == normalized_alias:
+        return True
+    if "beginning" in normalized_alias and "end" in normalized_label:
+        return False
+    if "end" in normalized_alias and "beginning" in normalized_label:
+        return False
+    if normalized_alias in {"revenue", "turnover", "sales"}:
+        return len(normalized_label.split()) <= 2 and SequenceMatcher(None, normalized_label, normalized_alias).ratio() >= 0.84
+    if normalized_alias == "current assets" and "non current assets" in normalized_label:
+        return False
+    if normalized_alias in normalized_label or normalized_label in normalized_alias:
+        if normalized_label in normalized_alias and len(normalized_label.split()) < 3:
+            return False
+        return True
+    return SequenceMatcher(None, normalized_label, normalized_alias).ratio() >= 0.84
 
 
 def _normalise_statement_number_spacing(line: str) -> str:
@@ -2443,17 +2558,6 @@ def _superseded_reference_context(snippet: str) -> str:
 
 
 def _check_ocr_statement_of_financial_position(document: PdfDocument, tolerance: Decimal) -> list[Finding]:
-    if document.extraction_confidence < 80:
-        return [
-            Finding(
-                "Extraction quality",
-                "Low",
-                "OCR statement-specific checks",
-                "Statement-specific OCR checks were skipped because extraction confidence is low.",
-                f"Extraction confidence: {document.extraction_confidence}%.",
-                "Improve OCR quality or use a clean text PDF before relying on scanned statement casting checks.",
-            )
-        ]
     for page in document.pages:
         if not _fuzzy_contains(page.text[:1000], "statement of financial position") and not _page_has_sfp_rows(page):
             continue

@@ -154,6 +154,89 @@ def test_primary_statement_checks_run_from_line_text_when_tables_are_low_confide
     assert any("total expenditure checked" in item for item in performed)
 
 
+def test_ocr_profit_or_loss_rows_are_parsed_with_fuzzy_labels():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of profit or loss",
+                        "Revenve 1,000 900",
+                        "Loss before taxation (200) (100)",
+                        "Taxation (50) (30)",
+                        "Loss after tax (250) (130)",
+                    ]
+                ),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings, performed, skipped = check_primary_statement_consistency(document)
+
+    assert not findings
+    assert any("profit/loss after tax checked" in item for item in performed)
+
+
+def test_ocr_sfp_requested_rows_are_parsed_with_fuzzy_labels():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Non current assets 600 500",
+                        "Current assets 400 300",
+                        "Total assets 1,000 800",
+                        "Equity 700 550",
+                        "Liabilities 300 250",
+                        "Total liabilities and equity 1,000 800",
+                    ]
+                ),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings, performed, skipped = check_primary_statement_consistency(document)
+
+    assert not findings
+    assert any("total assets checked from line-extracted rows" in item for item in performed)
+    assert any("equity and liabilities equation checked" in item for item in performed)
+
+
+def test_ocr_cash_beginning_and_end_rows_are_parsed():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of cash flows",
+                        "Net increase in cash and cash equivalents 100 80",
+                        "Cash and cash equivalents at beginning of year 250 170",
+                        "Cash and cash equivalents at end of year 350 250",
+                    ]
+                ),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings, performed, skipped = check_primary_statement_consistency(document)
+
+    assert not findings
+    assert any("cash at beginning/end checked" in item for item in performed)
+
+
 def test_arithmetic_skips_merged_numeric_cells():
     document = PdfDocument(
         [
