@@ -28,6 +28,7 @@ class StatementNoteLine:
     amounts: tuple[Decimal, ...]
     page_number: int
     statement_name: str
+    explicit_ref: bool = False
 
 
 POLICY_RULES = {
@@ -2455,7 +2456,7 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     label = _clean_statement_line_item(line[:ref_start])
     if not label:
         return None
-    return StatementNoteLine(ref.upper(), label, line.strip(), amounts, page_number, statement_name)
+    return StatementNoteLine(ref.upper(), label, line.strip(), amounts, page_number, statement_name, bool(note_match))
 
 
 def _statement_name_from_page(text: str) -> str:
@@ -2484,46 +2485,95 @@ def _check_possible_wrong_note_references(
     flagged: set[tuple[str, str]] = set()
     for item in statement_lines:
         referenced = note_sections.get(item.ref, "")
-        if not referenced or _is_disclosure_only_note(headings.get(item.ref, "")):
+        referenced_heading = headings.get(item.ref, "")
+        if _is_disclosure_only_note(referenced_heading):
             continue
-        referenced_match = _note_match_strength(item, headings.get(item.ref, ""), referenced, tolerance)
-        if referenced_match["wording"] or referenced_match["amount"]:
+        if not referenced_heading:
+            if not item.explicit_ref:
+                continue
+            findings.append(_note_reference_review_prompt(item, "", "Low", "Referenced note heading was not detected.", cautious_review_prompt))
+            flagged.add((item.ref, item.line))
             continue
+        referenced = referenced or ""
+        referenced_match = _note_match_strength(item, referenced_heading, referenced, tolerance)
+        referenced_heading_score = _wording_match_score(item.line_item, referenced_heading)
         best_ref = ""
         best_score = -1
         best_match: dict[str, bool] = {"wording": False, "amount": False}
+        best_heading_score = 0.0
         for candidate_ref, section in note_sections.items():
             if candidate_ref == item.ref or _is_disclosure_only_note(headings.get(candidate_ref, "")):
                 continue
             match = _note_match_strength(item, headings.get(candidate_ref, ""), section, tolerance, all_sections=note_sections)
-            if not (match["wording"] or match["amount"]):
+            heading_score = _wording_match_score(item.line_item, headings.get(candidate_ref, ""))
+            stronger_heading = heading_score >= 0.82 and heading_score > referenced_heading_score + 0.12
+            if not (match["wording"] or match["amount"] or stronger_heading):
                 continue
-            score = (2 if match["wording"] else 0) + (3 if match["amount"] else 0)
+            score = (2 if (match["wording"] or stronger_heading) else 0) + (3 if match["amount"] else 0) + int(heading_score * 10)
             if score > best_score:
                 best_ref = candidate_ref
                 best_score = score
-                best_match = match
+                best_match = {"wording": match["wording"] or stronger_heading, "amount": match["amount"]}
+                best_heading_score = heading_score
+        if referenced_match["wording"] and referenced_match["amount"]:
+            continue
+        if referenced_match["amount"] and not best_ref:
+            continue
+        if referenced_match["wording"] and not best_match["amount"] and not (best_ref and best_heading_score > referenced_heading_score + 0.12):
+            continue
         if not best_ref:
             continue
         confidence = "High" if best_match["wording"] and best_match["amount"] else "Medium" if best_match["amount"] else "Low"
         if cautious_review_prompt and confidence == "High":
             confidence = "Medium"
-        findings.append(
-            Finding(
-                "Notes agreement",
-                confidence,
-                f"Page {item.page_number} | {item.statement_name}",
-                f"Possible wrong note reference: {item.line_item.title()} references Note {item.ref}, but the matching item/amount appears to be in Note {best_ref}.",
-                (
-                    f"Line: {item.line[:160]}. "
-                    f"Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}."
-                    + (" Review prompt only because note extraction confidence is below threshold." if cautious_review_prompt else "")
-                ),
-                "Review the face statement note reference and correct it if the linked note number is wrong.",
-            )
-        )
+        reason = _note_reference_reason(best_match, best_ref, cautious_review_prompt)
+        findings.append(_note_reference_review_prompt(item, best_ref, confidence, reason, cautious_review_prompt))
         flagged.add((item.ref, item.line))
     return findings, flagged
+
+
+def _note_reference_review_prompt(
+    item: StatementNoteLine,
+    suggested_ref: str,
+    confidence: str,
+    reason: str,
+    cautious_review_prompt: bool,
+) -> Finding:
+    issue = (
+        f"Possible wrong note reference: {item.line_item.title()} references Note {item.ref}"
+        + (f", but Note {suggested_ref} appears to be a stronger match." if suggested_ref else ", but the referenced note heading was not detected.")
+    )
+    evidence = (
+        f"Line: {item.line[:160]}. Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}. "
+        f"Reason: {reason}"
+        + (" Review prompt only because note extraction confidence is below threshold." if cautious_review_prompt else "")
+    )
+    return Finding(
+        "Notes agreement",
+        confidence,
+        f"Page {item.page_number} | {item.statement_name}",
+        issue,
+        evidence,
+        "Review the face statement note reference and correct it if the linked note number is wrong.",
+        {
+            "statement": item.statement_name,
+            "line_item": item.line_item.title(),
+            "referenced_note": item.ref,
+            "suggested_note": suggested_ref,
+            "match_confidence": confidence,
+            "reason": reason,
+        },
+    )
+
+
+def _note_reference_reason(match: dict[str, bool], suggested_ref: str, cautious_review_prompt: bool) -> str:
+    if match["wording"] and match["amount"]:
+        base = f"Line item wording and amount both match Note {suggested_ref} more strongly than the referenced note."
+    elif match["amount"]:
+        base = f"Amount matches Note {suggested_ref}, but wording support is weak."
+    else:
+        base = f"Line item wording is a stronger match to Note {suggested_ref}."
+    return f"{base} Treat as review prompt." if cautious_review_prompt else base
 
 
 def _note_match_strength(
@@ -2554,6 +2604,18 @@ def _wording_matches_note(line_item: str, note_title: str, note_section: str) ->
         for candidate in candidates
         if len(candidate) >= 4
     )
+
+
+def _wording_match_score(line_item: str, candidate_text: str) -> float:
+    target = _normalise_match_words(line_item)
+    candidate = _normalise_match_words(candidate_text)
+    if not target or not candidate:
+        return 0.0
+    if target == candidate:
+        return 1.0
+    if target in candidate or candidate in target:
+        return 0.9
+    return SequenceMatcher(None, target, candidate).ratio()
 
 
 def _amounts_match_note(

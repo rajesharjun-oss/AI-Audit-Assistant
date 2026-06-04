@@ -104,6 +104,7 @@ class Finding:
     issue: str
     evidence: str
     recommendation: str
+    metadata: dict[str, str] | None = None
 
 
 @dataclass

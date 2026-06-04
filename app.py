@@ -27,8 +27,11 @@ def _metric_lines(value: object, empty: str) -> list[str]:
 
 
 def _finding_rows(result) -> list[dict[str, str]]:
-    return [
-        {
+    rows = []
+    for index, finding in enumerate(result.findings, start=1):
+        metadata = finding.metadata or {}
+        rows.append(
+            {
             "ID": f"EX-{index:03d}",
             "Status": "Open",
             "Severity": finding.severity,
@@ -36,6 +39,12 @@ def _finding_rows(result) -> list[dict[str, str]]:
             "Check type": finding.category,
             "Confidence": _finding_confidence(finding, result),
             "Page reference": _page_reference(finding.location, finding.evidence),
+            "Statement": metadata.get("statement", ""),
+            "Line item": metadata.get("line_item", ""),
+            "Referenced note": metadata.get("referenced_note", ""),
+            "Suggested note": metadata.get("suggested_note", ""),
+            "Match confidence": metadata.get("match_confidence", finding.severity),
+            "Reason": metadata.get("reason", ""),
             "Location": finding.location,
             "Issue": finding.issue,
             "Evidence": finding.evidence,
@@ -44,9 +53,9 @@ def _finding_rows(result) -> list[dict[str, str]]:
             "Prepared by": "",
             "Reviewed by": "",
             "Date cleared": "",
-        }
-        for index, finding in enumerate(result.findings, start=1)
-    ]
+            }
+        )
+    return rows
 
 
 def _finding_confidence(finding, result) -> str:
@@ -114,6 +123,12 @@ def _build_excel_export(result) -> bytes:
                 "Check type": "",
                 "Confidence": "",
                 "Page reference": "",
+                "Statement": "",
+                "Line item": "",
+                "Referenced note": "",
+                "Suggested note": "",
+                "Match confidence": "",
+                "Reason": "",
                 "Location": "",
                 "Issue": "No automated findings were identified.",
                 "Evidence": "",

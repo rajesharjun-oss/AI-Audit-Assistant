@@ -446,7 +446,11 @@ def test_notes_check_flags_possible_wrong_note_reference_when_item_is_in_another
     assert wrong_ref
     assert wrong_ref[0].severity == "High"
     assert "Other Revenue references Note 7" in wrong_ref[0].issue
-    assert "Note 9" in wrong_ref[0].issue
+    assert "Note 9 appears to be a stronger match" in wrong_ref[0].issue
+    assert wrong_ref[0].metadata["statement"] == "Statement of income and expenditure"
+    assert wrong_ref[0].metadata["line_item"] == "Other Revenue"
+    assert wrong_ref[0].metadata["referenced_note"] == "7"
+    assert wrong_ref[0].metadata["suggested_note"] == "9"
 
 
 def test_wrong_note_reference_check_respects_low_confidence_gate():
@@ -466,6 +470,7 @@ def test_wrong_note_reference_check_respects_low_confidence_gate():
 
     assert not any("possible wrong note reference" in finding.issue.lower() for finding in normal_findings)
     assert any("possible wrong note reference" in finding.issue.lower() for finding in cautious_findings)
+    assert all(finding.severity in {"Low", "Medium"} for finding in cautious_findings if "possible wrong note reference" in finding.issue.lower())
 
 
 def test_notes_agreement_is_conservative_for_ocr_documents():
