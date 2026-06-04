@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import re
 import tempfile
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
@@ -33,8 +34,8 @@ def _finding_rows(result) -> list[dict[str, str]]:
             "Severity": finding.severity,
             "Category": finding.category,
             "Check type": finding.category,
-            "Confidence": _finding_confidence(finding),
-            "Page reference": _page_reference(finding.location),
+            "Confidence": _finding_confidence(finding, result),
+            "Page reference": _page_reference(finding.location, finding.evidence),
             "Location": finding.location,
             "Issue": finding.issue,
             "Evidence": finding.evidence,
@@ -48,9 +49,11 @@ def _finding_rows(result) -> list[dict[str, str]]:
     ]
 
 
-def _finding_confidence(finding) -> str:
+def _finding_confidence(finding, result) -> str:
     if finding.category == "Extraction quality":
-        return "Review prompt"
+        if finding.location in {"PDF extraction", "Table extraction", "Notes agreement"}:
+            return f"Text {result.metrics.get('extraction_confidence', '0%')} / Table {result.metrics.get('table_confidence', '0%')}"
+        return finding.severity
     if finding.severity == "High":
         return "High"
     if finding.severity == "Medium":
@@ -58,9 +61,14 @@ def _finding_confidence(finding) -> str:
     return "Low"
 
 
-def _page_reference(location: str) -> str:
-    match = pd.Series([location]).str.extract(r"(Page\s+\d+)").iloc[0, 0]
-    return "" if pd.isna(match) else str(match)
+def _page_reference(location: str, evidence: str = "") -> str:
+    text = f"{location}\n{evidence}"
+    pages = sorted({int(match) for match in re.findall(r"\bPage\s+(\d+)\b", text, flags=re.I)})
+    if not pages:
+        return ""
+    if len(pages) == 1:
+        return f"Page {pages[0]}"
+    return "Pages " + ", ".join(str(page) for page in pages)
 
 
 def _note_heading_rows(result) -> list[dict[str, str]]:
@@ -191,13 +199,14 @@ def _docx_table(rows: list[list[object]]) -> str:
     for row_index, row in enumerate(rows):
         cells = []
         for value in row:
+            display_value = "" if value is None else str(value)
             shading = '<w:shd w:fill="1F2937"/>' if row_index == 0 else ""
             color = '<w:color w:val="FFFFFF"/>' if row_index == 0 else ""
             bold = "<w:b/>" if row_index == 0 else ""
             cells.append(
                 "<w:tc>"
                 f"<w:tcPr>{shading}</w:tcPr>"
-                f"<w:p><w:r><w:rPr>{bold}{color}</w:rPr><w:t>{xml_escape(str(value or ''))}</w:t></w:r></w:p>"
+                f"<w:p><w:r><w:rPr>{bold}{color}</w:rPr><w:t>{xml_escape(display_value)}</w:t></w:r></w:p>"
                 "</w:tc>"
             )
         table_rows.append(f"<w:tr>{''.join(cells)}</w:tr>")
@@ -266,10 +275,17 @@ def _build_word_memo_export(result) -> bytes:
         severity_order = {"High": 0, "Medium": 1, "Low": 2}
         for (severity, category), findings in sorted(grouped.items(), key=lambda item: (severity_order.get(item[0][0], 9), item[0][1])):
             body_parts.append(_docx_paragraph(f"{severity} | {category}", "Heading2"))
-            for finding in findings:
-                body_parts.append(_docx_paragraph(f"{finding.location}: {finding.issue}"))
-                body_parts.append(_docx_paragraph(f"Evidence: {finding.evidence}"))
-                body_parts.append(_docx_paragraph(f"Recommendation: {finding.recommendation}"))
+            body_parts.append(
+                _docx_table(
+                    [
+                        ["Location", "Issue", "Evidence", "Recommendation"],
+                        *[
+                            [finding.location, finding.issue, finding.evidence, finding.recommendation]
+                            for finding in findings
+                        ],
+                    ]
+                )
+            )
     else:
         body_parts.append(_docx_paragraph("No automated findings were identified."))
     document_xml = (

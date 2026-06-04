@@ -494,7 +494,7 @@ def test_detected_profile_infers_upload_only_context():
         [
             PdfPage(
                 1,
-                "CHARTERED INSTITUTE OF PERSONNEL MANAGEMENT\nFinancial Statements\nYear ended December 31, 2025\nPrepared in accordance with IFRS and presented in N'000.\nPrincipal activities are professional membership services.\nCash and cash equivalents 100\nTrade and other receivables 50",
+                "CHARTERED INSTITUTE OF PERSONNEL MANAGEMENT OF NIGERIA\nFinancial Statements\nYear ended December 31, 2025\nPrepared in accordance with IFRS and presented in N'000.\nPrincipal activities are professional membership services, professional development, training and certification for personnel management practitioners. This paragraph continues with extracted report boilerplate that should not be pasted in full.\nCash and cash equivalents 100\nTrade and other receivables 50",
                 [],
             )
         ]
@@ -502,11 +502,12 @@ def test_detected_profile_infers_upload_only_context():
 
     profile = infer_detected_profile(document)
 
-    assert profile["Company name"] == "Chartered Institute Of Personnel Management"
+    assert profile["Company name"] == "Chartered Institute of Personnel Management of Nigeria"
     assert profile["Year end"] == "December 31, 2025"
     assert profile["Currency"] == "NGN"
     assert profile["Framework"] == "IFRS"
     assert "professional body" in profile["Entity type"].lower()
+    assert profile["Principal activities"] == "Professional membership body for personnel management, including member services, professional development, training, and certification."
 
 
 def test_text_confidence_separates_table_confidence():

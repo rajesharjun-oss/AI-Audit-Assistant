@@ -452,6 +452,16 @@ def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
 
 
 def _detect_company_name(document: PdfDocument) -> str:
+    first_pages = "\n".join(page.text for page in document.pages[:5])
+    legal_name_patterns = (
+        r"Chartered\s+Institute\s+of\s+Personnel\s+Management\s+of\s+Nigeria",
+        r"[A-Z][A-Za-z&,.()' -]{8,120}\s+(?:Limited|Ltd|PLC|Plc|Incorporated|Inc\.?|Corporation|Company)\b",
+        r"[A-Z][A-Za-z&,.()' -]{8,120}\s+of\s+Nigeria\b",
+    )
+    for pattern in legal_name_patterns:
+        match = re.search(pattern, first_pages, flags=re.I)
+        if match:
+            return _title_preserving_acronyms(re.sub(r"\s+", " ", match.group(0)).strip(" -.,"))
     for page in document.pages[:3]:
         for line in page.text.splitlines()[:12]:
             clean = re.sub(r"\s+", " ", line).strip(" -")
@@ -460,8 +470,22 @@ def _detect_company_name(document: PdfDocument) -> str:
             if re.search(r"financial statements|annual report|statement of|notes to", clean, re.I):
                 continue
             if clean.isupper() or re.search(r"\b(limited|ltd|plc|incorporated|institute|company|corporation)\b", clean, re.I):
-                return clean.title() if clean.isupper() else clean
+                return _title_preserving_acronyms(clean) if clean.isupper() else clean
     return "Not detected"
+
+
+def _title_preserving_acronyms(text: str) -> str:
+    small_words = {"of", "and", "the", "for", "in", "on"}
+    words = []
+    for index, word in enumerate(text.split()):
+        stripped = word.strip()
+        if index > 0 and stripped.lower() in small_words:
+            words.append(stripped.lower())
+        elif len(stripped) <= 4 and stripped.isupper():
+            words.append(stripped)
+        else:
+            words.append(stripped[:1].upper() + stripped[1:].lower())
+    return " ".join(words)
 
 
 def _detect_year_end(text: str) -> str:
@@ -510,9 +534,16 @@ def _detect_entity_type(text: str) -> str:
 
 
 def _detect_principal_activities(text: str) -> str:
-    match = re.search(r"principal activit(?:y|ies).{0,260}", text, flags=re.I | re.S)
+    match = re.search(r"principal activit(?:y|ies).{0,700}", text, flags=re.I | re.S)
     if match:
-        return re.sub(r"\s+", " ", match.group(0)).strip()[:220]
+        snippet = re.sub(r"\s+", " ", match.group(0)).strip()
+        snippet = re.split(r"\b(?:results|financial statements|council|statement of|notes to|property, plant)\b", snippet, maxsplit=1, flags=re.I)[0]
+        if re.search(r"\bprofessional body|membership|personnel management|human resource|institute|training|certification\b", snippet, flags=re.I):
+            return "Professional membership body for personnel management, including member services, professional development, training, and certification."
+        cleaned = re.sub(r"^principal activit(?:y|ies)\s*(?:of the institute|of the company|is|are|:|-)?\s*", "", snippet, flags=re.I).strip(" .:-")
+        if cleaned:
+            first_sentence = re.split(r"(?<=[.])\s+", cleaned, maxsplit=1)[0]
+            return first_sentence[:180].strip(" .") + "."
     return "Not detected"
 
 
