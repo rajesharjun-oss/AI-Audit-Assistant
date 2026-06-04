@@ -5,6 +5,7 @@ from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
     _note_headings,
+    _note_headings_by_page,
     _amounts_from_statement_line,
     check_formatting,
     check_extraction_quality,
@@ -350,6 +351,52 @@ def test_note_heading_detection_handles_multiline_header_with_year_columns():
     headings = _note_headings(text)
 
     assert headings["9"] == "Other Revenue"
+
+
+def test_note_heading_detection_handles_combined_and_split_table_headings():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of income and expenditure",
+                        "Personnel costs 11 633,447 441,731",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "NOTES TO THE FINANCIAL STATEMENTS",
+                        "Note - 2025 7 8",
+                        "Cost of Generating",
+                        "Revenue Heads Operating Revenue Operating Revenue Net Surplus",
+                        "N'000 N'000 N'000",
+                        "2,783,064 1,269,506 1,513,130",
+                        "10 Office accommodation N'000 N'000",
+                        "Repairs 39,772 17,996",
+                        "11(a) Staff costs N'000 N'000",
+                        "Salaries 633,447 441,731",
+                        "16 Inventories 2025 2024",
+                        "N'000 N'000",
+                        "Study packs 7,601 15,969",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["7"][0] == "Operating Revenue"
+    assert headings["8"][0] == "Operating Expenditure"
+    assert headings["10"][0] == "Office accommodation"
+    assert headings["11"][0] == "Personnel costs"
+    assert headings["16"][0] == "Inventories"
 
 
 def test_disclosure_only_notes_are_not_flagged_as_unreferenced():

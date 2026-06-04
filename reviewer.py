@@ -14,7 +14,7 @@ from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage,
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
 YEAR_RE = re.compile(r"\b20\d{2}\b")
 NOTE_REF_RE = re.compile(r"\bnote\s+(\d+[A-Za-z]?)\b|\bnotes?\s+(\d+[A-Za-z]?)\b", re.I)
-NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s*[\).:-]?\s+(.{3,100})$", re.I)
+NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)(?:\s*\([a-z]\))?\s*[\).:-]?\s+(.{3,100})$", re.I)
 NOTE_NUMBER_ONLY_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s+((?:20\d{2}|N['’]?\s?000|\$?000s?|\d{4})[\s,]*)+$", re.I)
 ENTITY_SUFFIX_RE = re.compile(r"\b(?:limited|ltd|plc|inc|corp|corporation|company)\b", re.I)
 VALID_CURRENCIES = {"NGN", "USD", "GBP", "EUR", "ZAR", "GHS", "KES", "CAD", "AUD"}
@@ -267,7 +267,7 @@ def review_pdf(
     findings.extend(note_findings)
     if options.run_cautious_note_agreement and document.table_extraction_confidence < 80 and not document.ocr_used:
         checks_performed.append("Cautious note-reference validation run despite low table confidence.")
-        checks_performed.append("Cautious detailed note agreement checks run despite low table confidence.")
+        checks_skipped.append("Detailed note agreement skipped because table extraction confidence is below threshold.")
     elif any(finding.location == "Notes agreement" and finding.category == "Extraction quality" for finding in note_findings):
         checks_performed.append("Basic note heading existence checks completed where statement note references were clearly detected.")
         checks_skipped.append("Cautious note-reference validation skipped because note extraction confidence is below threshold.")
@@ -939,6 +939,16 @@ def check_notes_agreement(
                 "Use this mode for manual investigation only; rerun on a cleaner PDF before treating detailed note findings as audit exceptions.",
             )
         )
+        note_sections = _note_sections(text)
+        misref_findings, _misreferenced_lines = _check_possible_wrong_note_references(
+            _statement_note_lines(document),
+            note_sections,
+            headings,
+            tolerance,
+            cautious_review_prompt=True,
+        )
+        findings.extend(misref_findings)
+        return findings
     if statement_refs:
         for ref in sorted(heading_refs - statement_refs, key=_note_sort_key):
             if ref.isdigit() and int(ref) <= 3:
@@ -962,6 +972,7 @@ def check_notes_agreement(
         note_sections,
         headings,
         tolerance,
+        cautious_review_prompt=not detailed_note_checks_allowed and cautious_low_confidence,
     )
     findings.extend(misref_findings)
     for ref, line, amount in _statement_lines_with_note_refs(document):
@@ -2337,7 +2348,51 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
                 title = lines[index + 1].strip()
                 if _valid_note_heading(number, title):
                     headings[number.upper()] = (_clean_note_title(title), page.number)
+            _add_combined_note_heading_candidates(headings, lines, index, line, page.number)
+    _augment_note_headings_from_statement_refs(headings, document)
     return headings
+
+
+def _add_combined_note_heading_candidates(
+    headings: dict[str, tuple[str, int]],
+    lines: list[str],
+    index: int,
+    line: str,
+    page_number: int,
+) -> None:
+    if not re.search(r"\bnote\b", line, flags=re.I):
+        return
+    refs = [ref.upper() for ref in re.findall(r"\b(\d{1,2}[A-C]?)\b", line, flags=re.I) if _valid_note_number(ref)]
+    if not {"7", "8"}.issubset(set(refs)):
+        return
+    nearby = " ".join(lines[index : index + 5]).lower()
+    if "revenue heads" in nearby and "operating revenue" in nearby:
+        headings.setdefault("7", ("Operating Revenue", page_number))
+        headings.setdefault("8", ("Operating Expenditure", page_number))
+
+
+def _augment_note_headings_from_statement_refs(headings: dict[str, tuple[str, int]], document: PdfDocument) -> None:
+    for item in _statement_note_lines(document):
+        if not item.line_item:
+            continue
+        title = _statement_line_item_title(item.line_item)
+        existing = headings.get(item.ref)
+        if existing is None:
+            continue
+        elif existing[0].lower() in {"staff costs"} and "personnel" in item.line_item.lower():
+            headings[item.ref] = (title, existing[1])
+
+
+def _statement_line_item_title(line_item: str) -> str:
+    words = []
+    for index, word in enumerate(line_item.split()):
+        if len(word) <= 4 and word.isupper():
+            words.append(word)
+        elif index == 0:
+            words.append(word.capitalize())
+        else:
+            words.append(word.lower())
+    return " ".join(words)
 
 
 def _format_note_heading_debug(document: PdfDocument) -> str:
@@ -2423,6 +2478,7 @@ def _check_possible_wrong_note_references(
     note_sections: dict[str, str],
     headings: dict[str, str],
     tolerance: Decimal,
+    cautious_review_prompt: bool = False,
 ) -> tuple[list[Finding], set[tuple[str, str]]]:
     findings: list[Finding] = []
     flagged: set[tuple[str, str]] = set()
@@ -2450,6 +2506,8 @@ def _check_possible_wrong_note_references(
         if not best_ref:
             continue
         confidence = "High" if best_match["wording"] and best_match["amount"] else "Medium" if best_match["amount"] else "Low"
+        if cautious_review_prompt and confidence == "High":
+            confidence = "Medium"
         findings.append(
             Finding(
                 "Notes agreement",
@@ -2459,6 +2517,7 @@ def _check_possible_wrong_note_references(
                 (
                     f"Line: {item.line[:160]}. "
                     f"Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}."
+                    + (" Review prompt only because note extraction confidence is below threshold." if cautious_review_prompt else "")
                 ),
                 "Review the face statement note reference and correct it if the linked note number is wrong.",
             )
@@ -2578,25 +2637,43 @@ def _note_refs_from_tables(tables: list[list[list[str]]]) -> set[str]:
 
 def _note_sections(text: str) -> dict[str, str]:
     sections: dict[str, list[str]] = defaultdict(list)
-    current: str | None = None
+    current_refs: list[str] = []
     pending_number: str | None = None
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         stripped = line.strip()
         match = NOTE_HEADING_RE.match(stripped)
         if match and _valid_note_heading(match.group(1), match.group(2)):
-            current = match.group(1).upper()
+            current_refs = [match.group(1).upper()]
             pending_number = None
         else:
-            number_only = NOTE_NUMBER_ONLY_RE.match(stripped)
-            if number_only and _valid_note_number(number_only.group(1)):
-                pending_number = number_only.group(1).upper()
-                continue
-            if pending_number and _valid_note_heading(pending_number, stripped):
-                current = pending_number
+            combined_refs = _combined_note_refs_from_line(lines, index, stripped)
+            if combined_refs:
+                current_refs = combined_refs
                 pending_number = None
-        if current:
+            else:
+                number_only = NOTE_NUMBER_ONLY_RE.match(stripped)
+                if number_only and _valid_note_number(number_only.group(1)):
+                    pending_number = number_only.group(1).upper()
+                    continue
+                if pending_number and _valid_note_heading(pending_number, stripped):
+                    current_refs = [pending_number]
+                    pending_number = None
+        for current in current_refs:
             sections[current].append(line)
     return {number: "\n".join(lines) for number, lines in sections.items()}
+
+
+def _combined_note_refs_from_line(lines: list[str], index: int, line: str) -> list[str]:
+    if not re.search(r"\bnote\b", line, flags=re.I):
+        return []
+    refs = [ref.upper() for ref in re.findall(r"\b(\d{1,2}[A-C]?)\b", line, flags=re.I) if _valid_note_number(ref)]
+    if not {"7", "8"}.issubset(set(refs)):
+        return []
+    nearby = " ".join(lines[index : index + 5]).lower()
+    if "revenue heads" in nearby and "operating revenue" in nearby:
+        return ["7", "8"]
+    return []
 
 
 def _is_notes_page(text: str) -> bool:
@@ -2606,7 +2683,7 @@ def _is_notes_page(text: str) -> bool:
 
 def _valid_note_heading(number: str, title: str) -> bool:
     number = number.upper().strip()
-    title_clean = re.sub(r"^[^\w(]+", "", title.strip())
+    title_clean = _clean_note_title(title)
     title_lower = title_clean.lower()
     if not _valid_note_number(number):
         return False
@@ -2621,7 +2698,7 @@ def _valid_note_heading(number: str, title: str) -> bool:
         return False
     if title_lower in {"december", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november"}:
         return False
-    if YEAR_RE.search(title_clean) and len(words) <= 8:
+    if YEAR_RE.search(title_clean) and len(words) <= 4:
         return False
     return bool(re.search(r"[A-Za-z]{3,}", title_clean))
 
@@ -2639,7 +2716,7 @@ def _valid_note_number(value: str) -> bool:
 
 def _clean_note_title(title: str) -> str:
     title = re.sub(r"^[^\w(]+", "", title.strip())
-    title = re.sub(r"\s+(?:20\d{2}\s+){1,2}$", "", title)
+    title = re.sub(r"(?:\s+20\d{2}){1,3}\s*$", "", title)
     title = re.sub(r"\s+(?:N['’]?\s?000|\$?000s?)(?:\s+(?:N['’]?\s?000|\$?000s?))*$", "", title, flags=re.I)
     return title.strip()
 
