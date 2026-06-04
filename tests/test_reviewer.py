@@ -644,6 +644,61 @@ def test_cautious_face_to_note_amount_agreement_skips_non_face_linked_lines(monk
     assert row["Reason"] == "Skipped - not a face-linked note line"
 
 
+def test_note_agreement_excludes_cash_flow_subtotals_without_explicit_note(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of cash flows",
+                        "Net cash inflow from operating activities a 141,411 154,819",
+                        "Net cash absorbed in investing activities b (20,000) (15,000)",
+                        "Net increase in cash and cash equivalents a+b 121,411 139,819",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(2, "Notes to the financial statements\n18 Cash and cash equivalents\nCash 121,411 139,819", []),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["note_agreement_results"] == []
+    assert not any("cash inflow" in finding.issue.lower() for finding in result.findings)
+
+
+def test_note_agreement_keeps_cash_flow_rows_with_explicit_note(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of cash flows\nCash and cash equivalents at end of year Note 18 875,869 605,645", []),
+            PdfPage(2, "Notes to the financial statements\n18 Cash and cash equivalents\nCash 875,869 605,645", []),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert any(row["Line item"] == "Cash And Cash Equivalents At End Of Year" and row["Result"] == "Passed" for row in result.metrics["note_agreement_results"])
+
+
+def test_note_agreement_excludes_value_added_and_five_year_summary(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of value added\nSurplus for the year 9 307,482 189,751", []),
+            PdfPage(2, "Five year financial summary\nRevenue 7 2,783,064 2,029,846", []),
+            PdfPage(3, "Notes to the financial statements\n7 Revenue\nRevenue 2,783,064 2,029,846\n9 Other Revenue\nOther revenue 307,482 189,751", []),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["note_agreement_results"] == []
+
+
 def test_cautious_face_to_note_amount_agreement_does_not_treat_amount_digits_as_note_refs():
     document = PdfDocument(
         [

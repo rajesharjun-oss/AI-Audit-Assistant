@@ -2661,6 +2661,8 @@ def _statement_note_lines(document: PdfDocument) -> list[StatementNoteLine]:
         if _is_notes_page(page.text):
             continue
         statement_name = _statement_name_from_page(page.text)
+        if _statement_excluded_from_note_agreement(statement_name, page.text):
+            continue
         for line in page.text.splitlines():
             parsed = _parse_statement_note_line(line, page.number, statement_name)
             if parsed:
@@ -2681,6 +2683,8 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
         return None
     explicit_ref = next(iter(_refs_in_text(line)), "")
     note_match = NOTE_REF_RE.search(line)
+    if "cash flow" in statement_name.lower() and not explicit_ref:
+        return None
     implicit_match = None
     if not explicit_ref:
         implicit_match = re.search(r"\b(\d{1,2}[A-C]?)\b(?=\s+\(?-?\d[\d,\s]*\)?)", line, flags=re.I)
@@ -2696,6 +2700,8 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     label = _clean_statement_line_item(line[:ref_start])
     if not label:
         return None
+    if not note_match and _line_item_not_face_linked(label, statement_name):
+        return None
     return StatementNoteLine(ref.upper(), label, line.strip(), amounts, page_number, statement_name, bool(note_match))
 
 
@@ -2707,6 +2713,21 @@ def _statement_name_from_page(text: str) -> str:
     return "Primary statements"
 
 
+def _statement_excluded_from_note_agreement(statement_name: str, page_text: str) -> bool:
+    lower = f"{statement_name}\n{page_text[:600]}".lower()
+    return any(
+        marker in lower
+        for marker in (
+            "statement of value added",
+            "value added statement",
+            "five-year financial summary",
+            "five year financial summary",
+            "5 year financial summary",
+            "financial summary",
+        )
+    )
+
+
 def _clean_statement_line_item(text: str) -> str:
     cleaned = _statement_label(text)
     cleaned = re.sub(r"\b(total|net)\b", " ", cleaned, flags=re.I)
@@ -2716,10 +2737,17 @@ def _clean_statement_line_item(text: str) -> str:
 
 def _note_agreement_skip_reason(item: StatementNoteLine) -> str:
     statement = item.statement_name.lower()
-    label = _normalise_match_words(item.line_item)
-    raw_label = item.line_item.lower()
     if "value added" in statement or "five year" in statement or "financial summary" in statement:
         return "not a face-linked note line"
+    if _line_item_not_face_linked(item.line_item, item.statement_name):
+        return "not a face-linked note line"
+    return ""
+
+
+def _line_item_not_face_linked(line_item: str, statement_name: str) -> bool:
+    statement = statement_name.lower()
+    label = _normalise_match_words(line_item)
+    raw_label = line_item.lower()
     broad_labels = {
         "current liabilities",
         "liabilities",
@@ -2739,8 +2767,8 @@ def _note_agreement_skip_reason(item: StatementNoteLine) -> str:
     if raw_label.startswith(("total ", "net cash", "surplus for the year")) and not item.explicit_ref:
         return "not a face-linked note line"
     if "cash flow" in statement and re.search(r"\b(total|net|cash generated|cash used|increase|decrease)\b", raw_label):
-        return "not a face-linked note line"
-    return ""
+        return True
+    return False
 
 
 def _check_possible_wrong_note_references(
