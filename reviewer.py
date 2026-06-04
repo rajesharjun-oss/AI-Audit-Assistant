@@ -276,7 +276,7 @@ def review_pdf(
             if finding.metadata and finding.metadata.get("referenced_note")
         ]
         if note_reference_prompts:
-            checks_performed.append("Cautious note-reference validation performed in review-prompt mode; possible note-reference prompts added to the exception register.")
+            checks_performed.append("Cautious note-reference and amount-agreement validation performed in review-prompt mode; possible prompts added to the exception register.")
         else:
             checks_performed.append("Cautious note-reference validation performed in review-prompt mode; no possible wrong note references detected.")
         checks_skipped.append("Detailed note agreement skipped because table extraction confidence is below threshold.")
@@ -940,6 +940,8 @@ def check_notes_agreement(
     heading_refs = set(headings)
     detailed_note_checks_allowed = document.table_extraction_confidence >= 80
     for ref in sorted(statement_refs - heading_refs, key=_note_sort_key):
+        if not detailed_note_checks_allowed and cautious_low_confidence:
+            continue
         findings.append(
             Finding(
                 "Notes agreement",
@@ -982,6 +984,16 @@ def check_notes_agreement(
             cautious_review_prompt=True,
         )
         findings.extend(misref_findings)
+        findings.extend(
+            _check_cautious_face_note_amount_agreement(
+                _statement_note_lines(document),
+                note_sections,
+                headings,
+                tolerance,
+                cautious_review_prompt=True,
+                suppressed_lines={(finding.metadata or {}).get("line_key", "") for finding in misref_findings},
+            )
+        )
         return findings
     if statement_refs:
         for ref in sorted(heading_refs - statement_refs, key=_note_sort_key):
@@ -2484,6 +2496,8 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     implicit_match = None
     if not explicit_ref:
         implicit_match = re.search(r"\b(\d{1,2}[A-C]?)\b(?=\s+\(?-?\d[\d,\s]*\)?)", line, flags=re.I)
+        if implicit_match and _amounts_in_text(line[: implicit_match.start()]):
+            implicit_match = None
     ref = explicit_ref or (implicit_match.group(1).upper() if implicit_match else "")
     if not ref or not _valid_note_number(ref):
         return None
@@ -2562,6 +2576,8 @@ def _check_possible_wrong_note_references(
             continue
         if not best_ref:
             continue
+        if cautious_review_prompt and best_match["amount"] and not best_match["wording"]:
+            continue
         confidence = "High" if best_match["wording"] and best_match["amount"] else "Medium" if best_match["amount"] else "Low"
         if cautious_review_prompt and confidence == "High":
             confidence = "Medium"
@@ -2601,8 +2617,119 @@ def _note_reference_review_prompt(
             "suggested_note": suggested_ref,
             "match_confidence": confidence,
             "reason": reason,
+            "line_key": f"{item.ref}|{item.line}",
         },
     )
+
+
+def _check_cautious_face_note_amount_agreement(
+    statement_lines: list[StatementNoteLine],
+    note_sections: dict[str, str],
+    headings: dict[str, str],
+    tolerance: Decimal,
+    cautious_review_prompt: bool,
+    suppressed_lines: set[str] | None = None,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    suppressed_lines = suppressed_lines or set()
+    for item in statement_lines:
+        line_key = f"{item.ref}|{item.line}"
+        if line_key in suppressed_lines or _is_disclosure_only_note(headings.get(item.ref, "")):
+            continue
+        if not item.amounts or len(item.amounts) < 1:
+            continue
+        referenced_section = note_sections.get(item.ref, "")
+        if not referenced_section:
+            continue
+        current_amount = item.amounts[0] if len(item.amounts) >= 1 else None
+        prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+        current_found = _single_amount_in_section(current_amount, referenced_section, tolerance)
+        prior_found = _single_amount_in_section(prior_amount, referenced_section, tolerance)
+        if current_found and (prior_amount is None or prior_found):
+            continue
+        heading_score = _wording_match_score(item.line_item, headings.get(item.ref, ""))
+        if heading_score >= 0.82 and (current_found or prior_found):
+            continue
+        alternative_ref = _alternative_note_for_missing_amounts(item, note_sections, headings, tolerance)
+        issue = (
+            f"Possible wrong note placement/reference: {item.line_item.title()} amount appears in Note {alternative_ref}."
+            if alternative_ref
+            else f"Amount not located in referenced note: {item.line_item.title()} references Note {item.ref}."
+        )
+        confidence = _amount_match_confidence(current_found, prior_found, alternative_ref, cautious_review_prompt)
+        findings.append(
+            Finding(
+                "Notes agreement",
+                confidence,
+                f"Page {item.page_number} | {item.statement_name}",
+                issue,
+                (
+                    f"Line: {item.line[:160]}. Current year found in referenced note: {_yes_no(current_found)}. "
+                    f"Prior year found in referenced note: {_yes_no(prior_found) if prior_amount is not None else 'N/A'}. "
+                    + (f"Alternative note found: Note {alternative_ref}." if alternative_ref else "Amount was not located in detected notes.")
+                    + (" Review prompt only because note/table confidence is below threshold." if cautious_review_prompt else "")
+                ),
+                "Review the note reference and agree the face statement amount to the related note schedule.",
+                {
+                    "statement": item.statement_name,
+                    "line_item": item.line_item.title(),
+                    "referenced_note": item.ref,
+                    "suggested_note": alternative_ref,
+                    "match_confidence": confidence,
+                    "reason": "Current/prior amount not located in referenced note." if not alternative_ref else f"Missing amount appears in Note {alternative_ref}.",
+                    "current_year_amount_found": _yes_no(current_found),
+                    "prior_year_amount_found": _yes_no(prior_found) if prior_amount is not None else "N/A",
+                    "amount_found_in_note": item.ref if current_found or prior_found else "",
+                    "alternative_note_found": alternative_ref,
+                    "amount_match_confidence": confidence,
+                    "line_key": line_key,
+                },
+            )
+        )
+    return findings
+
+
+def _single_amount_in_section(amount: Decimal | None, section: str, tolerance: Decimal) -> bool:
+    if amount is None or amount == 0 or abs(amount) <= tolerance * 5:
+        return True
+    return any(abs(note_amount - amount) <= tolerance for note_amount in _amounts_in_text(section))
+
+
+def _alternative_note_for_missing_amounts(
+    item: StatementNoteLine,
+    note_sections: dict[str, str],
+    headings: dict[str, str],
+    tolerance: Decimal,
+) -> str:
+    meaningful = [amount for amount in item.amounts if amount != 0 and abs(amount) > tolerance * 5]
+    if not meaningful:
+        return ""
+    best_ref = ""
+    best_count = 0
+    best_wording = 0.0
+    for ref, section in note_sections.items():
+        if ref == item.ref or _is_disclosure_only_note(headings.get(ref, "")):
+            continue
+        amounts = _amounts_in_text(section)
+        count = sum(1 for amount in meaningful if any(abs(note_amount - amount) <= tolerance for note_amount in amounts))
+        wording = _wording_match_score(item.line_item, headings.get(ref, ""))
+        if count > best_count or (count == best_count and count > 0 and wording > best_wording):
+            best_ref = ref
+            best_count = count
+            best_wording = wording
+    return best_ref if best_count else ""
+
+
+def _amount_match_confidence(current_found: bool, prior_found: bool, alternative_ref: str, cautious_review_prompt: bool) -> str:
+    if alternative_ref and not cautious_review_prompt and current_found is False and prior_found is False:
+        return "High"
+    if alternative_ref:
+        return "Medium"
+    return "Low"
+
+
+def _yes_no(value: bool) -> str:
+    return "Yes" if value else "No"
 
 
 def _note_reference_reason(match: dict[str, bool], suggested_ref: str, cautious_review_prompt: bool) -> str:

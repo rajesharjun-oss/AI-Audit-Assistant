@@ -513,6 +513,91 @@ def test_cautious_note_reference_validation_flags_explicit_missing_note_as_revie
     assert missing[0].metadata["referenced_note"] == "18"
 
 
+def test_cautious_face_to_note_amount_agreement_flags_amount_found_elsewhere():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nCash Note 18 875,869 605,645", []),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "18 Cash and cash equivalents",
+                        "Bank balances 100,000 90,000",
+                        "19 Trade and other payables",
+                        "Other payables 875,869 605,645",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document, cautious_low_confidence=True)
+    amount_prompts = [finding for finding in findings if "wrong note placement/reference" in finding.issue.lower()]
+
+    assert amount_prompts
+    assert amount_prompts[0].severity == "Medium"
+    assert amount_prompts[0].metadata["statement"] == "Statement of financial position"
+    assert amount_prompts[0].metadata["line_item"] == "Cash"
+    assert amount_prompts[0].metadata["referenced_note"] == "18"
+    assert amount_prompts[0].metadata["alternative_note_found"] == "19"
+    assert amount_prompts[0].metadata["current_year_amount_found"] == "No"
+    assert amount_prompts[0].metadata["prior_year_amount_found"] == "No"
+    assert amount_prompts[0].metadata["amount_match_confidence"] == "Medium"
+
+
+def test_cautious_face_to_note_amount_agreement_flags_amount_not_located():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of income and expenditure\nOther Revenue Note 9 307,482 189,751", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n9 Other Revenue\nFair value gain 100,000 90,000\n10 Office accommodation\nRent 50,000 40,000",
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document, cautious_low_confidence=True)
+    amount_prompts = [finding for finding in findings if "amount not located in referenced note" in finding.issue.lower()]
+
+    assert amount_prompts
+    assert amount_prompts[0].severity == "Low"
+    assert amount_prompts[0].metadata["referenced_note"] == "9"
+    assert amount_prompts[0].metadata["alternative_note_found"] == ""
+    assert amount_prompts[0].metadata["current_year_amount_found"] == "No"
+    assert amount_prompts[0].metadata["prior_year_amount_found"] == "No"
+    assert amount_prompts[0].metadata["amount_found_in_note"] == ""
+
+
+def test_cautious_face_to_note_amount_agreement_does_not_flag_when_amounts_are_in_referenced_note():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of income and expenditure\nOther Revenue Note 9 307,482 189,751", []),
+            PdfPage(2, "Notes to the financial statements\n9 Other Revenue\nFair value gain 307,482 189,751", []),
+        ]
+    )
+
+    findings = check_notes_agreement(document, cautious_low_confidence=True)
+
+    assert not any("amount not located" in finding.issue.lower() for finding in findings)
+    assert not any("wrong note placement/reference" in finding.issue.lower() for finding in findings)
+
+
+def test_cautious_face_to_note_amount_agreement_does_not_treat_amount_digits_as_note_refs():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nTotal Current Assets 1,172,176 811,598", []),
+            PdfPage(2, "Notes to the financial statements\n8 Operating expenditure\nExpenses 811,598", []),
+        ]
+    )
+
+    findings = check_notes_agreement(document, cautious_low_confidence=True)
+
+    assert not any("current assets references note 8" in finding.issue.lower() for finding in findings)
+
+
 def test_review_pdf_reports_cautious_note_reference_override_as_performed(monkeypatch):
     noisy_table = [["Description", "2025", "2024"]]
     noisy_table.extend([["Line item", "100 90", ""] for _ in range(40)])
