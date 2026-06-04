@@ -59,6 +59,8 @@ def _finding_rows(result) -> list[dict[str, str]]:
 
 
 def _finding_confidence(finding, result) -> str:
+    if finding.metadata and finding.metadata.get("match_confidence"):
+        return f"Review prompt / {finding.metadata['match_confidence']}"
     if finding.category == "Extraction quality":
         if finding.location in {"PDF extraction", "Table extraction", "Notes agreement"}:
             return f"Text {result.metrics.get('extraction_confidence', '0%')} / Table {result.metrics.get('table_confidence', '0%')}"
@@ -766,7 +768,7 @@ with st.container(border=True):
         help="Higher DPI can improve OCR accuracy but takes longer.",
     )
     cautious_note_agreement = st.toggle(
-        "Run cautious note-reference validation anyway",
+        "Run cautious note-reference validation even when confidence is low",
         value=False,
         help=(
             "When note/table confidence is below 80%, detailed note-reference validation is normally skipped. "

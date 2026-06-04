@@ -2501,9 +2501,10 @@ def _check_possible_wrong_note_references(
         best_score = -1
         best_match: dict[str, bool] = {"wording": False, "amount": False}
         best_heading_score = 0.0
-        for candidate_ref, section in note_sections.items():
+        for candidate_ref in headings:
             if candidate_ref == item.ref or _is_disclosure_only_note(headings.get(candidate_ref, "")):
                 continue
+            section = note_sections.get(candidate_ref, "")
             match = _note_match_strength(item, headings.get(candidate_ref, ""), section, tolerance, all_sections=note_sections)
             heading_score = _wording_match_score(item.line_item, headings.get(candidate_ref, ""))
             stronger_heading = heading_score >= 0.82 and heading_score > referenced_heading_score + 0.12
@@ -2539,10 +2540,10 @@ def _note_reference_review_prompt(
     reason: str,
     cautious_review_prompt: bool,
 ) -> Finding:
-    issue = (
-        f"Possible wrong note reference: {item.line_item.title()} references Note {item.ref}"
-        + (f", but Note {suggested_ref} appears to be a stronger match." if suggested_ref else ", but the referenced note heading was not detected.")
-    )
+    if suggested_ref:
+        issue = f"Possible wrong note reference: {item.line_item.title()} references Note {item.ref}, but Note {suggested_ref} appears to be a stronger match."
+    else:
+        issue = f"Referenced note not found: {item.line_item.title()} references Note {item.ref}, but that note was not detected."
     evidence = (
         f"Line: {item.line[:160]}. Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}. "
         f"Reason: {reason}"

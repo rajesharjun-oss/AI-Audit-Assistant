@@ -473,6 +473,45 @@ def test_wrong_note_reference_check_respects_low_confidence_gate():
     assert all(finding.severity in {"Low", "Medium"} for finding in cautious_findings if "possible wrong note reference" in finding.issue.lower())
 
 
+def test_cautious_note_reference_validation_uses_detected_headings_when_sections_are_weak():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of income and expenditure\nOther Revenue 7 307,482 189,751", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n7 Operating Revenue\nRevenue schedule text without matching amount\n9 Other Revenue\nNarrative only",
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document, cautious_low_confidence=True)
+    wrong_ref = [finding for finding in findings if "possible wrong note reference" in finding.issue.lower()]
+
+    assert wrong_ref
+    assert wrong_ref[0].severity == "Low"
+    assert wrong_ref[0].metadata["referenced_note"] == "7"
+    assert wrong_ref[0].metadata["suggested_note"] == "9"
+    assert wrong_ref[0].metadata["reason"]
+
+
+def test_cautious_note_reference_validation_flags_explicit_missing_note_as_review_prompt():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nCash Note 18 875,869 605,645", []),
+            PdfPage(2, "Notes to the financial statements\n19 Trade and other payables\nOther payables 141,411", []),
+        ]
+    )
+
+    findings = check_notes_agreement(document, cautious_low_confidence=True)
+    missing = [finding for finding in findings if "referenced note not found" in finding.issue.lower()]
+
+    assert missing
+    assert missing[0].severity == "Low"
+    assert missing[0].metadata["line_item"] == "Cash"
+    assert missing[0].metadata["referenced_note"] == "18"
+
+
 def test_notes_agreement_is_conservative_for_ocr_documents():
     document = PdfDocument(
         [
