@@ -398,8 +398,8 @@ def test_notes_check_flags_possible_wrong_note_reference_when_item_is_in_another
     wrong_ref = [finding for finding in findings if "possible wrong note reference" in finding.issue.lower()]
     assert wrong_ref
     assert wrong_ref[0].severity == "High"
-    assert "references Note 7" in wrong_ref[0].evidence
-    assert "Note 9" in wrong_ref[0].evidence
+    assert "Other Revenue references Note 7" in wrong_ref[0].issue
+    assert "Note 9" in wrong_ref[0].issue
 
 
 def test_wrong_note_reference_check_respects_low_confidence_gate():

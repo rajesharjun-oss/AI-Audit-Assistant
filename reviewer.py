@@ -266,11 +266,14 @@ def review_pdf(
     note_findings = check_notes_agreement(document, cautious_low_confidence=options.run_cautious_note_agreement)
     findings.extend(note_findings)
     if options.run_cautious_note_agreement and document.table_extraction_confidence < 80 and not document.ocr_used:
+        checks_performed.append("Cautious note-reference validation run despite low table confidence.")
         checks_performed.append("Cautious detailed note agreement checks run despite low table confidence.")
     elif any(finding.location == "Notes agreement" and finding.category == "Extraction quality" for finding in note_findings):
         checks_performed.append("Basic note heading existence checks completed where statement note references were clearly detected.")
+        checks_skipped.append("Cautious note-reference validation skipped because note extraction confidence is below threshold.")
         checks_skipped.append("Detailed note agreement skipped because table extraction confidence is below threshold.")
     else:
+        checks_performed.append("Cautious note-reference validation completed for primary statement note references.")
         checks_performed.append("Basic note reference and note amount agreement checks completed.")
     findings.extend(check_policy_relevance(document, profile))
     findings.extend(check_standard_checklist(document, profile))
@@ -2452,10 +2455,9 @@ def _check_possible_wrong_note_references(
                 "Notes agreement",
                 confidence,
                 f"Page {item.page_number} | {item.statement_name}",
-                "Possible wrong note reference detected.",
+                f"Possible wrong note reference: {item.line_item.title()} references Note {item.ref}, but the matching item/amount appears to be in Note {best_ref}.",
                 (
-                    f"Statement line '{item.line_item}' references Note {item.ref}, but the matching "
-                    f"item/amount appears to be in Note {best_ref}. Line: {item.line[:160]}. "
+                    f"Line: {item.line[:160]}. "
                     f"Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}."
                 ),
                 "Review the face statement note reference and correct it if the linked note number is wrong.",
