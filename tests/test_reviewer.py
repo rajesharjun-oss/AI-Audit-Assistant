@@ -832,6 +832,39 @@ def test_note_heading_detection_rejects_report_furniture_and_entity_names():
     assert headings["10"] == "Trade and other payables"
 
 
+def test_note_heading_detection_starts_after_notes_heading_when_present():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Directors' report\n7 Directors interests in shares\n8 Employment and employees", []),
+            PdfPage(2, "Notes to the financial statements\n7 Revenue\nRevenue 100 90\n8 Cost of sales\nCost 50 40", []),
+        ]
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["7"] == ("Revenue", 2)
+    assert headings["8"] == ("Cost of sales", 2)
+    assert "Directors interests" not in headings["7"][0]
+
+
+def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, ("Statement of profit or loss\nOther Revenue Note 7 307,482 189,751\n" * 20), []),
+            PdfPage(2, "Notes to the financial statements\n7 Operating revenue\nRevenue 100 90\n9 Other Revenue\nOther revenue 307,482 189,751", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["note_validation_mode"] == "review_prompt"
+    assert any("possible wrong note reference" in finding.issue.lower() for finding in result.findings)
+    assert all(finding.severity in {"Low", "Medium"} for finding in result.findings if finding.metadata)
+
+
 def test_policy_check_flags_boilerplate_lease_policy():
     document = PdfDocument(
         [
@@ -990,6 +1023,69 @@ def test_ocr_sfp_statement_specific_checks_run_only_on_confident_rows():
     findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
 
     assert any("Non-current assets + current assets" in finding.issue for finding in findings)
+
+
+def test_ocr_sfp_line_based_checks_run_when_tables_are_not_structured():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                ("Statement of financial position\n" * 40)
+                + "\n".join(
+                    [
+                        "Non-current assets 100 90",
+                        "Current assets 50 40",
+                        "Total assets 153 130",
+                        "Equity 60 50",
+                        "Liabilities 90 80",
+                        "Total equity and liabilities 150 130",
+                    ]
+                ),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert any("Non-current assets + current assets" in finding.issue for finding in findings)
+
+
+def test_confidence_metrics_separate_ocr_text_from_statement_structure(monkeypatch):
+    document = PdfDocument(
+        [PdfPage(1, "OCR text without parseable statement rows\n" * 80, [])],
+        ocr_used=True,
+        ocr_pages=1,
+        ocr_tables=3,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["ocr_text_coverage"] == "100%"
+    assert result.metrics["statement_structure_confidence"] == "0%"
+    assert result.metrics["table_arithmetic_confidence"] == "0%"
+    assert result.metrics["ocr_tables"] == 3
+
+
+def test_fuzzy_ocr_statement_page_detection_classifies_distorted_headings(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statememt of financiaI position\nTotal assets 100 90\nTotal equity and liabilities 100 90\n" * 20, []),
+            PdfPage(2, "Statment of profit or Ioss\nRevenue 100 90\nProfit 10 8\n" * 20, []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert "Statement of financial position | Page 1" in result.metrics["primary_statement_pages"]
+    assert "Statement of income and expenditure | Page 2" in result.metrics["primary_statement_pages"]
+    assert result.metrics["statement_structure_confidence"] != "0%"
 
 
 def test_ocr_sfp_statement_specific_checks_skip_low_confidence_rows():

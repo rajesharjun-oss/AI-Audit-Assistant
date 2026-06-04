@@ -273,7 +273,10 @@ def review_pdf(
     note_findings = check_notes_agreement(document, cautious_low_confidence=options.run_cautious_note_agreement)
     findings.extend(note_findings)
     note_validation_debug = _note_validation_debug(document, options.run_cautious_note_agreement, note_findings)
-    if options.run_cautious_note_agreement and document.table_extraction_confidence < 80 and not document.ocr_used:
+    if options.run_cautious_note_agreement and document.ocr_used:
+        checks_performed.append("Heading-based note-reference validation performed in OCR review-prompt mode.")
+        checks_skipped.append("Detailed OCR note amount agreement skipped because OCR note tables are not yet reliable.")
+    elif options.run_cautious_note_agreement and document.table_extraction_confidence < 80 and not document.ocr_used:
         note_reference_prompts = [
             finding
             for finding in note_findings
@@ -316,7 +319,11 @@ def _build_result(
         "text_chars": document.text_chars,
         "extraction_coverage": f"{document.extraction_coverage:.0%}",
         "extraction_confidence": f"{document.extraction_confidence}%",
-        "table_confidence": f"{document.table_extraction_confidence}%",
+        "ocr_text_coverage": f"{document.extraction_coverage:.0%}",
+        "statement_structure_confidence": f"{_statement_structure_confidence(document)}%",
+        "note_structure_confidence": f"{_note_structure_confidence(document)}%",
+        "table_arithmetic_confidence": f"{_table_arithmetic_confidence(document)}%",
+        "table_confidence": f"{_table_arithmetic_confidence(document)}%",
         "extraction_profile": document.extraction_profile,
         "unreadable_values": document.unreadable_value_count,
         "merged_value_cells": document.merged_value_cell_count,
@@ -329,6 +336,7 @@ def _build_result(
         "medium": sum(1 for item in findings if item.severity == "Medium"),
         "low": sum(1 for item in findings if item.severity == "Low"),
         "note_headings": _format_note_heading_debug(document),
+        "primary_statement_pages": _format_primary_statement_debug(document),
         "note_agreement_results": _note_agreement_result_rows(document),
         "detected_profile": infer_detected_profile(document),
         "checks_performed": "\n".join(checks_performed_list) or "No deterministic checks completed.",
@@ -348,7 +356,9 @@ def _note_validation_debug(
     note_findings: list[Finding],
 ) -> dict[str, int | str | bool]:
     note_reference_findings = sum(1 for finding in note_findings if finding.metadata and finding.metadata.get("referenced_note"))
-    if enabled and not document.ocr_used:
+    if enabled and document.ocr_used and _statement_note_lines(document) and _note_headings_by_page(document):
+        mode = "review_prompt"
+    elif enabled and not document.ocr_used:
         mode = "review_prompt" if document.table_extraction_confidence < 80 else "strict"
     else:
         mode = "skipped" if document.table_extraction_confidence < 80 or document.ocr_used else "strict"
@@ -361,6 +371,64 @@ def _note_validation_debug(
     }
 
 
+def _statement_structure_confidence(document: PdfDocument) -> int:
+    pages = _classified_primary_statement_pages(document)
+    if not pages:
+        return 0
+    row_counts = [_statement_row_confidence(page.text) for _name, page in pages.items()]
+    score = min(100, 15 * len(pages) + sum(row_counts))
+    if document.ocr_used:
+        score = min(score, 85)
+    return max(0, score)
+
+
+def _statement_row_confidence(text: str) -> int:
+    rows = _statement_rows(text)
+    important = sum(
+        1
+        for label in rows
+        if any(
+            keyword in label
+            for keyword in (
+                "total assets",
+                "current assets",
+                "non current assets",
+                "equity",
+                "liabilities",
+                "revenue",
+                "profit",
+                "cash and cash equivalents",
+            )
+        )
+    )
+    return min(40, important * 8)
+
+
+def _note_structure_confidence(document: PdfDocument) -> int:
+    headings = _note_headings_by_page(document)
+    if not headings:
+        return 0
+    score = min(100, 25 + len(headings) * 5)
+    if not _notes_start_page(document):
+        score = min(score, 45)
+    if document.ocr_used:
+        score = min(score, 80)
+    return score
+
+
+def _table_arithmetic_confidence(document: PdfDocument) -> int:
+    if document.ocr_used:
+        return min(document.table_extraction_confidence, _statement_structure_confidence(document))
+    return document.table_extraction_confidence
+
+
+def _format_primary_statement_debug(document: PdfDocument) -> str:
+    classified = _classified_primary_statement_pages(document)
+    if not classified:
+        return "No primary statement pages detected."
+    return "\n".join(f"{name} | Page {page.number}" for name, page in classified.items())
+
+
 def _note_section_page_ranges(document: PdfDocument) -> dict[str, str]:
     headings = _note_headings_by_page(document)
     ordered = sorted(headings.items(), key=lambda item: (_note_sort_key(item[0]), item[1][1]))
@@ -370,6 +438,17 @@ def _note_section_page_ranges(document: PdfDocument) -> dict[str, str]:
         end_page = max(start_page, next_page - 1)
         ranges[ref] = f"Page {start_page}" if end_page == start_page else f"Pages {start_page}-{end_page}"
     return ranges
+
+
+def _notes_start_page(document: PdfDocument) -> int | None:
+    for page in document.pages:
+        if _notes_heading_in_text(page.text):
+            return page.number
+    return None
+
+
+def _notes_heading_in_text(text: str) -> bool:
+    return bool(re.search(r"\bnotes\s+to\s+the\s+financial\s+statements\b", text, flags=re.I))
 
 
 def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
@@ -1115,6 +1194,27 @@ def check_notes_agreement(
     headings = {ref: title for ref, (title, _page_number) in headings_with_pages.items()}
     statement_refs = _statement_note_references(document)
     if document.ocr_used:
+        if cautious_low_confidence and headings and _statement_note_lines(document):
+            note_sections = _note_sections(text)
+            misref_findings, _misreferenced_lines = _check_possible_wrong_note_references(
+                _statement_note_lines(document),
+                note_sections,
+                headings,
+                tolerance,
+                cautious_review_prompt=True,
+            )
+            findings.append(
+                Finding(
+                    "Extraction quality",
+                    "Low",
+                    "Notes agreement",
+                    "Heading-based note-reference validation was run in OCR review-prompt mode.",
+                    "Detailed OCR note amount agreement remains skipped because OCR can misread note tables and figures.",
+                    "Treat any OCR note-reference items as review prompts until confirmed against the signed financial statements.",
+                )
+            )
+            findings.extend(misref_findings)
+            return findings
         findings.append(
             Finding(
                 "Extraction quality",
@@ -1738,6 +1838,7 @@ def _check_depreciation_note(findings: list[Finding], ref: str, section: str, to
 
 
 def _find_statement_page(document: PdfDocument, statement_name: str) -> PdfPage | None:
+    return _classified_primary_statement_pages(document).get(statement_name)
     target = statement_name.lower()
     for page in document.pages:
         for line in page.text.splitlines():
@@ -1747,6 +1848,50 @@ def _find_statement_page(document: PdfDocument, statement_name: str) -> PdfPage 
             if lower.startswith(target):
                 return page
     return None
+
+
+def _classified_primary_statement_pages(document: PdfDocument) -> dict[str, PdfPage]:
+    aliases = {
+        "Statement of income and expenditure": (
+            "statement of income and expenditure",
+            "statement of profit or loss",
+            "statement of comprehensive income",
+            "profit or loss",
+        ),
+        "Statement of financial position": ("statement of financial position", "balance sheet"),
+        "Statement of changes in accumulated fund": (
+            "statement of changes in accumulated fund",
+            "statement of changes in equity",
+            "changes in equity",
+        ),
+        "Statement of cash flows": ("statement of cash flows", "cash flow statement"),
+    }
+    classified: dict[str, PdfPage] = {}
+    for page in document.pages:
+        page_head = "\n".join(page.text.splitlines()[:18])
+        for canonical, candidates in aliases.items():
+            if canonical in classified:
+                continue
+            if any(_fuzzy_contains(page_head, candidate) for candidate in candidates):
+                classified[canonical] = page
+    return classified
+
+
+def _fuzzy_contains(text: str, phrase: str, threshold: float = 0.78) -> bool:
+    normalized_text = _normalise_match_words(text)
+    normalized_phrase = _normalise_match_words(phrase)
+    if not normalized_text or not normalized_phrase:
+        return False
+    if normalized_phrase in normalized_text:
+        return True
+    words = normalized_text.split()
+    target_words = normalized_phrase.split()
+    width = max(2, len(target_words))
+    for index in range(0, max(1, len(words) - width + 1)):
+        window = " ".join(words[index : index + width + 1])
+        if SequenceMatcher(None, normalized_phrase, window).ratio() >= threshold:
+            return True
+    return False
 
 
 def _check_income_statement_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Finding], list[str], list[str]]:
@@ -1820,6 +1965,39 @@ def _check_sfp_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Finding], l
     performed: list[str] = []
     skipped: list[str] = []
     findings: list[Finding] = []
+    if _has_rows(rows, ("non-current assets", "current assets", "total assets")):
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of financial position",
+            "Total assets equals non-current assets plus current assets.",
+            [a + b for a, b in zip(_row_amounts(rows, "non-current assets"), _row_amounts(rows, "current assets"))],
+            _row_amounts(rows, "total assets"),
+            tolerance,
+        )
+        performed.append("Statement of financial position: total assets checked from line-extracted rows.")
+    if _has_rows(rows, ("equity", "liabilities", "total equity and liabilities")):
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of financial position",
+            "Equity plus liabilities equals total equity and liabilities.",
+            [a + b for a, b in zip(_row_amounts(rows, "equity"), _row_amounts(rows, "liabilities"))],
+            _row_amounts(rows, "total equity and liabilities"),
+            tolerance,
+        )
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of financial position",
+            "Total assets equals total equity and liabilities.",
+            _row_amounts(rows, "total assets"),
+            _row_amounts(rows, "total equity and liabilities"),
+            tolerance,
+        )
+        performed.append("Statement of financial position: equity and liabilities equation checked from line-extracted rows.")
+    if performed:
+        return findings, performed, skipped
     non_current = ("investment property", "property plant and equipment", "intangible assets")
     current = ("inventories", "trade and other receivables", "cash and cash equivalents")
     funds = ("accumulated fund", "donation fund", "library development fund")
@@ -2277,11 +2455,14 @@ def _check_ocr_statement_of_financial_position(document: PdfDocument, tolerance:
             )
         ]
     for page in document.pages:
-        if "statement of financial position" not in page.text.lower() and not _page_has_sfp_rows(page):
+        if not _fuzzy_contains(page.text[:1000], "statement of financial position") and not _page_has_sfp_rows(page):
             continue
+        line_row_map = _sfp_line_row_amounts(page.text)
+        required = ("non-current assets", "current assets", "total assets", "equity", "liabilities", "total equity and liabilities")
+        if all(key in line_row_map for key in required):
+            return _check_sfp_equations(page.number, 0, line_row_map, tolerance)
         for table_index, table in enumerate(page.tables, start=1):
             row_map = _sfp_row_amounts(table)
-            required = ("non-current assets", "current assets", "total assets", "equity", "liabilities", "total equity and liabilities")
             if not all(key in row_map for key in required):
                 continue
             return _check_sfp_equations(page.number, table_index, row_map, tolerance)
@@ -2324,6 +2505,33 @@ def _sfp_row_amounts(table: list[list[str]]) -> dict[str, Decimal]:
         elif label.strip() in {"liabilities", "total liabilities"}:
             mapped["liabilities"] = amount
         elif "total equity and liabilities" in label or "total liabilities and equity" in label:
+            mapped["total equity and liabilities"] = amount
+    return mapped
+
+
+def _sfp_line_row_amounts(text: str) -> dict[str, Decimal]:
+    rows = _statement_rows(text)
+    mapped: dict[str, Decimal] = {}
+    for label, amounts in rows.items():
+        if not amounts:
+            continue
+        amount = amounts[0]
+        clean = label.replace("-", " ")
+        if "non current assets" in clean and "total" in clean:
+            mapped["non-current assets"] = amount
+        elif clean.strip() == "non current assets":
+            mapped["non-current assets"] = amount
+        elif "current assets" in clean and "non" not in clean and "total" in clean:
+            mapped["current assets"] = amount
+        elif clean.strip() == "current assets":
+            mapped["current assets"] = amount
+        elif clean.strip() == "total assets" or ("total assets" in clean and "liabilities" not in clean):
+            mapped["total assets"] = amount
+        elif clean.strip() in {"equity", "total equity", "shareholders equity", "members fund", "members fund"}:
+            mapped["equity"] = amount
+        elif clean.strip() in {"liabilities", "total liabilities"}:
+            mapped["liabilities"] = amount
+        elif "total equity and liabilities" in clean or "total liabilities and equity" in clean:
             mapped["total equity and liabilities"] = amount
     return mapped
 
@@ -2571,7 +2779,13 @@ def _note_headings(text: str) -> dict[str, str]:
 
 def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
     headings: dict[str, tuple[str, int]] = {}
+    strict_notes_start = any(_notes_heading_in_text(page.text) for page in document.pages)
+    in_notes = not strict_notes_start
     for page in document.pages:
+        if strict_notes_start and _notes_heading_in_text(page.text):
+            in_notes = True
+        if strict_notes_start and not in_notes:
+            continue
         lines = page.text.splitlines()
         for index, raw_line in enumerate(lines):
             line = raw_line.strip()
@@ -2638,10 +2852,11 @@ def _format_note_heading_debug(document: PdfDocument) -> str:
     headings = _note_headings_by_page(document)
     if not headings:
         return "No note headings detected."
+    page_ranges = _note_section_page_ranges(document)
     parts = []
     for ref in sorted(headings, key=_note_sort_key):
         title, page_number = headings[ref]
-        parts.append(f"Note {ref} | Page {page_number} | {title}")
+        parts.append(f"Note {ref} | Page {page_number} | {page_ranges.get(ref, f'Page {page_number}')} | {title}")
     return "\n".join(parts)
 
 
@@ -3189,8 +3404,14 @@ def _note_sections(text: str) -> dict[str, str]:
     current_refs: list[str] = []
     pending_number: str | None = None
     lines = text.splitlines()
+    strict_notes_start = any(_notes_heading_in_text(line) for line in lines)
+    in_notes = not strict_notes_start
     for index, line in enumerate(lines):
         stripped = line.strip()
+        if strict_notes_start and _notes_heading_in_text(stripped):
+            in_notes = True
+        if strict_notes_start and not in_notes:
+            continue
         match = NOTE_HEADING_RE.match(stripped)
         if match and _valid_note_heading(match.group(1), match.group(2)):
             current_refs = [match.group(1).upper()]

@@ -70,7 +70,11 @@ def _finding_confidence(finding, result) -> str:
         return f"Review prompt / {finding.metadata['match_confidence']}"
     if finding.category == "Extraction quality":
         if finding.location in {"PDF extraction", "Table extraction", "Notes agreement"}:
-            return f"Text {result.metrics.get('extraction_confidence', '0%')} / Table {result.metrics.get('table_confidence', '0%')}"
+            return (
+                f"OCR text {result.metrics.get('ocr_text_coverage', result.metrics.get('extraction_coverage', '0%'))} / "
+                f"Statement {result.metrics.get('statement_structure_confidence', '0%')} / "
+                f"Table arithmetic {result.metrics.get('table_arithmetic_confidence', '0%')}"
+            )
         return finding.severity
     if finding.severity == "High":
         return "High"
@@ -104,11 +108,21 @@ def _note_heading_rows(result) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for line in _metric_lines(result.metrics.get("note_headings"), "No note headings detected."):
         parts = [part.strip() for part in line.split("|")]
-        if len(parts) >= 3:
+        if len(parts) >= 4:
             rows.append(
                 {
                     "Note": parts[0].replace("Note ", "", 1).strip(),
                     "Page": parts[1].replace("Page ", "", 1).strip(),
+                    "Page range": parts[2].strip(),
+                    "Heading": " | ".join(parts[3:]).strip(),
+                }
+            )
+        elif len(parts) >= 3:
+            rows.append(
+                {
+                    "Note": parts[0].replace("Note ", "", 1).strip(),
+                    "Page": parts[1].replace("Page ", "", 1).strip(),
+                    "Page range": parts[1].strip(),
                     "Heading": " | ".join(parts[2:]).strip(),
                 }
             )
@@ -132,8 +146,11 @@ def _build_excel_export(result) -> bytes:
         {"Metric": "High findings", "Value": result.metrics.get("high", 0)},
         {"Metric": "Medium findings", "Value": result.metrics.get("medium", 0)},
         {"Metric": "Low findings", "Value": result.metrics.get("low", 0)},
-        {"Metric": "Extraction confidence", "Value": result.metrics.get("extraction_confidence", "0%")},
-        {"Metric": "Table confidence", "Value": result.metrics.get("table_confidence", "0%")},
+        {"Metric": "OCR text coverage", "Value": result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%"))},
+        {"Metric": "OCR table candidates", "Value": result.metrics.get("ocr_tables", 0)},
+        {"Metric": "Statement structure confidence", "Value": result.metrics.get("statement_structure_confidence", "0%")},
+        {"Metric": "Note structure confidence", "Value": result.metrics.get("note_structure_confidence", "0%")},
+        {"Metric": "Table arithmetic confidence", "Value": result.metrics.get("table_arithmetic_confidence", "0%")},
         {"Metric": "cautious_note_validation_enabled", "Value": result.metrics.get("cautious_note_validation_enabled", False)},
         {"Metric": "note_validation_mode", "Value": result.metrics.get("note_validation_mode", "skipped")},
         {"Metric": "note_reference_rows_detected", "Value": result.metrics.get("note_reference_rows_detected", 0)},
@@ -343,8 +360,10 @@ def _build_word_memo_export(result) -> bytes:
                     ["High findings", result.metrics.get("high", 0)],
                     ["Medium findings", result.metrics.get("medium", 0)],
                     ["Low findings", result.metrics.get("low", 0)],
-                    ["Extraction confidence", result.metrics.get("extraction_confidence", "0%")],
-                    ["Table confidence", result.metrics.get("table_confidence", "0%")],
+                    ["OCR text coverage", result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%"))],
+                    ["Statement structure confidence", result.metrics.get("statement_structure_confidence", "0%")],
+                    ["Note structure confidence", result.metrics.get("note_structure_confidence", "0%")],
+                    ["Table arithmetic confidence", result.metrics.get("table_arithmetic_confidence", "0%")],
                 ]
             ),
             _docx_paragraph("Checks Performed", "Heading1"),
@@ -933,16 +952,17 @@ review_cols[0].metric("Checks performed", result.metrics.get("checks_performed_c
 review_cols[1].metric("Checks passed", result.metrics.get("checks_passed_count", 0))
 review_cols[2].metric("Checks skipped", result.metrics.get("checks_skipped_count", 0))
 review_cols[3].metric("Findings", result.metrics["findings"])
-review_cols[4].metric("Extraction confidence", result.metrics.get("extraction_confidence", "0%"))
+review_cols[4].metric("OCR text coverage", result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%")))
 
-risk_cols = st.columns(7)
+risk_cols = st.columns(8)
 risk_cols[0].metric("High", result.metrics["high"])
 risk_cols[1].metric("Medium", result.metrics["medium"])
 risk_cols[2].metric("Low", result.metrics["low"])
 risk_cols[3].metric("Pages", result.metrics["pages"])
-risk_cols[4].metric("Table confidence", result.metrics.get("table_confidence", "0%"))
-risk_cols[5].metric("OCR pages", result.metrics.get("ocr_pages", 0))
-risk_cols[6].metric("Tables", result.metrics["tables"])
+risk_cols[4].metric("OCR table candidates", result.metrics.get("ocr_tables", 0))
+risk_cols[5].metric("Statement structure", result.metrics.get("statement_structure_confidence", "0%"))
+risk_cols[6].metric("Note structure", result.metrics.get("note_structure_confidence", "0%"))
+risk_cols[7].metric("Table arithmetic", result.metrics.get("table_arithmetic_confidence", "0%"))
 
 detected_profile = result.metrics.get("detected_profile", {})
 if isinstance(detected_profile, dict):
@@ -993,6 +1013,11 @@ with st.expander("Note validation debug", expanded=False):
             "note_reference_rows_detected": result.metrics.get("note_reference_rows_detected", 0),
             "note_headings_detected": result.metrics.get("note_headings_detected", 0),
             "note_reference_findings": result.metrics.get("note_reference_findings", 0),
+            "ocr_text_coverage": result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%")),
+            "statement_structure_confidence": result.metrics.get("statement_structure_confidence", "0%"),
+            "note_structure_confidence": result.metrics.get("note_structure_confidence", "0%"),
+            "table_arithmetic_confidence": result.metrics.get("table_arithmetic_confidence", "0%"),
+            "primary_statement_pages": result.metrics.get("primary_statement_pages", "No primary statement pages detected."),
         }
     )
 
