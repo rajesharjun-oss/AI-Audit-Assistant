@@ -336,7 +336,9 @@ def _build_result(
         "medium": sum(1 for item in findings if item.severity == "Medium"),
         "low": sum(1 for item in findings if item.severity == "Low"),
         "note_headings": _format_note_heading_debug(document),
+        "notes_section_start_page": _notes_start_page(document) or "Not detected",
         "primary_statement_pages": _format_primary_statement_debug(document),
+        "ocr_statement_rows": _format_ocr_statement_rows_debug(document),
         "note_agreement_results": _note_agreement_result_rows(document),
         "detected_profile": infer_detected_profile(document),
         "checks_performed": "\n".join(checks_performed_list) or "No deterministic checks completed.",
@@ -367,6 +369,7 @@ def _note_validation_debug(
         "note_validation_mode": mode,
         "note_reference_rows_detected": len(_statement_note_lines(document)) if document.pages else 0,
         "note_headings_detected": len(_note_headings_by_page(document)) if document.pages else 0,
+        "notes_section_start_page": _notes_start_page(document) or "Not detected",
         "note_reference_findings": note_reference_findings,
     }
 
@@ -429,6 +432,18 @@ def _format_primary_statement_debug(document: PdfDocument) -> str:
     return "\n".join(f"{name} | Page {page.number}" for name, page in classified.items())
 
 
+def _format_ocr_statement_rows_debug(document: PdfDocument) -> str:
+    classified = _classified_primary_statement_pages(document)
+    if not classified:
+        return "No OCR primary statement rows detected."
+    rows: list[str] = []
+    for statement_name, page in classified.items():
+        for label, amounts in _statement_rows(page.text).items():
+            amount_text = " | ".join(f"{amount:,}" for amount in amounts)
+            rows.append(f"{statement_name} | Page {page.number} | {label} | {amount_text}")
+    return "\n".join(rows) if rows else "No OCR primary statement rows detected."
+
+
 def _note_section_page_ranges(document: PdfDocument) -> dict[str, str]:
     headings = _note_headings_by_page(document)
     ordered = sorted(headings.items(), key=lambda item: (_note_sort_key(item[0]), item[1][1]))
@@ -448,7 +463,10 @@ def _notes_start_page(document: PdfDocument) -> int | None:
 
 
 def _notes_heading_in_text(text: str) -> bool:
-    return bool(re.search(r"\bnotes\s+to\s+the\s+financial\s+statements\b", text, flags=re.I))
+    if re.search(r"\bnotes\s+to\s+the\s+financial\s+statements?\b", text, flags=re.I):
+        return True
+    head = "\n".join(text.splitlines()[:10])
+    return _fuzzy_contains(head, "notes to the financial statements", threshold=0.84)
 
 
 def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
@@ -754,12 +772,15 @@ def check_extraction_quality(document: PdfDocument) -> list[Finding]:
 def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
     text = document.text
     lower = text.lower()
+    entity_type = _detect_entity_type(text)
+    if entity_type == "Private company" and re.search(r"\binvestment propert(?:y|ies)|property investment|real estate\b", lower):
+        entity_type = "Private company / property investment company"
     profile = {
         "Company name": _detect_company_name(document),
         "Year end": _detect_year_end(text),
         "Currency": _detect_currency(text),
         "Framework": _detect_framework(text),
-        "Entity type": _detect_entity_type(text),
+        "Entity type": entity_type,
         "Principal activities": _detect_principal_activities(text),
         "Detected balances": _detect_major_balances(lower),
         "Suggested checklist areas": _suggest_checklist_areas(lower),
@@ -841,12 +862,12 @@ def _detect_framework(text: str) -> str:
 
 def _detect_entity_type(text: str) -> str:
     lower = text.lower()
+    if re.search(r"\b(plc|public limited)\b", lower):
+        return "Public company"
+    if re.search(r"\b(limited|ltd)\b", lower) or any(term in lower for term in ("directors' report", "directors report", "share capital", "ordinary shares")):
+        return "Private company"
     if any(term in lower for term in ("non-profit", "not-for-profit", "professional body", "institute", "members fund", "accumulated fund")):
         return "Non-profit / professional body"
-    if "plc" in lower or "public limited" in lower:
-        return "Public company"
-    if "limited" in lower or "ltd" in lower:
-        return "Private company"
     return "Not detected"
 
 
@@ -914,6 +935,7 @@ def check_standard_checklist(document: PdfDocument, profile: CompanyProfile) -> 
     if profile.presentation_standard.upper() != "IFRS":
         return []
     text = document.text.lower()
+    policy_map = _accounting_policy_map(document)
     requested_areas = {area.strip().lower() for area in profile.checklist_areas if area.strip()}
     expected = {item.strip().lower() for item in profile.expected_policies if item.strip()}
     significant = {item.strip().lower() for item in profile.significant_transactions if item.strip()}
@@ -924,7 +946,7 @@ def check_standard_checklist(document: PdfDocument, profile: CompanyProfile) -> 
         active = _checklist_item_applies(item, text, context, requested_areas)
         if not active:
             continue
-        if _checklist_item_satisfied_by_context(item, text):
+        if _checklist_item_satisfied_by_context(item, text, policy_map):
             continue
         hits = [keyword for keyword in item.evidence_keywords if keyword in text]
         required_hits = len(item.evidence_keywords) if not item.applies_when else min(2, len(item.evidence_keywords))
@@ -1194,6 +1216,18 @@ def check_notes_agreement(
     headings = {ref: title for ref, (title, _page_number) in headings_with_pages.items()}
     statement_refs = _statement_note_references(document)
     if document.ocr_used:
+        if not _notes_start_page(document):
+            findings.append(
+                Finding(
+                    "Extraction quality",
+                    "Low",
+                    "Notes agreement",
+                    "OCR note-reference validation skipped because the notes section start was not detected.",
+                    "No reliable 'Notes to the financial statements' boundary was detected, so numbered directors' report sections may not be financial statement notes.",
+                    "Confirm the OCR text around the notes heading or use a cleaner scan before relying on automated note-reference prompts.",
+                )
+            )
+            return findings
         if cautious_low_confidence and headings and _statement_note_lines(document):
             note_sections = _note_sections(text)
             misref_findings, _misreferenced_lines = _check_possible_wrong_note_references(
@@ -1344,7 +1378,7 @@ def check_notes_agreement(
 
 def check_policy_relevance(document: PdfDocument, profile: CompanyProfile) -> list[Finding]:
     text = document.text.lower()
-    policy_text = _accounting_policy_text(document).lower()
+    policy_map = _accounting_policy_map(document)
     detected_profile = infer_detected_profile(document)
     entity_type = detected_profile.get("Entity type", "").lower()
     findings: list[Finding] = []
@@ -1352,7 +1386,7 @@ def check_policy_relevance(document: PdfDocument, profile: CompanyProfile) -> li
     significant = {item.strip().lower() for item in profile.significant_transactions if item.strip()}
 
     for policy_name, rule in POLICY_RULES.items():
-        policy_present = any(keyword in policy_text for keyword in rule["policy"])
+        policy_present = policy_map.get(policy_name, False)
         evidence_present = _policy_evidence_present(policy_name, rule["evidence"], text)
         explicitly_expected = policy_name in expected or policy_name in significant
         if policy_name == "consolidation" and not evidence_present and not explicitly_expected:
@@ -1525,7 +1559,10 @@ def _checklist_item_applies(
     return any(trigger in trigger_text for trigger in item.applies_when) or item.area in context
 
 
-def _checklist_item_satisfied_by_context(item: ChecklistItem, text: str) -> bool:
+def _checklist_item_satisfied_by_context(item: ChecklistItem, text: str, policy_map: dict[str, bool] | None = None) -> bool:
+    policy_map = policy_map or {}
+    if item.standard == "IFRS 15" and policy_map.get("revenue"):
+        return True
     if item.standard == "IAS 10":
         return bool(
             re.search(
@@ -1868,7 +1905,7 @@ def _classified_primary_statement_pages(document: PdfDocument) -> dict[str, PdfP
     }
     classified: dict[str, PdfPage] = {}
     for page in document.pages:
-        page_head = "\n".join(page.text.splitlines()[:18])
+        page_head = "\n".join(page.text.splitlines()[:60 if document.ocr_used else 18])
         for canonical, candidates in aliases.items():
             if canonical in classified:
                 continue
@@ -2228,7 +2265,7 @@ def _canonical_statement_label(label: str) -> str:
     if normalized in {_normalise_match_words(item) for item in protected_labels}:
         return label
     patterns: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("total equity and liabilities", ("total equity and liabilities", "total liabilities and equity", "total equity liabilities", "equity and liabilities")),
+        ("total equity and liabilities", ("total equity and liabilities", "total equity and liability", "total liabilities and equity", "total liability and equity", "total equity liabilities", "equity and liabilities")),
         ("total assets", ("total assets",)),
         ("non-current assets", ("non current assets", "noncurrent assets", "total non current assets", "non current asset")),
         ("revenue", ("revenue", "turnover", "sales")),
@@ -2236,7 +2273,7 @@ def _canonical_statement_label(label: str) -> str:
         ("taxation", ("taxation", "income tax", "tax expense", "tax credit", "income tax expense")),
         ("profit after tax", ("profit after tax", "profit for year", "profit for the year", "loss after tax", "loss for year", "loss for the year")),
         ("current assets", ("current assets", "total current assets")),
-        ("equity", ("equity", "total equity", "shareholders equity", "shareholder funds", "net assets", "capital and reserves")),
+        ("equity", ("equity", "total equity", "shareholders equity", "shareholder funds", "net assets", "capital and reserves", "share capital and reserves")),
         ("liabilities", ("liabilities", "total liabilities")),
         ("cash at beginning", ("cash at beginning", "cash and cash equivalents at beginning", "cash and cash equivalents at beginning of year", "cash cash equivalents beginning", "cash equivalents beginning year")),
         ("cash at end", ("cash at end", "cash and cash equivalents at end", "cash and cash equivalents at end of year", "cash cash equivalents end", "cash equivalents end year")),
@@ -2387,6 +2424,18 @@ def _accounting_policy_text(document: PdfDocument) -> str:
     if end_match:
         return tail[: 1200 + end_match.start()]
     return tail[:18000]
+
+
+def _accounting_policy_map(document: PdfDocument) -> dict[str, bool]:
+    policy_text = _accounting_policy_text(document).lower()
+    full_text = document.text.lower()
+    search_text = f"{policy_text}\n{full_text if 'revenue from contracts with customers' in full_text else ''}"
+    detected: dict[str, bool] = {}
+    for policy_name, rule in POLICY_RULES.items():
+        detected[policy_name] = any(keyword in search_text for keyword in rule["policy"])
+    if re.search(r"revenue\s+from\s+contracts\s+with\s+customers", search_text, flags=re.I):
+        detected["revenue"] = True
+    return detected
 
 
 def _check_superseded_standards(findings: list[Finding], document: PdfDocument) -> None:
@@ -2883,7 +2932,10 @@ def _note_headings(text: str) -> dict[str, str]:
 
 def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
     headings: dict[str, tuple[str, int]] = {}
-    strict_notes_start = any(_notes_heading_in_text(page.text) for page in document.pages)
+    notes_start_page = _notes_start_page(document)
+    strict_notes_start = notes_start_page is not None
+    if document.ocr_used and not strict_notes_start:
+        return headings
     in_notes = not strict_notes_start
     for page in document.pages:
         if strict_notes_start and _notes_heading_in_text(page.text):
@@ -2906,7 +2958,8 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
                 if _valid_note_heading(number, title):
                     headings[number.upper()] = (_clean_note_title(title), page.number)
             _add_combined_note_heading_candidates(headings, lines, index, line, page.number)
-    _augment_note_headings_from_statement_refs(headings, document)
+    if strict_notes_start:
+        _augment_note_headings_from_statement_refs(headings, document)
     return headings
 
 
@@ -3121,6 +3174,8 @@ def _check_possible_wrong_note_references(
         best_heading_score = 0.0
         for candidate_ref in headings:
             if candidate_ref == item.ref or _is_disclosure_only_note(headings.get(candidate_ref, "")):
+                continue
+            if not _alternative_note_semantically_allowed(item.line_item, headings.get(candidate_ref, "")):
                 continue
             section = note_sections.get(candidate_ref, "")
             match = _note_match_strength(item, headings.get(candidate_ref, ""), section, tolerance, all_sections=note_sections)
@@ -3341,6 +3396,8 @@ def _alternative_note_for_missing_amounts(
     for ref, section in note_sections.items():
         if ref == item.ref or _is_disclosure_only_note(headings.get(ref, "")):
             continue
+        if not _alternative_note_semantically_allowed(item.line_item, headings.get(ref, "")):
+            continue
         wording = _wording_match_score(item.line_item, headings.get(ref, ""))
         if wording < 0.82:
             continue
@@ -3350,6 +3407,14 @@ def _alternative_note_for_missing_amounts(
             best_count = count
             best_wording = wording
     return best_ref if best_count else ""
+
+
+def _alternative_note_semantically_allowed(line_item: str, note_heading: str) -> bool:
+    item = _normalise_match_words(line_item)
+    heading = _normalise_match_words(note_heading)
+    if any(term in item for term in ("cash", "bank", "cash equivalents")):
+        return any(term in heading for term in ("cash", "bank", "cash equivalents"))
+    return True
 
 
 def _amount_match_confidence(current_found: bool, prior_found: bool, alternative_ref: str, cautious_review_prompt: bool) -> str:

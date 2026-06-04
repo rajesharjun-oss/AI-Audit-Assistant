@@ -136,6 +136,22 @@ def _note_agreement_result_rows(result) -> list[dict[str, str]]:
     return []
 
 
+def _ocr_statement_row_rows(result) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for line in _metric_lines(result.metrics.get("ocr_statement_rows"), "No OCR primary statement rows detected."):
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) >= 4:
+            rows.append(
+                {
+                    "Statement": parts[0],
+                    "Page": parts[1].replace("Page ", "", 1).strip(),
+                    "Line item": parts[2],
+                    "Amounts": " | ".join(parts[3:]),
+                }
+            )
+    return rows or [{"Statement": "", "Page": "", "Line item": "No OCR primary statement rows detected.", "Amounts": ""}]
+
+
 def _build_excel_export(result) -> bytes:
     output = BytesIO()
     summary_rows = [
@@ -151,6 +167,7 @@ def _build_excel_export(result) -> bytes:
         {"Metric": "Statement structure confidence", "Value": result.metrics.get("statement_structure_confidence", "0%")},
         {"Metric": "Note structure confidence", "Value": result.metrics.get("note_structure_confidence", "0%")},
         {"Metric": "Table arithmetic confidence", "Value": result.metrics.get("table_arithmetic_confidence", "0%")},
+        {"Metric": "notes_section_start_page", "Value": result.metrics.get("notes_section_start_page", "Not detected")},
         {"Metric": "cautious_note_validation_enabled", "Value": result.metrics.get("cautious_note_validation_enabled", False)},
         {"Metric": "note_validation_mode", "Value": result.metrics.get("note_validation_mode", "skipped")},
         {"Metric": "note_reference_rows_detected", "Value": result.metrics.get("note_reference_rows_detected", 0)},
@@ -216,6 +233,7 @@ def _build_excel_export(result) -> bytes:
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
         pd.DataFrame(_note_heading_rows(result)).to_excel(writer, sheet_name="Notes detected", index=False)
+        pd.DataFrame(_ocr_statement_row_rows(result)).to_excel(writer, sheet_name="OCR statement rows", index=False)
         pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
@@ -228,6 +246,7 @@ def _build_excel_export(result) -> bytes:
                 worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 70)
         _format_exception_register_sheet(writer.book["Exception register"])
         _format_excel_table_sheet(writer.book["Note agreement results"], "NoteAgreementResults")
+        _format_excel_table_sheet(writer.book["OCR statement rows"], "OCRStatementRows")
     return output.getvalue()
 
 
@@ -1005,6 +1024,10 @@ with st.expander("Notes detected (debug)", expanded=False):
     else:
         st.write("No note headings detected.")
 
+with st.expander("OCR statement rows (debug)", expanded=False):
+    ocr_rows = _ocr_statement_row_rows(result)
+    st.dataframe(pd.DataFrame(ocr_rows), use_container_width=True, hide_index=True)
+
 with st.expander("Note validation debug", expanded=False):
     st.json(
         {
@@ -1012,6 +1035,7 @@ with st.expander("Note validation debug", expanded=False):
             "note_validation_mode": result.metrics.get("note_validation_mode", "skipped"),
             "note_reference_rows_detected": result.metrics.get("note_reference_rows_detected", 0),
             "note_headings_detected": result.metrics.get("note_headings_detected", 0),
+            "notes_section_start_page": result.metrics.get("notes_section_start_page", "Not detected"),
             "note_reference_findings": result.metrics.get("note_reference_findings", 0),
             "ocr_text_coverage": result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%")),
             "statement_structure_confidence": result.metrics.get("statement_structure_confidence", "0%"),

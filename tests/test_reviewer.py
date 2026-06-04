@@ -711,6 +711,32 @@ def test_cautious_face_to_note_amount_agreement_does_not_suggest_amount_only_alt
     assert not any("Operating Revenue amount appears in Note 8" in finding.issue for finding in result.findings)
 
 
+def test_cash_note_reference_does_not_suggest_non_cash_alternative(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nCash At End Of The Year Note 7 100 90", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n3 Investment property\nCash At End Of The Year 100 90\n7 Directors' interests in shares\nNarrative only\n"
+                + ("Additional OCR note text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert not any(
+        finding.metadata
+        and finding.metadata.get("line_item") == "Cash At End Of The Year"
+        and finding.metadata.get("suggested_note") == "3"
+        for finding in result.findings
+    )
+
+
 def test_cautious_face_to_note_amount_agreement_skips_non_face_linked_lines(monkeypatch):
     document = PdfDocument(
         [
@@ -930,6 +956,38 @@ def test_note_heading_detection_starts_after_notes_heading_when_present():
     assert "Directors interests" not in headings["7"][0]
 
 
+def test_ocr_note_heading_detection_ignores_directors_report_before_notes_section():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Directors' report\n7 Directors' interests in shares\nEmployment and employees\n", []),
+            PdfPage(2, "Notes to the financial statements\n1 Accounting policies\n2 Investment property\n7 Trade and other payables\n", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["7"] == ("Trade and other payables", 2)
+    assert all("directors" not in title.lower() for title, _page in headings.values())
+
+
+def test_ocr_note_validation_skips_when_notes_section_start_is_not_detected():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nCash Note 7 100 90", []),
+            PdfPage(2, "Directors' report\n7 Directors' interests in shares", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+
+    findings = check_notes_agreement(document, cautious_low_confidence=True)
+
+    assert any("notes section start was not detected" in finding.issue.lower() for finding in findings)
+    assert not any("possible wrong note reference" in finding.issue.lower() for finding in findings)
+
+
 def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monkeypatch):
     document = PdfDocument(
         [
@@ -1027,6 +1085,31 @@ def test_detected_profile_infers_upload_only_context():
     assert profile["Principal activities"] == "Professional membership body for personnel management, including member services, professional development, training, and certification."
 
 
+def test_detected_profile_classifies_limited_property_company_before_professional_body_terms():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Funtierra Limited",
+                        "Directors' report",
+                        "The company has share capital and directors.",
+                        "The principal activity is property investment.",
+                        "Investment property 1,000 900",
+                        "Professional advisers are listed below.",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    profile = infer_detected_profile(document)
+
+    assert profile["Entity type"] == "Private company / property investment company"
+
+
 def test_text_confidence_separates_table_confidence():
     noisy_table = [["Description", "2025", "2024"], ["Revenue", "100 90", ""], ["Total", "100", "90"]]
     document = PdfDocument(
@@ -1078,6 +1161,22 @@ def test_consolidation_policy_is_not_triggered_by_generic_group_wording():
     findings = check_policy_relevance(document, CompanyProfile())
 
     assert not any("consolidation-related" in finding.issue.lower() for finding in findings)
+
+
+def test_revenue_policy_recognises_revenue_from_contracts_with_customers():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of profit or loss\nRevenue 1,000 900\nNotes to the financial statements\nAccounting policies\nRevenue from contracts with customers is recognised when control transfers.",
+                [],
+            )
+        ]
+    )
+
+    findings = check_policy_relevance(document, CompanyProfile())
+
+    assert not any("revenue-related balances" in finding.issue.lower() for finding in findings)
 
 
 def test_ocr_sfp_statement_specific_checks_run_only_on_confident_rows():
@@ -1169,6 +1268,39 @@ def test_fuzzy_ocr_statement_page_detection_classifies_distorted_headings(monkey
     assert "Statement of financial position | Page 1" in result.metrics["primary_statement_pages"]
     assert "Statement of income and expenditure | Page 2" in result.metrics["primary_statement_pages"]
     assert result.metrics["statement_structure_confidence"] != "0%"
+
+
+def test_review_report_includes_ocr_statement_rows_debug(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Non current assets 600 500",
+                        "Current assets 400 300",
+                        "Total assets 1,000 800",
+                        "Equity 700 550",
+                        "Liabilities 300 250",
+                        "Total equity and liability 1,000 800",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert "non-current assets" in result.metrics["ocr_statement_rows"]
+    assert "total equity and liabilities" in result.metrics["ocr_statement_rows"]
+    assert "Statement of financial position: equity and liabilities equation checked" in result.metrics["checks_performed"]
 
 
 def test_ocr_sfp_statement_specific_checks_skip_low_confidence_rows():
