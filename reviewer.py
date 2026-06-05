@@ -987,9 +987,9 @@ def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
 def _detect_company_name(document: PdfDocument) -> str:
     first_pages = "\n".join(page.text for page in document.pages[:5])
     legal_name_patterns = (
-        r"Chartered\s+Institute\s+of\s+Personnel\s+Management\s+of\s+Nigeria",
         r"[A-Z][A-Za-z&,.()' -]{8,120}\s+(?:Limited|Ltd|PLC|Plc|Incorporated|Inc\.?|Corporation|Company)\b",
-        r"[A-Z][A-Za-z&,.()' -]{8,120}\s+of\s+Nigeria\b",
+        r"[A-Z][A-Za-z&,.()' -]{8,120}\s+(?:Institute|Council|Association|Society|Body)\s+of\s+[A-Z][A-Za-z&,.()' -]{3,80}\b",
+        r"[A-Z][A-Za-z&,.()' -]{8,120}\s+of\s+[A-Z][A-Za-z&,.()' -]{3,80}\b",
     )
     for pattern in legal_name_patterns:
         match = re.search(pattern, first_pages, flags=re.I)
@@ -1059,9 +1059,35 @@ def _detect_entity_type(text: str) -> str:
     lower = text.lower()
     if re.search(r"\b(plc|public limited)\b", lower):
         return "Public company"
-    if re.search(r"\b(limited|ltd)\b", lower) or any(term in lower for term in ("directors' report", "directors report", "share capital", "ordinary shares")):
+    if re.search(r"\b(limited|ltd)\b", lower) or any(
+        term in lower
+        for term in (
+            "directors' report",
+            "directors report",
+            "share capital",
+            "ordinary shares",
+            "shareholders",
+            "dividends",
+        )
+    ):
         return "Private company"
-    if any(term in lower for term in ("non-profit", "not-for-profit", "professional body", "institute", "members fund", "accumulated fund")):
+    if any(
+        term in lower
+        for term in (
+            "non-profit",
+            "not-for-profit",
+            "professional body",
+            "institute",
+            "council",
+            "fellows",
+            "associates",
+            "membership",
+            "members fund",
+            "members' fund",
+            "accumulated fund",
+            "subscriptions",
+        )
+    ):
         return "Non-profit / professional body"
     return "Not detected"
 
@@ -1070,9 +1096,9 @@ def _detect_principal_activities(text: str) -> str:
     match = re.search(r"principal activit(?:y|ies).{0,700}", text, flags=re.I | re.S)
     if match:
         snippet = re.sub(r"\s+", " ", match.group(0)).strip()
-        snippet = re.split(r"\b(?:results|financial statements|council|statement of|notes to|property, plant)\b", snippet, maxsplit=1, flags=re.I)[0]
-        if re.search(r"\bprofessional body|membership|personnel management|human resource|institute|training|certification\b", snippet, flags=re.I):
-            return "Professional membership body for personnel management, including member services, professional development, training, and certification."
+        snippet = re.split(r"\b(?:results|financial statements|statement of|notes to|property, plant)\b", snippet, maxsplit=1, flags=re.I)[0]
+        if re.search(r"\bprofessional body|membership|members|institute|council|fellows|associates|training|certification|professional development\b", snippet, flags=re.I):
+            return "Professional membership body, including member services, professional development, training, and certification."
         cleaned = re.sub(r"^principal activit(?:y|ies)\s*(?:of the institute|of the company|is|are|:|-)?\s*", "", snippet, flags=re.I).strip(" .:-")
         if cleaned:
             first_sentence = re.split(r"(?<=[.])\s+", cleaned, maxsplit=1)[0]

@@ -967,8 +967,8 @@ def test_note_heading_detection_rejects_report_furniture_and_entity_names():
     text = "\n".join(
         [
             "1 Significant accounting policies",
-            "1S Funtierra Limited",
-            "4 Funtierra Limited",
+            "1S Example Holdings Limited",
+            "4 Example Holdings Limited",
             "5 Directors",
             "7 Financial Statements for the year ended December 31, 2021",
             "9 _ Financial liabilities",
@@ -1213,7 +1213,7 @@ def test_detected_profile_infers_upload_only_context():
         [
             PdfPage(
                 1,
-                "CHARTERED INSTITUTE OF PERSONNEL MANAGEMENT OF NIGERIA\nFinancial Statements\nYear ended December 31, 2025\nPrepared in accordance with IFRS and presented in N'000.\nPrincipal activities are professional membership services, professional development, training and certification for personnel management practitioners. This paragraph continues with extracted report boilerplate that should not be pasted in full.\nCash and cash equivalents 100\nTrade and other receivables 50",
+                "NATIONAL INSTITUTE OF PROFESSIONAL ADMINISTRATORS OF NIGERIA\nFinancial Statements\nYear ended December 31, 2025\nPrepared in accordance with IFRS and presented in N'000.\nPrincipal activities are professional membership services, professional development, training and certification for members and associates. This paragraph continues with extracted report boilerplate that should not be pasted in full.\nSubscriptions 200\nMembers fund 300\nCash and cash equivalents 100\nTrade and other receivables 50",
                 [],
             )
         ]
@@ -1221,12 +1221,12 @@ def test_detected_profile_infers_upload_only_context():
 
     profile = infer_detected_profile(document)
 
-    assert profile["Company name"] == "Chartered Institute of Personnel Management of Nigeria"
+    assert profile["Company name"] == "National Institute of Professional Administrators of Nigeria"
     assert profile["Year end"] == "December 31, 2025"
     assert profile["Currency"] == "NGN"
     assert profile["Framework"] == "IFRS"
     assert "professional body" in profile["Entity type"].lower()
-    assert profile["Principal activities"] == "Professional membership body for personnel management, including member services, professional development, training, and certification."
+    assert profile["Principal activities"] == "Professional membership body, including member services, professional development, training, and certification."
 
 
 def test_detected_profile_classifies_limited_property_company_before_professional_body_terms():
@@ -1236,7 +1236,7 @@ def test_detected_profile_classifies_limited_property_company_before_professiona
                 1,
                 "\n".join(
                     [
-                        "Funtierra Limited",
+                        "Example Property Investments Limited",
                         "Directors' report",
                         "The company has share capital and directors.",
                         "The principal activity is property investment.",
@@ -1252,6 +1252,78 @@ def test_detected_profile_classifies_limited_property_company_before_professiona
     profile = infer_detected_profile(document)
 
     assert profile["Entity type"] == "Private company / property investment company"
+
+
+def test_generic_professional_body_pattern_detects_membership_entity_without_company_name_hardcode():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "SYNTHETIC COUNCIL OF REGISTERED PROFESSIONALS",
+                        "Statement of income and expenditure",
+                        "Subscriptions 1,200 1,100",
+                        "Members' fund 5,000 4,700",
+                        "Accumulated fund 5,000 4,700",
+                        "Principal activities are membership services, training, certification and professional development for fellows and associates.",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    profile = infer_detected_profile(document)
+
+    assert profile["Company name"] == "Synthetic Council of Registered Professionals"
+    assert profile["Entity type"] == "Non-profit / professional body"
+    assert "Professional membership body" in profile["Principal activities"]
+
+
+def test_generic_scanned_private_company_pattern_detects_company_and_runs_sfp_check(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Example Property Investments Limited",
+                        "Directors' report",
+                        "The company has ordinary shares and share capital.",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Non-current assets 600 500",
+                        "Current assets 400 300",
+                        "Total assets 1,000 800",
+                        "Equity 700 550",
+                        "Liabilities 300 250",
+                        "Total equity and liabilities 1,000 800",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    profile = infer_detected_profile(document)
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert profile["Entity type"] == "Private company / property investment company"
+    assert "Statement of financial position: total assets checked" in result.metrics["checks_performed"]
+    assert any(row["Result"] == "Passed" and "total assets" in row["Check"].lower() for row in result.metrics["check_results"])
 
 
 def test_text_confidence_separates_table_confidence():
@@ -1525,7 +1597,7 @@ def test_ocr_statement_rows_ignore_title_and_date_lines(monkeypatch):
                 1,
                 "\n".join(
                     [
-                        "Funtierra Limited financial statements for the year ended 31 December 2021 2020",
+                        "Example Property Investments Limited financial statements for the year ended 31 December 2021 2020",
                         "Statement of profit or loss and other comprehensive income",
                         "Revenue 707,189 297,041",
                         "Loss before taxation (173,516) (681,559)",
