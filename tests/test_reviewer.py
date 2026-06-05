@@ -1114,6 +1114,22 @@ def test_ocr_notes_start_page_accepts_fuzzy_notes_heading_variants():
     assert "NOTES FORMING PART" in reviewer._format_notes_heading_snippet(document)
 
 
+def test_ocr_notes_start_page_uses_strong_heading_candidate_with_note_heading_on_same_line():
+    document = PdfDocument(
+        [
+            PdfPage(2, "Independent auditor's report\nThe notes to the financial statements are part of our audit.", []),
+            PdfPage(14, "Notes to the Financial Statements 1. Significant accounting policies\n2 Revenue\nRevenue 100 90", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+
+    assert reviewer._notes_start_page(document) == 14
+    snippet = reviewer._format_notes_heading_snippet(document)
+    assert "Confidence" in snippet
+    assert "Significant accounting policies" in snippet
+
+
 def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monkeypatch):
     document = PdfDocument(
         [
@@ -1792,6 +1808,46 @@ def test_ocr_income_statement_runs_current_year_only_when_tax_row_has_one_amount
     assert "Loss/profit before taxation raw line" in tax_findings[0].evidence
     assert "Taxation raw line" in tax_findings[0].evidence
     assert "Extracted values" in tax_findings[0].evidence
+
+
+def test_ocr_income_statement_prompt_includes_corroborating_report_values(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Directors' report\nThe loss before taxation was (173,516). Tax credit was 53,127. Loss after taxation was (120,389).",
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Statement of profit or loss",
+                        "Revenue 707,189 297,041",
+                        "Loss before taxation (473,516) (681,559)",
+                        "Taxation 53,127",
+                        "Loss after taxation (120,389) (428,435)",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            ),
+            PdfPage(3, "Statement of cash flows\nLoss before taxation (173,516)\nTaxation 53,127", []),
+        ],
+        ocr_used=True,
+        ocr_pages=3,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    tax_findings = [finding for finding in result.findings if "Profit/loss after tax" in finding.issue]
+
+    assert tax_findings
+    assert tax_findings[0].severity == "Medium"
+    assert "Corroborating OCR values" in tax_findings[0].evidence
+    assert "Page 1" in tax_findings[0].evidence
+    assert "Page 3" in tax_findings[0].evidence
 
 
 def test_ocr_statement_mismatches_are_review_prompts_not_high(monkeypatch):

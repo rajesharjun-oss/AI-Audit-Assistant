@@ -499,6 +499,9 @@ def _notes_start_page(document: PdfDocument) -> int | None:
             continue
         if _notes_heading_in_text(page.text):
             return page.number
+    candidates = _notes_heading_candidates(document, include_weak=False)
+    if candidates:
+        return int(candidates[0]["page"])
     return None
 
 
@@ -524,30 +527,40 @@ def _looks_like_front_matter_page(text: str) -> bool:
 
 def _notes_heading_in_text(text: str) -> bool:
     for line in text.splitlines()[:60]:
-        stripped = re.sub(r"\s+", " ", line.strip())
-        if re.fullmatch(r"notes\s+to\s+(?:the\s+)?financial\s+statements?", stripped, flags=re.I):
+        if _notes_heading_line_score(line) >= 0.82:
             return True
-        normalized = _normalise_match_words(line)
-        if not normalized:
-            continue
-        if any(term in normalized for term in ("refer notes", "see notes", "part our audit", "part audit", "auditor report")):
-            continue
-        words = normalized.split()
-        note_heading_phrases = (
-            "notes to the financial statements",
-            "notes to the financial statement",
-            "notes to financial statements",
-            "notes forming part of the financial statements",
-            "notes forming part of financial statements",
-        )
-        if any(normalized.startswith(phrase) for phrase in note_heading_phrases) and len(words) <= 9:
-            return True
-        if normalized.startswith("notes") and all(term in normalized for term in ("notes", "financial", "statements")) and len(words) <= 9:
-            if _fuzzy_contains(line, "notes to the financial statements", threshold=0.88):
-                return True
-            if _fuzzy_contains(line, "notes forming part of the financial statements", threshold=0.84):
-                return True
     return False
+
+
+def _notes_heading_line_score(line: str) -> float:
+    stripped = re.sub(r"\s+", " ", line.strip())
+    normalized = _normalise_match_words(stripped)
+    if not normalized:
+        return 0.0
+    if any(term in normalized for term in ("refer notes", "see notes", "part our audit", "part audit", "auditor report")):
+        return 0.0
+    phrases = (
+        "notes to the financial statements",
+        "notes to the financial statement",
+        "notes financial statements",
+        "notes financial statement",
+        "notes to financial statements",
+        "notes forming part of the financial statements",
+        "notes forming part of financial statements",
+        "notes forming part financial statements",
+    )
+    if re.fullmatch(r"notes\s+to\s+(?:the\s+)?financial\s+statements?", stripped, flags=re.I):
+        return 1.0
+    for phrase in phrases:
+        if normalized == phrase:
+            return 1.0
+        if normalized.startswith(phrase):
+            return 0.96
+    if not normalized.startswith("notes"):
+        return 0.0
+    if not all(term in normalized for term in ("notes", "financial", "statement")):
+        return 0.0
+    return max(SequenceMatcher(None, normalized, phrase).ratio() for phrase in phrases)
 
 
 def _format_notes_heading_snippet(document: PdfDocument) -> str:
@@ -555,41 +568,44 @@ def _format_notes_heading_snippet(document: PdfDocument) -> str:
     if not start_page:
         candidates = _possible_notes_heading_snippets(document)
         return "\n".join(candidates) if candidates else "No reliable notes heading detected."
-    page = next((item for item in document.pages if item.number == start_page), None)
-    if not page:
-        return "No reliable notes heading detected."
-    lines = page.text.splitlines()
-    for index, line in enumerate(lines):
-        if _notes_heading_in_text(line):
-            snippet = " ".join(item.strip() for item in lines[max(0, index - 2) : index + 4] if item.strip())
-            cleaned = re.sub(r"\s+", " ", snippet).strip()
-            return f"Page {start_page}: {cleaned}"
-    cleaned = re.sub(r"\s+", " ", page.text[:400]).strip()
-    return f"Page {start_page}: {cleaned}"
+    candidates = [candidate for candidate in _notes_heading_candidates(document, include_weak=True) if candidate["page"] == start_page]
+    if candidates:
+        top = candidates[0]
+        return f"Page {top['page']} | Confidence {top['confidence']}: {top['snippet']}"
+    return "No reliable notes heading detected."
 
 
 def _possible_notes_heading_snippets(document: PdfDocument) -> list[str]:
-    phrases = (
-        "notes to the financial statements",
-        "notes to the financial statement",
-        "notes forming part of the financial statements",
-        "notes to financial statements",
-    )
-    candidates: list[tuple[float, str]] = []
+    candidates = _notes_heading_candidates(document, include_weak=True)
+    return [f"Possible Page {candidate['page']} | Confidence {candidate['confidence']}: {candidate['snippet']}" for candidate in candidates[:5]]
+
+
+def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False) -> list[dict[str, str | int]]:
+    candidates: list[tuple[float, dict[str, str | int]]] = []
     for page in document.pages:
+        if document.ocr_used and _looks_like_front_matter_page(page.text):
+            continue
         lines = page.text.splitlines()
         for index, line in enumerate(lines):
-            normalized = _normalise_match_words(line)
-            if not normalized or "notes" not in normalized:
+            score = _notes_heading_line_score(line)
+            if score <= 0:
                 continue
-            score = max(SequenceMatcher(None, normalized, phrase).ratio() for phrase in phrases)
-            if score < 0.68 and not ("financial" in normalized and "statement" in normalized):
+            if score < (0.68 if include_weak else 0.82):
                 continue
             snippet = " ".join(item.strip() for item in lines[max(0, index - 2) : index + 4] if item.strip())
             cleaned = re.sub(r"\s+", " ", snippet).strip()
-            candidates.append((score, f"Possible Page {page.number}: {cleaned}"))
+            candidates.append(
+                (
+                    score,
+                    {
+                        "page": page.number,
+                        "confidence": f"{score:.0%}",
+                        "snippet": cleaned,
+                    },
+                )
+            )
     candidates.sort(key=lambda item: item[0], reverse=True)
-    return [snippet for _score, snippet in candidates[:5]]
+    return [candidate for _score, candidate in candidates]
 
 
 def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
@@ -1210,7 +1226,7 @@ def check_primary_statement_consistency(
         if not page:
             skipped.append(f"{statement_name}: statement page not detected.")
             continue
-        page_findings, page_performed, page_skipped = checker(page, tolerance, document.ocr_used)
+        page_findings, page_performed, page_skipped = checker(page, tolerance, document.ocr_used, document)
         findings.extend(page_findings)
         performed.extend(page_performed)
         skipped.extend(page_skipped)
@@ -2184,7 +2200,12 @@ def _fuzzy_contains(text: str, phrase: str, threshold: float = 0.78) -> bool:
     return False
 
 
-def _check_income_statement_text(page: PdfPage, tolerance: Decimal, ocr_review: bool = False) -> tuple[list[Finding], list[str], list[str]]:
+def _check_income_statement_text(
+    page: PdfPage,
+    tolerance: Decimal,
+    ocr_review: bool = False,
+    document: PdfDocument | None = None,
+) -> tuple[list[Finding], list[str], list[str]]:
     rows = _statement_rows(page.text)
     performed: list[str] = []
     skipped: list[str] = []
@@ -2204,6 +2225,7 @@ def _check_income_statement_text(page: PdfPage, tolerance: Decimal, ocr_review: 
             tolerance,
             ocr_review=ocr_review,
             raw_lines=raw_lines,
+            document=document,
         ):
             performed.append("Income statement: revenue, tax, and profit/loss after tax checked from line-extracted rows.")
         else:
@@ -2301,7 +2323,12 @@ def _check_income_statement_text(page: PdfPage, tolerance: Decimal, ocr_review: 
     return findings, performed, skipped
 
 
-def _check_sfp_text(page: PdfPage, tolerance: Decimal, ocr_review: bool = False) -> tuple[list[Finding], list[str], list[str]]:
+def _check_sfp_text(
+    page: PdfPage,
+    tolerance: Decimal,
+    ocr_review: bool = False,
+    document: PdfDocument | None = None,
+) -> tuple[list[Finding], list[str], list[str]]:
     rows = _statement_rows(page.text)
     performed: list[str] = []
     skipped: list[str] = []
@@ -2464,7 +2491,12 @@ def _check_sfp_text(page: PdfPage, tolerance: Decimal, ocr_review: bool = False)
     return findings, performed, skipped
 
 
-def _check_accumulated_fund_text(page: PdfPage, tolerance: Decimal, ocr_review: bool = False) -> tuple[list[Finding], list[str], list[str]]:
+def _check_accumulated_fund_text(
+    page: PdfPage,
+    tolerance: Decimal,
+    ocr_review: bool = False,
+    document: PdfDocument | None = None,
+) -> tuple[list[Finding], list[str], list[str]]:
     lines = page.text.splitlines()
     findings: list[Finding] = []
     performed: list[str] = []
@@ -2506,7 +2538,12 @@ def _check_accumulated_fund_text(page: PdfPage, tolerance: Decimal, ocr_review: 
     return findings, performed, skipped
 
 
-def _check_cash_flow_text(page: PdfPage, tolerance: Decimal, ocr_review: bool = False) -> tuple[list[Finding], list[str], list[str]]:
+def _check_cash_flow_text(
+    page: PdfPage,
+    tolerance: Decimal,
+    ocr_review: bool = False,
+    document: PdfDocument | None = None,
+) -> tuple[list[Finding], list[str], list[str]]:
     rows = _statement_rows(page.text)
     findings: list[Finding] = []
     performed: list[str] = []
@@ -2850,6 +2887,7 @@ def _check_profit_tax_equation(
     tolerance: Decimal,
     ocr_review: bool = False,
     raw_lines: dict[str, str] | None = None,
+    document: PdfDocument | None = None,
 ) -> bool:
     width = min(len(before_tax), len(taxation), len(after_tax))
     if width < 1 or (width < 2 and not ocr_review):
@@ -2872,7 +2910,7 @@ def _check_profit_tax_equation(
                 closest,
                 reported,
                 tolerance,
-                extra_evidence=_ocr_income_tax_debug(raw_lines or {}, before_tax, taxation, after_tax),
+                extra_evidence=_ocr_income_tax_debug(raw_lines or {}, before_tax, taxation, after_tax, document),
             )
         else:
             _check_scalar_equation(findings, page_number, location, issue, closest, reported, tolerance)
@@ -2884,14 +2922,44 @@ def _ocr_income_tax_debug(
     before_tax: list[Decimal],
     taxation: list[Decimal],
     after_tax: list[Decimal],
+    document: PdfDocument | None = None,
 ) -> str:
+    corroborating = _ocr_income_corroborating_debug(document)
     return (
         " OCR source lines: "
         f"Loss/profit before taxation raw line: {raw_lines.get('profit before tax', 'Not captured')}; "
         f"Taxation raw line: {raw_lines.get('taxation', 'Not captured')}; "
         f"Loss/profit after taxation raw line: {raw_lines.get('profit after tax', 'Not captured')}. "
         f"Extracted values: before tax={_format_decimal_list(before_tax)}, taxation={_format_decimal_list(taxation)}, after tax={_format_decimal_list(after_tax)}."
+        f"{corroborating}"
     )
+
+
+def _ocr_income_corroborating_debug(document: PdfDocument | None) -> str:
+    if document is None:
+        return ""
+    labels = {
+        "loss/profit before tax": ("loss before taxation", "loss before tax", "profit before taxation", "profit before tax"),
+        "taxation": ("taxation", "tax credit", "tax expense"),
+        "loss/profit after tax": ("loss after taxation", "loss after tax", "profit after taxation", "profit after tax"),
+    }
+    parts: list[str] = []
+    for label, phrases in labels.items():
+        values: list[str] = []
+        for page in document.pages:
+            for line in page.text.splitlines():
+                normalized = _normalise_match_words(line)
+                if not any(phrase in normalized for phrase in phrases):
+                    continue
+                amounts = _amounts_from_statement_line(line)
+                if amounts:
+                    cleaned = re.sub(r"\s+", " ", line).strip()
+                    values.append(f"Page {page.number}: {_format_decimal_list(amounts[-2:])} from '{cleaned}'")
+        if values:
+            parts.append(f"{label}: {'; '.join(values[:4])}")
+    if not parts:
+        return ""
+    return " Corroborating OCR values from related report/cash-flow lines: " + " | ".join(parts) + "."
 
 
 def _format_decimal_list(values: list[Decimal]) -> str:
