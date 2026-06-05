@@ -636,7 +636,7 @@ def _notes_candidate_search_start_page(document: PdfDocument) -> int:
     if not document.ocr_used:
         return 1
     statement_pages = [page.number for page in _classified_primary_statement_pages(document).values()]
-    return min(max(statement_pages) + 1, max((page.number for page in document.pages), default=1)) if statement_pages else 1
+    return min(statement_pages) + 1 if statement_pages else 1
 
 
 def _candidate_followed_by_numbered_policy(lines: list[str], index: int) -> bool:
@@ -3195,15 +3195,26 @@ def _accounting_policy_map(document: PdfDocument) -> dict[str, bool]:
 
 def _revenue_from_customers_policy_present(text: str) -> bool:
     normalized = _normalise_match_words(text)
-    if re.search(r"revenue\s+from\s+contracts?\s+with\s+customers?", text, flags=re.I):
+    if re.search(r"revenue\s+from\s+contracts?\s+(?:with\s+)?customers?", text, flags=re.I):
         return True
     variants = (
         "revenue from contracts with customers",
         "revenue contracts customers",
         "revenue from contract with customer",
         "revenue contract customer",
+        "revenue from contracts customers",
+        "revenue from customers contracts",
     )
-    return any(variant in normalized for variant in variants)
+    if any(variant in normalized for variant in variants):
+        return True
+    words = normalized.split()
+    for index, word in enumerate(words):
+        if word != "revenue":
+            continue
+        window = set(words[index : index + 8])
+        if ("contract" in window or "contracts" in window) and ("customer" in window or "customers" in window):
+            return True
+    return False
 
 
 def _lease_policy_applies(text: str) -> bool:

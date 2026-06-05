@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 import extraction
 import reviewer
@@ -1150,6 +1151,30 @@ def test_ocr_notes_start_page_accepts_notes_to_accounts_variant_and_records_cand
     assert any(row["Accepted"] == "Yes" and row["Page"] == "12" for row in candidates)
 
 
+def test_ocr_notes_candidate_scan_not_blocked_by_later_false_statement_page(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(3, "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90", []),
+            PdfPage(14, "Notes to the Financial Statements\n1. Significant accounting policies\n2 Revenue", []),
+            PdfPage(30, "Statement of financial position five year summary\nTotal assets 100 90", []),
+        ],
+        ocr_used=True,
+        ocr_pages=3,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["notes_section_start_page"] == 14
+
+
+def test_excel_export_wires_notes_heading_candidates_sheet():
+    app_source = Path("app.py").read_text(encoding="utf-8")
+
+    assert 'sheet_name="Notes heading candidates"' in app_source
+    assert 'writer.book["Notes heading candidates"]' in app_source
+
+
 def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monkeypatch):
     document = PdfDocument(
         [
@@ -1447,6 +1472,22 @@ def test_revenue_policy_recognises_ocr_variant_revenue_from_contract_with_custom
 
     assert not any("revenue-related balances" in finding.issue.lower() for finding in policy_findings)
     assert not any("IFRS 15" in finding.location for finding in checklist_findings)
+
+
+def test_revenue_policy_recognises_broken_ocr_revenue_contracts_customers_phrase():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of profit or loss\nRevenue 1,000 900\nNotes to financial statements\nAccounting policies\nRevenue contracts customers recognised when control transfers.",
+                [],
+            )
+        ]
+    )
+
+    policy_findings = check_policy_relevance(document, CompanyProfile())
+
+    assert not any("revenue-related balances" in finding.issue.lower() for finding in policy_findings)
 
 
 def test_ifrs_16_not_triggered_by_generic_standards_amendments_text():
