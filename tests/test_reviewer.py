@@ -1095,8 +1095,10 @@ def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monke
     result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
 
     assert result.metrics["note_validation_mode"] == "review_prompt"
-    assert any("possible wrong note reference" in finding.issue.lower() for finding in result.findings)
-    assert all(finding.severity in {"Low", "Medium"} for finding in result.findings if finding.metadata)
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Other Revenue")
+    assert row["Alternative note found"] == "9"
+    assert row["Result"] == "Review prompt"
+    assert not any("possible wrong note reference" in finding.issue.lower() for finding in result.findings)
 
 
 def test_policy_check_flags_boilerplate_lease_policy():
@@ -1541,6 +1543,56 @@ def test_ocr_statement_rows_ignore_table_of_contents_pages(monkeypatch):
     assert "equity | 11" not in rows.lower()
     assert "Statement of financial position | Page 11" in rows
     assert "financial liabilities | 5,356,392 | 4,555,742" in rows
+
+
+def test_ocr_statement_rows_drive_partial_statement_checks(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of profit or loss",
+                        "Revenue 707,189 297,041",
+                        "Loss before taxation (173,516) (681,559)",
+                        "Taxation 53,127",
+                        "Loss after taxation (120,389) (428,435)",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Investment property 4,900,000 4,850,000",
+                        "Trade and other receivables 1,910,631 131,254",
+                        "Cash and cash equivalents 739,387 193,627",
+                        "Total assets 7,550,018 5,174,881",
+                        "Equity 2,193,626 619,139",
+                        "Financial liabilities 5,356,392 4,555,742",
+                        "Total equity and liabilities 7,550,018 5,174,881",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert "Income statement: revenue, tax, and profit/loss after tax checked" in result.metrics["checks_performed"]
+    assert "Statement of financial position: total assets checked from extracted asset rows." in result.metrics["checks_performed"]
+    assert "Statement of financial position: equity and liabilities equation checked" in result.metrics["checks_performed"]
+    assert "Statement-specific OCR checks were skipped" not in "\n".join(finding.issue for finding in result.findings)
 
 
 def test_ocr_sfp_statement_specific_checks_skip_low_confidence_rows():

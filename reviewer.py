@@ -486,9 +486,31 @@ def _note_section_page_ranges(document: PdfDocument) -> dict[str, str]:
 
 def _notes_start_page(document: PdfDocument) -> int | None:
     for page in document.pages:
+        if document.ocr_used and _looks_like_front_matter_page(page.text):
+            continue
         if _notes_heading_in_text(page.text):
             return page.number
     return None
+
+
+def _looks_like_front_matter_page(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines()[:40] if line.strip()]
+    head = "\n".join(lines).lower()
+    if not head:
+        return False
+    if lines and _normalise_match_words(lines[0]).startswith("notes"):
+        return False
+    front_terms = (
+        "independent auditor",
+        "auditor's report",
+        "auditors report",
+        "directors' report",
+        "directors report",
+        "corporate information",
+        "report of the directors",
+        "contents",
+    )
+    return any(term in head for term in front_terms)
 
 
 def _notes_heading_in_text(text: str) -> bool:
@@ -1280,14 +1302,6 @@ def check_notes_agreement(
             )
             return findings
         if cautious_low_confidence and headings and _statement_note_lines(document):
-            note_sections = _note_sections(text)
-            misref_findings, _misreferenced_lines = _check_possible_wrong_note_references(
-                _statement_note_lines(document),
-                note_sections,
-                headings,
-                tolerance,
-                cautious_review_prompt=True,
-            )
             findings.append(
                 Finding(
                     "Extraction quality",
@@ -1298,7 +1312,6 @@ def check_notes_agreement(
                     "Treat any OCR note-reference items as review prompts until confirmed against the signed financial statements.",
                 )
             )
-            findings.extend(misref_findings)
             return findings
         findings.append(
             Finding(
@@ -2043,13 +2056,13 @@ def _check_income_statement_text(page: PdfPage, tolerance: Decimal) -> tuple[lis
     gross_operating = ("subscriptions", "registrations", "operating revenue")
     total_income = ("gross revenue", "other revenue", "finance income")
     expenditure = ("office accommodation costs", "personnel costs", "administrative costs", "finance expenses")
-    if _has_rows(rows, ("revenue", "profit before tax", "taxation", "profit after tax")):
-        _check_vector_equation(
+    if all(label in rows for label in ("revenue", "profit before tax", "taxation", "profit after tax")):
+        _check_profit_tax_equation(
             findings,
             page.number,
             "Income statement",
-            "Profit after tax agrees to profit before tax less taxation.",
-            [a + b for a, b in zip(_row_amounts(rows, "profit before tax"), _row_amounts(rows, "taxation"))],
+            _row_amounts(rows, "profit before tax"),
+            _row_amounts(rows, "taxation"),
             _row_amounts(rows, "profit after tax"),
             tolerance,
         )
@@ -2130,6 +2143,23 @@ def _check_sfp_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Finding], l
             tolerance,
         )
         performed.append("Statement of financial position: total assets checked from line-extracted rows.")
+    else:
+        non_current_amounts = _sfp_non_current_amounts(rows)
+        current_amounts = _sfp_current_amounts(rows)
+        total_assets = _row_amounts(rows, "total assets")
+        if non_current_amounts and current_amounts and total_assets:
+            _check_vector_equation(
+                findings,
+                page.number,
+                "Statement of financial position",
+                "Total assets equals extracted non-current asset rows plus extracted current asset rows.",
+                [a + b for a, b in zip(non_current_amounts, current_amounts)],
+                total_assets,
+                tolerance,
+            )
+            performed.append("Statement of financial position: total assets checked from extracted asset rows.")
+        elif total_assets and (non_current_amounts or current_amounts):
+            skipped.append("Statement of financial position: partial asset rows extracted, but non-current/current split was incomplete.")
     equity_amounts = _row_amounts_any(rows, ("equity", "total equity", "share capital and reserves", "capital and reserves"))
     liability_amounts = _row_amounts_any(rows, ("liabilities", "financial liabilities", "total liabilities"))
     total_equity_liabilities = _row_amounts_any(rows, ("total equity and liabilities", "total funds and liabilities", "total equity and liability"))
@@ -2155,6 +2185,17 @@ def _check_sfp_text(page: PdfPage, tolerance: Decimal) -> tuple[list[Finding], l
                 tolerance,
             )
         performed.append("Statement of financial position: equity and liabilities equation checked from line-extracted rows.")
+    elif _row_amounts(rows, "total assets") and total_equity_liabilities:
+        _check_vector_equation(
+            findings,
+            page.number,
+            "Statement of financial position",
+            "Total assets equals total equity and liabilities.",
+            _row_amounts(rows, "total assets"),
+            total_equity_liabilities,
+            tolerance,
+        )
+        performed.append("Statement of financial position: total assets checked against total equity and liabilities.")
     if performed:
         return findings, performed, skipped
     non_current = ("investment property", "property plant and equipment", "intangible assets")
@@ -2541,6 +2582,59 @@ def _row_amounts_any(rows: dict[str, list[Decimal]], labels: tuple[str, ...]) ->
     return []
 
 
+def _sum_row_amounts(rows: dict[str, list[Decimal]], labels: tuple[str, ...]) -> list[Decimal]:
+    present = [_row_amounts(rows, label) for label in labels if _row_amounts(rows, label)]
+    if not present:
+        return []
+    width = min(len(values) for values in present)
+    if width == 0:
+        return []
+    return [sum(values[index] for values in present) for index in range(width)]
+
+
+def _sfp_non_current_amounts(rows: dict[str, list[Decimal]]) -> list[Decimal]:
+    direct = _row_amounts_any(rows, ("non-current assets", "total non-current assets", "total non current assets"))
+    if direct:
+        return direct
+    return _sum_row_amounts(rows, ("investment property", "property plant and equipment", "intangible assets"))
+
+
+def _sfp_current_amounts(rows: dict[str, list[Decimal]]) -> list[Decimal]:
+    direct = _row_amounts_any(rows, ("current assets", "total current assets"))
+    if direct:
+        return direct
+    return _sum_row_amounts(rows, ("inventories", "trade and other receivables", "cash and cash equivalents"))
+
+
+def _check_profit_tax_equation(
+    findings: list[Finding],
+    page_number: int,
+    location: str,
+    before_tax: list[Decimal],
+    taxation: list[Decimal],
+    after_tax: list[Decimal],
+    tolerance: Decimal,
+) -> None:
+    width = min(len(before_tax), len(taxation), len(after_tax))
+    for index in range(width):
+        before = before_tax[index]
+        tax = taxation[index]
+        reported = after_tax[index]
+        candidates = (before - tax, before + tax, before - abs(tax), before + abs(tax))
+        if any(abs(reported - candidate) <= tolerance for candidate in candidates):
+            continue
+        closest = min(candidates, key=lambda candidate: abs(reported - candidate))
+        _check_scalar_equation(
+            findings,
+            page_number,
+            location,
+            f"Profit/loss after tax agrees to profit/loss before tax adjusted for taxation. Column {index + 1}.",
+            closest,
+            reported,
+            tolerance,
+        )
+
+
 def _check_sum_rows(
     findings: list[Finding],
     page_number: int,
@@ -2852,6 +2946,9 @@ def _check_ocr_statement_of_financial_position(document: PdfDocument, tolerance:
         required = ("non-current assets", "current assets", "total assets", "equity", "liabilities", "total equity and liabilities")
         if all(key in line_row_map for key in required):
             return _check_sfp_equations(page.number, 0, line_row_map, tolerance)
+        partial_findings, partial_ran = _check_partial_sfp_equations(page.number, line_row_map, tolerance)
+        if partial_ran:
+            return partial_findings
         for table_index, table in enumerate(page.tables, start=1):
             row_map = _sfp_row_amounts(table)
             if not all(key in row_map for key in required):
@@ -2918,13 +3015,58 @@ def _sfp_line_row_amounts(text: str) -> dict[str, Decimal]:
             mapped["current assets"] = amount
         elif clean.strip() == "total assets" or ("total assets" in clean and "liabilities" not in clean):
             mapped["total assets"] = amount
-        elif clean.strip() in {"equity", "total equity", "shareholders equity", "members fund", "members fund"}:
+        elif clean.strip() in {"equity", "total equity", "shareholders equity", "members fund", "members fund", "share capital and reserves", "capital and reserves"}:
             mapped["equity"] = amount
-        elif clean.strip() in {"liabilities", "total liabilities"}:
+        elif clean.strip() in {"liabilities", "total liabilities", "financial liabilities"}:
             mapped["liabilities"] = amount
         elif "total equity and liabilities" in clean or "total liabilities and equity" in clean:
             mapped["total equity and liabilities"] = amount
+    non_current = _sfp_non_current_amounts(rows)
+    current = _sfp_current_amounts(rows)
+    if non_current and "non-current assets" not in mapped:
+        mapped["non-current assets"] = non_current[0]
+    if current and "current assets" not in mapped:
+        mapped["current assets"] = current[0]
     return mapped
+
+
+def _check_partial_sfp_equations(page_number: int, rows: dict[str, Decimal], tolerance: Decimal) -> tuple[list[Finding], bool]:
+    findings: list[Finding] = []
+    ran = False
+    if all(key in rows for key in ("non-current assets", "current assets", "total assets")):
+        ran = True
+        _check_scalar_equation(
+            findings,
+            page_number,
+            "Statement of financial position",
+            "Non-current assets + current assets should equal total assets.",
+            rows["non-current assets"] + rows["current assets"],
+            rows["total assets"],
+            tolerance,
+        )
+    if all(key in rows for key in ("total assets", "total equity and liabilities")):
+        ran = True
+        _check_scalar_equation(
+            findings,
+            page_number,
+            "Statement of financial position",
+            "Total assets should equal total equity and liabilities.",
+            rows["total assets"],
+            rows["total equity and liabilities"],
+            tolerance,
+        )
+    if all(key in rows for key in ("equity", "liabilities", "total equity and liabilities")):
+        ran = True
+        _check_scalar_equation(
+            findings,
+            page_number,
+            "Statement of financial position",
+            "Equity + liabilities should equal total equity and liabilities.",
+            rows["equity"] + rows["liabilities"],
+            rows["total equity and liabilities"],
+            tolerance,
+        )
+    return findings, ran
 
 
 def _check_sfp_equations(page_number: int, table_index: int, rows: dict[str, Decimal], tolerance: Decimal) -> list[Finding]:
