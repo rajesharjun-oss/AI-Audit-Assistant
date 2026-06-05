@@ -616,9 +616,41 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
     for page in document.pages:
         if document.ocr_used and page.number < search_start_page:
             continue
-        if document.ocr_used and _looks_like_front_matter_page(page.text):
-            continue
+        front_matter = document.ocr_used and _looks_like_front_matter_page(page.text)
         lines = page.text.splitlines()
+        for score, candidate_type, cleaned, normalized, page_reason in _raw_page_notes_heading_candidates(page.text, include_weak):
+            line_candidates = [line for line in lines if line.strip()]
+            follows_numbered_policy = _candidate_followed_by_numbered_policy(line_candidates, 0) or _candidate_followed_by_numbered_policy([page.text], 0)
+            diagnostic_only = front_matter or _notes_candidate_diagnostic_only(cleaned, cleaned)
+            accepted = not diagnostic_only and (
+                score >= 0.9
+                or (score >= 0.82 and (follows_numbered_policy or candidate_type == "Accounting policies heading"))
+            )
+            reason = page_reason or "Accepted: raw OCR page text contains a notes heading candidate."
+            if accepted and follows_numbered_policy:
+                reason = "Accepted: raw OCR page text contains a notes heading candidate followed by numbered accounting policy headings."
+            if accepted and candidate_type == "Accounting policies heading":
+                reason = "Accepted: significant accounting policies heading appears after primary statements."
+            elif diagnostic_only:
+                reason = "Rejected: candidate appears before the notes section or in front-matter/narrative text."
+            elif not accepted:
+                reason = "Rejected: candidate score is below acceptance threshold or lacks numbered note-heading support."
+            candidates.append(
+                (
+                    score + (0.03 if follows_numbered_policy else 0),
+                    {
+                        "page": page.number,
+                        "confidence": f"{score:.0%}",
+                        "snippet": cleaned,
+                        "normalized_snippet": normalized,
+                        "accepted": "Yes" if accepted else "No",
+                        "reason": reason,
+                        "type": candidate_type,
+                    },
+                )
+            )
+        if front_matter:
+            continue
         for index, line in enumerate(lines):
             score = _notes_heading_line_score(line)
             candidate_type = "Notes heading"
@@ -653,6 +685,7 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
                         "page": page.number,
                         "confidence": f"{score:.0%}",
                         "snippet": cleaned,
+                        "normalized_snippet": _normalise_match_words(cleaned),
                         "accepted": "Yes" if accepted else "No",
                         "reason": reason,
                         "type": candidate_type,
@@ -661,6 +694,99 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
             )
     candidates.sort(key=lambda item: item[0], reverse=True)
     return [candidate for _score, candidate in candidates]
+
+
+def _raw_page_notes_heading_candidates(text: str, include_weak: bool = False) -> list[tuple[float, str, str, str, str]]:
+    candidates: list[tuple[float, str, str, str, str]] = []
+    if not text.strip():
+        return candidates
+    pattern_specs = (
+        (r"notes?\s+to\s+(?:the\s+)?financial\s+statements?", "Notes heading", 0.96),
+        (r"notes?\s+forming\s+part\s+of\s+(?:the\s+)?financial\s+statements?", "Notes heading", 0.96),
+        (r"notes?\s+to\s+(?:the\s+)?accounts?", "Notes heading", 0.92),
+        (r"(?:^|\n)\s*1[\).:\s-]+(?:significant\s+)?accounting\s+polic(?:y|ies)", "Accounting policies heading", 0.84),
+        (r"significant\s+accounting\s+polic(?:y|ies)", "Accounting policies heading", 0.78),
+    )
+    for pattern, candidate_type, base_score in pattern_specs:
+        for match in re.finditer(pattern, text, flags=re.I | re.S):
+            raw = _snippet_for_span(text, match.start(), match.end(), radius=180)
+            cleaned = re.sub(r"\s+", " ", raw).strip()
+            normalized = _normalise_match_words(cleaned)
+            score = max(base_score, _notes_page_snippet_score(normalized, candidate_type))
+            reason = "Accepted: raw OCR page text matched a notes-section phrase."
+            if candidate_type == "Accounting policies heading":
+                reason = "Accepted: raw OCR page text contains significant accounting policies after primary statements."
+            candidates.append((score, candidate_type, cleaned, normalized, reason))
+    normalized_text = _normalise_match_words(text)
+    if include_weak:
+        weak_terms = ("notes", "financial statements", "significant accounting policies", "accounting policies")
+        for term in weak_terms:
+            if term not in normalized_text:
+                continue
+            raw_index = _best_raw_index_for_normalized_term(text, term)
+            raw = _snippet_for_span(text, raw_index, raw_index + len(term), radius=180)
+            cleaned = re.sub(r"\s+", " ", raw).strip()
+            normalized = _normalise_match_words(cleaned)
+            score = _notes_page_snippet_score(normalized, "Accounting policies heading" if "accounting" in term else "Notes heading")
+            if score < 0.35:
+                score = 0.35
+            candidates.append(
+                (
+                    score,
+                    "Accounting policies heading" if "accounting" in term else "Weak notes text",
+                    cleaned,
+                    normalized,
+                    "Rejected: weak raw OCR candidate retained for diagnostic review.",
+                )
+            )
+    return _dedupe_raw_notes_candidates(candidates)
+
+
+def _notes_page_snippet_score(normalized: str, candidate_type: str) -> float:
+    if not normalized:
+        return 0.0
+    if candidate_type == "Accounting policies heading":
+        targets = ("significant accounting policies", "accounting policies")
+    else:
+        targets = (
+            "notes to the financial statements",
+            "notes to financial statements",
+            "notes forming part of the financial statements",
+            "notes to the accounts",
+        )
+    if "notes" in normalized and "financial" in normalized and "statement" in normalized:
+        return 0.86
+    if "significant accounting polic" in normalized:
+        return 0.82
+    return max(SequenceMatcher(None, normalized[:220], target).ratio() for target in targets)
+
+
+def _snippet_for_span(text: str, start: int, end: int, radius: int = 140) -> str:
+    snippet_start = max(0, start - radius)
+    snippet_end = min(len(text), end + radius)
+    return text[snippet_start:snippet_end]
+
+
+def _best_raw_index_for_normalized_term(text: str, term: str) -> int:
+    words = term.split()
+    if not words:
+        return 0
+    first = re.search(re.escape(words[0]), text, flags=re.I)
+    return first.start() if first else 0
+
+
+def _dedupe_raw_notes_candidates(
+    candidates: list[tuple[float, str, str, str, str]]
+) -> list[tuple[float, str, str, str, str]]:
+    seen: set[tuple[str, str]] = set()
+    deduped: list[tuple[float, str, str, str, str]] = []
+    for score, candidate_type, cleaned, normalized, reason in candidates:
+        key = (candidate_type, normalized[:180])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((score, candidate_type, cleaned, normalized, reason))
+    return deduped
 
 
 def _notes_candidate_diagnostic_only(line: str, snippet: str) -> bool:
@@ -697,6 +823,7 @@ def _notes_heading_candidate_rows(document: PdfDocument) -> list[dict[str, str]]
             {
                 "Page": str(candidate["page"]),
                 "Raw OCR snippet": str(candidate["snippet"]),
+                "Normalized snippet": str(candidate.get("normalized_snippet", "")),
                 "Similarity score": str(candidate["confidence"]),
                 "Accepted": str(candidate["accepted"]),
                 "Reason": str(candidate["reason"]),
@@ -3266,7 +3393,8 @@ def _accounting_policy_map(document: PdfDocument) -> dict[str, bool]:
 
 def _revenue_from_customers_policy_present(text: str) -> bool:
     normalized = _normalise_match_words(text)
-    if re.search(r"revenue\s+from\s+contracts?\s+(?:with\s+)?customers?", text, flags=re.I):
+    raw_normalized = re.sub(r"\s+", " ", text).strip()
+    if re.search(r"revenue\s+from\s+contracts?\s+(?:with\s+)?customers?", raw_normalized, flags=re.I):
         return True
     variants = (
         "revenue from contracts with customers",
@@ -3278,12 +3406,16 @@ def _revenue_from_customers_policy_present(text: str) -> bool:
     )
     if any(variant in normalized for variant in variants):
         return True
+    if re.search(r"\brevenue\b.{0,120}\bcontracts?\b.{0,80}\bcustom(?:er|ers|ors|0mers|mers)\b", normalized, flags=re.I | re.S):
+        return True
     words = normalized.split()
     for index, word in enumerate(words):
         if word != "revenue":
             continue
-        window = set(words[index : index + 8])
-        if ("contract" in window or "contracts" in window) and ("customer" in window or "customers" in window):
+        window = words[index : index + 14]
+        has_contract = any(token.startswith("contract") for token in window)
+        has_customer = any(token.startswith("custom") or SequenceMatcher(None, token, "customers").ratio() >= 0.82 for token in window)
+        if has_contract and has_customer:
             return True
     return False
 
@@ -3296,12 +3428,18 @@ def _actual_lease_disclosure_present(text: str) -> bool:
     lower = text.lower()
     generic_context_terms = (
         "new standards",
+        "new standard",
         "amendments",
+        "annual improvements",
         "issued but not effective",
         "effective for annual periods",
         "standards and interpretations",
         "deferred tax",
         "amendments to ias",
+        "illustrative",
+        "example",
+        "examples",
+        "transition",
     )
     actual_lease_terms = (
         "right-of-use asset",

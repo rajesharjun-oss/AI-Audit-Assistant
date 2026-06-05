@@ -1133,6 +1133,29 @@ def test_ocr_notes_start_page_uses_strong_heading_candidate_with_note_heading_on
     assert headings["1"] == ("Significant accounting policies", 14)
 
 
+def test_ocr_notes_start_page_searches_raw_page_text_with_broken_lines(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(3, "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90", []),
+            PdfPage(
+                14,
+                "NOtes to\n the Financial\n Statements\n1 Significant accounting policies\n2 Revenue\nRevenue 100 90",
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["notes_section_start_page"] == 14
+    candidates = result.metrics["notes_heading_candidates"]
+    assert any(row["Accepted"] == "Yes" and row["Page"] == "14" for row in candidates)
+    assert any(row["Normalized snippet"] for row in candidates)
+
+
 def test_ocr_notes_start_page_accepts_notes_to_accounts_variant_and_records_candidate_rows(monkeypatch):
     document = PdfDocument(
         [
@@ -1183,6 +1206,7 @@ def test_ocr_notes_start_page_falls_back_to_significant_accounting_policies_afte
 
     assert result.metrics["notes_section_start_page"] == 14
     assert any("Significant accounting policies" in row["Raw OCR snippet"] and row["Accepted"] == "Yes" for row in result.metrics["notes_heading_candidates"])
+    assert any(row["Normalized snippet"] for row in result.metrics["notes_heading_candidates"])
 
 
 def test_notes_heading_candidates_include_rejected_diagnostic_rows(monkeypatch):
@@ -1544,6 +1568,25 @@ def test_revenue_policy_recognises_broken_ocr_revenue_contracts_customers_phrase
     assert not any("revenue-related balances" in finding.issue.lower() for finding in policy_findings)
 
 
+def test_revenue_policy_recognises_split_ocr_revenue_from_contracts_with_customers_phrase():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of profit or loss\nRevenue 1,000 900\nNotes to financial statements\n"
+                "Accounting policies\nRevenue from\ncontracts with\ncustorners is recognised when control transfers.",
+                [],
+            )
+        ]
+    )
+
+    policy_findings = check_policy_relevance(document, CompanyProfile())
+    checklist_findings = check_standard_checklist(document, CompanyProfile())
+
+    assert not any("revenue-related balances" in finding.issue.lower() for finding in policy_findings)
+    assert not any("IFRS 15" in finding.location for finding in checklist_findings)
+
+
 def test_ifrs_16_not_triggered_by_generic_standards_amendments_text():
     document = PdfDocument(
         [
@@ -1568,6 +1611,25 @@ def test_ifrs_16_not_triggered_by_right_of_use_wording_inside_amendments_section
             PdfPage(
                 1,
                 "Notes to the financial statements\nNew standards and amendments\nAmendments mention right-of-use asset and lease liability examples effective for annual periods beginning after the reporting date.",
+                [],
+            )
+        ]
+    )
+
+    policy_findings = check_policy_relevance(document, CompanyProfile())
+    checklist_findings = check_standard_checklist(document, CompanyProfile())
+
+    assert not any("leases policy" in finding.issue.lower() for finding in policy_findings)
+    assert not any("IFRS 16" in finding.location for finding in checklist_findings)
+
+
+def test_ifrs_16_not_triggered_by_generic_deferred_tax_single_transaction_text():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Notes to the financial statements\nNew standards and amendments\n"
+                "Deferred tax related to assets and liabilities arising from a single transaction includes examples for right-of-use asset and lease liability.",
                 [],
             )
         ]

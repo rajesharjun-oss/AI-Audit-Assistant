@@ -137,6 +137,7 @@ def _notes_heading_candidate_rows(result) -> list[dict[str, str]]:
         {
             "Page": "",
             "Raw OCR snippet": "No possible notes heading candidates detected.",
+            "Normalized snippet": "",
             "Similarity score": "",
             "Accepted": "No",
             "Reason": "",
