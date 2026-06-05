@@ -1341,6 +1341,40 @@ def test_ifrs_16_not_triggered_by_generic_standards_amendments_text():
     assert not any("IFRS 16" in finding.location for finding in checklist_findings)
 
 
+def test_ifrs_16_triggers_from_actual_lease_arrangement_disclosure():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Notes to the financial statements\nThe company leases office premises under a cancellable lease arrangement.",
+                [],
+            )
+        ]
+    )
+
+    checklist_findings = check_standard_checklist(document, CompanyProfile())
+
+    assert any("IFRS 16" in finding.location for finding in checklist_findings)
+
+
+def test_ifrs_16_not_triggered_by_generic_lease_contract_policy_wording():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Accounting policies\nIFRS 16 is applied to lease contracts at commencement date.",
+                [],
+            )
+        ]
+    )
+
+    policy_findings = check_policy_relevance(document, CompanyProfile())
+    checklist_findings = check_standard_checklist(document, CompanyProfile())
+
+    assert not any("leases policy" in finding.issue.lower() for finding in policy_findings)
+    assert not any("IFRS 16" in finding.location for finding in checklist_findings)
+
+
 def test_ocr_sfp_statement_specific_checks_run_only_on_confident_rows():
     document = PdfDocument(
         [

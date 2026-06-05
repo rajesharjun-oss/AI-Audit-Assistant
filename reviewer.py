@@ -1732,17 +1732,7 @@ def _checklist_item_applies(
     if item.standard == "IFRS 8":
         return "operating segment" in text or "segment revenue" in text or "chief operating decision maker" in text
     if item.standard == "IFRS 16":
-        lease_balance_terms = (
-            "right-of-use asset",
-            "right of use asset",
-            "rou asset",
-            "lease liability",
-            "lease expense",
-            "lease maturity",
-            "depreciation of right-of-use",
-            "depreciation of rou",
-        )
-        return any(term in text for term in lease_balance_terms)
+        return _actual_lease_disclosure_present(text)
     if item.standard == "IAS 12":
         tax_balance_terms = ("tax expense", "current tax", "deferred tax", "tax payable", "income tax expense")
         return any(term in text for term in tax_balance_terms) and not _tax_exempt_context(text)
@@ -3052,6 +3042,11 @@ def _accounting_policy_map(document: PdfDocument) -> dict[str, bool]:
 
 
 def _lease_policy_applies(text: str) -> bool:
+    return _actual_lease_disclosure_present(text)
+
+
+def _actual_lease_disclosure_present(text: str) -> bool:
+    lower = text.lower()
     actual_lease_terms = (
         "right-of-use asset",
         "right of use asset",
@@ -3063,7 +3058,16 @@ def _lease_policy_applies(text: str) -> bool:
         "depreciation of rou",
         "leased asset",
     )
-    if any(term in text for term in actual_lease_terms):
+    if any(term in lower for term in actual_lease_terms):
+        return True
+    if any(term in lower for term in ("new standards", "amendments", "issued but not effective", "effective for annual periods", "standards and interpretations")):
+        return False
+    actual_arrangement_patterns = (
+        r"\b(?:the\s+)?company\s+(?:has|entered into|leases|rents)\b.{0,120}\b(?:lease|leased|rental|premises|office|property)\b",
+        r"\b(?:lease|rental)\s+arrangements?\b.{0,120}\b(?:company|premises|office|property|agreement|term)\b",
+        r"\b(?:leased|rented)\s+(?:premises|office|property|building|warehouse)\b",
+    )
+    if any(re.search(pattern, lower, flags=re.I | re.S) for pattern in actual_arrangement_patterns):
         return True
     return False
 
