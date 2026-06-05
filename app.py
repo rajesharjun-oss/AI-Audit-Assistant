@@ -156,16 +156,19 @@ def _ocr_statement_row_rows(result) -> list[dict[str, str]]:
     for line in _metric_lines(result.metrics.get("ocr_statement_rows"), "No OCR primary statement rows detected."):
         parts = [part.strip() for part in line.split("|")]
         if len(parts) >= 4:
+            has_confidence = len(parts) >= 7
             rows.append(
                 {
                     "Statement": parts[0],
                     "Page": parts[1].replace("Page ", "", 1).strip(),
                     "Line item": parts[2],
-                    "Amounts": " | ".join(parts[3:-1]) if len(parts) >= 5 else parts[3],
-                    "Raw OCR line": parts[-1] if len(parts) >= 5 else "",
+                    "Amounts": " | ".join(parts[3:-3]) if has_confidence else (" | ".join(parts[3:-1]) if len(parts) >= 5 else parts[3]),
+                    "Raw OCR line": parts[-3] if has_confidence else (parts[-1] if len(parts) >= 5 else ""),
+                    "Row confidence": parts[-2] if has_confidence else "",
+                    "Confidence reason": parts[-1] if has_confidence else "",
                 }
             )
-    return rows or [{"Statement": "", "Page": "", "Line item": "No OCR primary statement rows detected.", "Amounts": "", "Raw OCR line": ""}]
+    return rows or [{"Statement": "", "Page": "", "Line item": "No OCR primary statement rows detected.", "Amounts": "", "Raw OCR line": "", "Row confidence": "", "Confidence reason": ""}]
 
 
 def _build_excel_export(result) -> bytes:

@@ -479,7 +479,8 @@ def _format_ocr_statement_rows_debug(document: PdfDocument) -> str:
         for label, amounts in _statement_rows(page.text).items():
             amount_text = " | ".join(f"{amount:,}" for amount in amounts)
             raw_line = _statement_row_raw_lines(page.text).get(label, "")
-            rows.append(f"{statement_name} | Page {page.number} | {label} | {amount_text} | {raw_line}")
+            confidence, reason = _ocr_statement_row_confidence(label, raw_line, amounts)
+            rows.append(f"{statement_name} | Page {page.number} | {label} | {amount_text} | {raw_line} | {confidence} | {reason}")
     return "\n".join(rows) if rows else "No OCR primary statement rows detected."
 
 
@@ -505,10 +506,11 @@ def _notes_start_page(document: PdfDocument) -> int | None:
             continue
         if _notes_heading_in_text(page.text):
             return page.number
-    candidates = _notes_heading_candidates(document, include_weak=False)
-    accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
-    if accepted:
-        return int(accepted[0]["page"])
+    if document.ocr_used:
+        candidates = _notes_heading_candidates(document, include_weak=False)
+        accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
+        if accepted:
+            return int(accepted[0]["page"])
     return None
 
 
@@ -575,6 +577,22 @@ def _notes_heading_line_score(line: str) -> float:
     return max(SequenceMatcher(None, normalized, phrase).ratio() for phrase in phrases)
 
 
+def _significant_accounting_policy_line_score(line: str) -> float:
+    normalized = _normalise_match_words(line)
+    if not normalized:
+        return 0.0
+    phrases = (
+        "significant accounting policies",
+        "accounting policies",
+        "summary significant accounting policies",
+    )
+    if normalized.startswith("significant accounting polic") or normalized.startswith("accounting polic"):
+        return 0.86
+    if "accounting" in normalized and "polic" in normalized:
+        return max(0.72, max(SequenceMatcher(None, normalized, phrase).ratio() for phrase in phrases))
+    return 0.0
+
+
 def _format_notes_heading_snippet(document: PdfDocument) -> str:
     start_page = _notes_start_page(document)
     if not start_page:
@@ -603,6 +621,13 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
         lines = page.text.splitlines()
         for index, line in enumerate(lines):
             score = _notes_heading_line_score(line)
+            candidate_type = "Notes heading"
+            if score <= 0:
+                score = _significant_accounting_policy_line_score(line)
+                candidate_type = "Accounting policies heading"
+            if score <= 0 and include_weak and "notes" in _normalise_match_words(line):
+                score = 0.35
+                candidate_type = "Weak notes text"
             if score <= 0:
                 continue
             if score < (0.68 if include_weak else 0.82):
@@ -610,10 +635,15 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
             snippet = " ".join(item.strip() for item in lines[max(0, index - 2) : index + 4] if item.strip())
             cleaned = re.sub(r"\s+", " ", snippet).strip()
             follows_numbered_policy = _candidate_followed_by_numbered_policy(lines, index)
-            accepted = score >= 0.9 or (score >= 0.82 and follows_numbered_policy)
+            diagnostic_only = _notes_candidate_diagnostic_only(line, cleaned)
+            accepted = not diagnostic_only and (score >= 0.9 or (score >= 0.82 and (follows_numbered_policy or candidate_type == "Accounting policies heading")))
             reason = "Accepted: strong notes heading candidate."
+            if candidate_type == "Accounting policies heading" and accepted:
+                reason = "Accepted: significant accounting policies heading appears after primary statements."
             if follows_numbered_policy and accepted:
                 reason = "Accepted: notes heading candidate is followed by numbered accounting policy headings."
+            elif diagnostic_only:
+                reason = "Rejected: candidate appears to be a narrative/extract reference rather than the notes section heading."
             elif not accepted:
                 reason = "Rejected: candidate score is below acceptance threshold or lacks numbered note-heading support."
             candidates.append(
@@ -625,11 +655,20 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
                         "snippet": cleaned,
                         "accepted": "Yes" if accepted else "No",
                         "reason": reason,
+                        "type": candidate_type,
                     },
                 )
             )
     candidates.sort(key=lambda item: item[0], reverse=True)
     return [candidate for _score, candidate in candidates]
+
+
+def _notes_candidate_diagnostic_only(line: str, snippet: str) -> bool:
+    normalized = _normalise_match_words(f"{line} {snippet}")
+    diagnostic_terms = ("extract", "excerpt", "reference", "narrative", "summary")
+    if any(term in normalized for term in diagnostic_terms) and not _candidate_followed_by_numbered_policy(snippet.splitlines() or [snippet], 0):
+        return True
+    return False
 
 
 def _notes_candidate_search_start_page(document: PdfDocument) -> int:
@@ -2694,6 +2733,38 @@ def _statement_row_raw_lines(text: str) -> dict[str, str]:
         if label and _statement_row_label_allowed(label):
             raw_lines.setdefault(label, re.sub(r"\s+", " ", line).strip())
     return raw_lines
+
+
+def _ocr_statement_row_confidence(label: str, raw_line: str, amounts: list[Decimal]) -> tuple[str, str]:
+    if not raw_line:
+        return "Low", "Raw OCR line not captured."
+    normalized_line = _normalise_match_words(raw_line)
+    if "#" in raw_line or "?" in raw_line:
+        return "Low", "Unreadable OCR placeholder or uncertain character detected."
+    amount_tokens = re.findall(r"\(?-?\d[\d,\s]*\)?", raw_line)
+    if any(re.search(r"\d\s+\d", token) for token in amount_tokens):
+        return "Low-Medium", "OCR amount contains internal spaces and may have required numeric normalization."
+    if _looks_like_possible_missing_leading_digit(label, raw_line, amounts):
+        return "Low-Medium", "Possible OCR correction candidate: amount may be missing a leading digit."
+    if any(term in normalized_line for term in ("audited", "year ended", "page")):
+        return "Low-Medium", "Line contains report furniture near extracted values."
+    return "High", "Raw OCR line and extracted amounts appear structurally clean."
+
+
+def _looks_like_possible_missing_leading_digit(label: str, raw_line: str, amounts: list[Decimal]) -> bool:
+    if not amounts:
+        return False
+    lower_label = label.lower()
+    watched_labels = ("cash", "receivable", "revenue", "tax", "asset", "liabilit")
+    if not any(term in lower_label for term in watched_labels):
+        return False
+    clean_line = raw_line.replace(" ", "")
+    raw_numbers = re.findall(r"\d{1,3}(?:,\d{3})+", clean_line)
+    for token in raw_numbers:
+        digits = token.replace(",", "")
+        if len(digits) == 5 and any(abs(abs(amount) - Decimal(digits)) <= 1 for amount in amounts):
+            return True
+    return False
 
 
 def _statement_row_label_allowed(label: str) -> bool:

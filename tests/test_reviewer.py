@@ -1168,6 +1168,39 @@ def test_ocr_notes_candidate_scan_not_blocked_by_later_false_statement_page(monk
     assert result.metrics["notes_section_start_page"] == 14
 
 
+def test_ocr_notes_start_page_falls_back_to_significant_accounting_policies_after_statements(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(3, "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90", []),
+            PdfPage(14, "1. Significant accounting policies\n2 Revenue\nRevenue 100 90", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["notes_section_start_page"] == 14
+    assert any("Significant accounting policies" in row["Raw OCR snippet"] and row["Accepted"] == "Yes" for row in result.metrics["notes_heading_candidates"])
+
+
+def test_notes_heading_candidates_include_rejected_diagnostic_rows(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90\n" + ("OCR filler\n" * 80), []),
+            PdfPage(10, "Notes and financial statement extracts\nNarrative only\n" + ("OCR filler\n" * 80), []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert any(row["Accepted"] == "No" for row in result.metrics["notes_heading_candidates"])
+
+
 def test_excel_export_wires_notes_heading_candidates_sheet():
     app_source = Path("app.py").read_text(encoding="utf-8")
 
@@ -1387,6 +1420,27 @@ def test_generic_scanned_private_company_pattern_detects_company_and_runs_sfp_ch
     assert any(row["Result"] == "Passed" and "total assets" in row["Check"].lower() for row in result.metrics["check_results"])
 
 
+def test_ocr_statement_rows_include_row_confidence(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nCash and cash equivalents 39,387 193,627\nTotal assets 39,387 193,627\nTotal equity and liabilities 39,387 193,627\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert "cash and cash equivalents" in result.metrics["ocr_statement_rows"]
+    assert "Low-Medium" in result.metrics["ocr_statement_rows"]
+
+
 def test_text_confidence_separates_table_confidence():
     noisy_table = [["Description", "2025", "2024"], ["Revenue", "100 90", ""], ["Total", "100", "90"]]
     document = PdfDocument(
@@ -1558,6 +1612,22 @@ def test_ifrs_16_not_triggered_by_generic_lease_contract_policy_wording():
 
     assert not any("leases policy" in finding.issue.lower() for finding in policy_findings)
     assert not any("IFRS 16" in finding.location for finding in checklist_findings)
+
+
+def test_detected_profile_does_not_suggest_ifrs_16_from_generic_new_standards_text():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Notes to the financial statements\nNew standards and amendments\nIFRS 16 right-of-use asset and lease liability examples are discussed as amendments.",
+                [],
+            )
+        ]
+    )
+
+    profile = infer_detected_profile(document)
+
+    assert "IFRS 16" not in profile["Suggested checklist areas"]
 
 
 def test_ocr_sfp_statement_specific_checks_run_only_on_confident_rows():
