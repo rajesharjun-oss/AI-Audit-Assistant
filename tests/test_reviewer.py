@@ -1555,7 +1555,7 @@ def test_ocr_statement_rows_drive_partial_statement_checks(monkeypatch):
                         "Statement of profit or loss",
                         "Revenue 707,189 297,041",
                         "Loss before taxation (173,516) (681,559)",
-                        "Taxation 53,127",
+                        "Taxation 53,127 253,124",
                         "Loss after taxation (120,389) (428,435)",
                     ]
                 )
@@ -1569,8 +1569,10 @@ def test_ocr_statement_rows_drive_partial_statement_checks(monkeypatch):
                     [
                         "Statement of financial position",
                         "Investment property 4,900,000 4,850,000",
+                        "Total non-current assets 4,900,000 4,850,000",
                         "Trade and other receivables 1,910,631 131,254",
                         "Cash and cash equivalents 739,387 193,627",
+                        "Total current assets 2,650,018 324,881",
                         "Total assets 7,550,018 5,174,881",
                         "Equity 2,193,626 619,139",
                         "Financial liabilities 5,356,392 4,555,742",
@@ -1593,6 +1595,66 @@ def test_ocr_statement_rows_drive_partial_statement_checks(monkeypatch):
     assert "Statement of financial position: total assets checked from extracted asset rows." in result.metrics["checks_performed"]
     assert "Statement of financial position: equity and liabilities equation checked" in result.metrics["checks_performed"]
     assert "Statement-specific OCR checks were skipped" not in "\n".join(finding.issue for finding in result.findings)
+
+
+def test_ocr_income_statement_skips_single_amount_tax_row(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of profit or loss",
+                        "Revenue 707,189 297,041",
+                        "Loss before taxation (173,516) (681,559)",
+                        "Taxation 253,124",
+                        "Loss after taxation (120,389) (428,435)",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert "profit/loss after tax skipped because OCR tax rows" in result.metrics["checks_skipped"]
+    assert not any("Profit/loss after tax" in finding.issue for finding in result.findings)
+
+
+def test_ocr_statement_mismatches_are_review_prompts_not_high(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Total assets 100 90",
+                        "Total equity and liabilities 80 70",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    total_findings = [finding for finding in result.findings if finding.category == "Totals and rounding"]
+
+    assert total_findings
+    assert all(finding.severity in {"Medium", "Low"} for finding in total_findings)
+    assert all("Possible mismatch from OCR line extraction" in finding.issue for finding in total_findings)
 
 
 def test_ocr_sfp_statement_specific_checks_skip_low_confidence_rows():

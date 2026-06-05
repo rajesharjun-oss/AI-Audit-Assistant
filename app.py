@@ -146,10 +146,11 @@ def _ocr_statement_row_rows(result) -> list[dict[str, str]]:
                     "Statement": parts[0],
                     "Page": parts[1].replace("Page ", "", 1).strip(),
                     "Line item": parts[2],
-                    "Amounts": " | ".join(parts[3:]),
+                    "Amounts": " | ".join(parts[3:-1]) if len(parts) >= 5 else parts[3],
+                    "Raw OCR line": parts[-1] if len(parts) >= 5 else "",
                 }
             )
-    return rows or [{"Statement": "", "Page": "", "Line item": "No OCR primary statement rows detected.", "Amounts": ""}]
+    return rows or [{"Statement": "", "Page": "", "Line item": "No OCR primary statement rows detected.", "Amounts": "", "Raw OCR line": ""}]
 
 
 def _build_excel_export(result) -> bytes:
