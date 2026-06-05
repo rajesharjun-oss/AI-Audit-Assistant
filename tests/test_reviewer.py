@@ -1081,6 +1081,39 @@ def test_ocr_note_validation_skips_when_notes_section_start_is_not_detected():
     assert not any("possible wrong note reference" in finding.issue.lower() for finding in findings)
 
 
+def test_review_pdf_does_not_report_ocr_note_validation_performed_without_notes_boundary(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nCash Note 7 100 90", []),
+            PdfPage(2, "Directors' report\n7 Directors' interests in shares", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert "Heading-based note-reference validation performed" not in result.metrics["checks_performed"]
+    assert "OCR note-reference validation skipped because the notes section start was not detected." in result.metrics["checks_skipped"]
+    assert result.metrics["note_validation_mode"] == "skipped"
+    assert result.metrics["note_headings_detected"] == 0
+
+
+def test_ocr_notes_start_page_accepts_fuzzy_notes_heading_variants():
+    document = PdfDocument(
+        [
+            PdfPage(2, "Independent auditor's report\nThe notes to the financial statements are part of our audit.", []),
+            PdfPage(14, "NOTES FORMING PART OF THE FINANCIAL STATEMENTS\n1 Accounting policies\n13 Revenue", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+
+    assert reviewer._notes_start_page(document) == 14
+    assert "NOTES FORMING PART" in reviewer._format_notes_heading_snippet(document)
+
+
 def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monkeypatch):
     document = PdfDocument(
         [
@@ -1101,7 +1134,23 @@ def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monke
     assert not any("possible wrong note reference" in finding.issue.lower() for finding in result.findings)
 
 
-def test_policy_check_flags_boilerplate_lease_policy():
+def test_ifrs_16_checklist_triggers_from_actual_lease_balance_disclosure():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Accounting policies\nIFRS 16 is applied to lease liability balances at commencement date.\nCash and cash equivalents 500",
+                [],
+            )
+        ]
+    )
+
+    findings = check_standard_checklist(document, CompanyProfile(checklist_areas=("IFRS 16",)))
+
+    assert any("IFRS 16" in finding.location for finding in findings)
+
+
+def test_policy_check_does_not_trigger_lease_policy_from_generic_contract_wording():
     document = PdfDocument(
         [
             PdfPage(
@@ -1114,7 +1163,7 @@ def test_policy_check_flags_boilerplate_lease_policy():
 
     findings = check_policy_relevance(document, CompanyProfile())
 
-    assert any("leases policy" in finding.issue.lower() for finding in findings)
+    assert not any("leases policy" in finding.issue.lower() for finding in findings)
 
 
 def test_policy_check_flags_industry_mismatch_and_superseded_standard():
@@ -1597,7 +1646,7 @@ def test_ocr_statement_rows_drive_partial_statement_checks(monkeypatch):
     assert "Statement-specific OCR checks were skipped" not in "\n".join(finding.issue for finding in result.findings)
 
 
-def test_ocr_income_statement_skips_single_amount_tax_row(monkeypatch):
+def test_ocr_income_statement_runs_current_year_only_when_tax_row_has_one_amount(monkeypatch):
     document = PdfDocument(
         [
             PdfPage(
@@ -1623,8 +1672,11 @@ def test_ocr_income_statement_skips_single_amount_tax_row(monkeypatch):
 
     result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
 
-    assert "profit/loss after tax skipped because OCR tax rows" in result.metrics["checks_skipped"]
-    assert not any("Profit/loss after tax" in finding.issue for finding in result.findings)
+    assert "Income statement: revenue, tax, and profit/loss after tax checked" in result.metrics["checks_performed"]
+    tax_findings = [finding for finding in result.findings if "Profit/loss after tax" in finding.issue]
+    assert tax_findings
+    assert all(finding.severity in {"Medium", "Low"} for finding in tax_findings)
+    assert all("Possible mismatch from OCR line extraction" in finding.issue for finding in tax_findings)
 
 
 def test_ocr_statement_mismatches_are_review_prompts_not_high(monkeypatch):

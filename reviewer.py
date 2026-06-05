@@ -259,6 +259,8 @@ def review_pdf(
     findings.extend(check_extraction_quality(document))
     if _requires_ocr(document):
         checks_skipped.append("Primary statement checks skipped because PDF extraction is unreliable.")
+        if options.run_cautious_note_agreement and not _notes_start_page(document):
+            checks_skipped.append("OCR note-reference validation skipped because the notes section start was not detected.")
         note_validation_debug["note_validation_mode"] = "skipped"
         return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug)
     if _extraction_unreliable(document):
@@ -274,8 +276,11 @@ def review_pdf(
     findings.extend(note_findings)
     note_validation_debug = _note_validation_debug(document, options.run_cautious_note_agreement, note_findings)
     if options.run_cautious_note_agreement and document.ocr_used:
-        checks_performed.append("Heading-based note-reference validation performed in OCR review-prompt mode.")
-        checks_skipped.append("Detailed OCR note amount agreement skipped because OCR note tables are not yet reliable.")
+        if note_validation_debug.get("note_validation_mode") == "review_prompt":
+            checks_performed.append("Heading-based note-reference validation performed in OCR review-prompt mode.")
+            checks_skipped.append("Detailed OCR note amount agreement skipped because OCR note tables are not yet reliable.")
+        else:
+            checks_skipped.append("OCR note-reference validation skipped because the notes section start was not detected.")
     elif options.run_cautious_note_agreement and document.table_extraction_confidence < 80 and not document.ocr_used:
         note_reference_prompts = [
             finding
@@ -337,6 +342,7 @@ def _build_result(
         "low": sum(1 for item in findings if item.severity == "Low"),
         "note_headings": _format_note_heading_debug(document),
         "notes_section_start_page": _notes_start_page(document) or "Not detected",
+        "notes_heading_snippet": _format_notes_heading_snippet(document),
         "primary_statement_pages": _format_primary_statement_debug(document),
         "ocr_statement_rows": _format_ocr_statement_rows_debug(document),
         "note_agreement_results": _note_agreement_result_rows(document),
@@ -515,22 +521,48 @@ def _looks_like_front_matter_page(text: str) -> bool:
 
 
 def _notes_heading_in_text(text: str) -> bool:
-    for line in text.splitlines()[:18]:
+    for line in text.splitlines()[:60]:
         stripped = re.sub(r"\s+", " ", line.strip())
-        if re.fullmatch(r"notes\s+to\s+the\s+financial\s+statements?", stripped, flags=re.I):
+        if re.fullmatch(r"notes\s+to\s+(?:the\s+)?financial\s+statements?", stripped, flags=re.I):
             return True
         normalized = _normalise_match_words(line)
         if not normalized:
             continue
-        if any(term in normalized for term in ("refer notes", "see notes", "forming part", "part our audit", "part audit", "auditor report")):
+        if any(term in normalized for term in ("refer notes", "see notes", "part our audit", "part audit", "auditor report")):
             continue
         words = normalized.split()
-        if normalized.startswith("notes to the financial statements") and len(words) <= 8:
+        note_heading_phrases = (
+            "notes to the financial statements",
+            "notes to the financial statement",
+            "notes to financial statements",
+            "notes forming part of the financial statements",
+            "notes forming part of financial statements",
+        )
+        if any(normalized.startswith(phrase) for phrase in note_heading_phrases) and len(words) <= 9:
             return True
-        if normalized.startswith("notes") and all(term in normalized for term in ("notes", "financial", "statements")) and len(words) <= 5:
+        if normalized.startswith("notes") and all(term in normalized for term in ("notes", "financial", "statements")) and len(words) <= 9:
             if _fuzzy_contains(line, "notes to the financial statements", threshold=0.88):
                 return True
+            if _fuzzy_contains(line, "notes forming part of the financial statements", threshold=0.84):
+                return True
     return False
+
+
+def _format_notes_heading_snippet(document: PdfDocument) -> str:
+    start_page = _notes_start_page(document)
+    if not start_page:
+        return "No reliable notes heading detected."
+    page = next((item for item in document.pages if item.number == start_page), None)
+    if not page:
+        return "No reliable notes heading detected."
+    lines = page.text.splitlines()
+    for index, line in enumerate(lines):
+        if _notes_heading_in_text(line):
+            snippet = " ".join(item.strip() for item in lines[max(0, index - 2) : index + 4] if item.strip())
+            cleaned = re.sub(r"\s+", " ", snippet).strip()
+            return f"Page {start_page}: {cleaned}"
+    cleaned = re.sub(r"\s+", " ", page.text[:400]).strip()
+    return f"Page {start_page}: {cleaned}"
 
 
 def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
@@ -1620,8 +1652,6 @@ def _checklist_item_applies(
             "lease maturity",
             "depreciation of right-of-use",
             "depreciation of rou",
-            "lease arrangement",
-            "lease contracts",
         )
         return any(term in text for term in lease_balance_terms)
     if item.standard == "IAS 12":
@@ -2714,7 +2744,7 @@ def _check_profit_tax_equation(
     ocr_review: bool = False,
 ) -> bool:
     width = min(len(before_tax), len(taxation), len(after_tax))
-    if width < 2:
+    if width < 1 or (width < 2 and not ocr_review):
         return False
     for index in range(width):
         before = before_tax[index]
@@ -2907,23 +2937,11 @@ def _lease_policy_applies(text: str) -> bool:
         "lease maturity",
         "depreciation of right-of-use",
         "depreciation of rou",
-        "lease contracts",
-        "lease arrangement",
         "leased asset",
     )
     if any(term in text for term in actual_lease_terms):
         return True
-    if "ifrs 16" not in text and "leases" not in text:
-        return False
-    generic_context = (
-        "new standards",
-        "amendments",
-        "annual improvements",
-        "effective for annual periods",
-        "issued but not effective",
-        "standards and interpretations",
-    )
-    return not any(term in text for term in generic_context)
+    return False
 
 
 def _check_superseded_standards(findings: list[Finding], document: PdfDocument) -> None:
@@ -3045,6 +3063,8 @@ def _policy_evidence_present(policy_name: str, evidence_keywords: tuple[str, ...
 
 def _strong_policy_gap(policy_name: str, text: str) -> bool:
     if policy_name == "revenue":
+        if "revenue from contracts with customers" in text:
+            return False
         return "revenue" in text and not any(term in text for term in ("revenue is recognised", "revenue is recognized", "(m) revenue"))
     if policy_name == "leases":
         return any(term in text for term in ("lease liability", "right-of-use asset", "right of use asset"))
@@ -4190,7 +4210,7 @@ def _combined_note_refs_from_line(lines: list[str], index: int, line: str) -> li
 
 def _is_notes_page(text: str) -> bool:
     lower = text.lower()
-    return "notes to the financial statements" in lower or lower.count("accounting polic") >= 2
+    return _notes_heading_in_text(text) or "notes to the financial statements" in lower or lower.count("accounting polic") >= 2
 
 
 def _valid_note_heading(number: str, title: str) -> bool:
