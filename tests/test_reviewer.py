@@ -1128,6 +1128,26 @@ def test_ocr_notes_start_page_uses_strong_heading_candidate_with_note_heading_on
     snippet = reviewer._format_notes_heading_snippet(document)
     assert "Confidence" in snippet
     assert "Significant accounting policies" in snippet
+    headings = _note_headings_by_page(document)
+    assert headings["1"] == ("Significant accounting policies", 14)
+
+
+def test_ocr_notes_start_page_accepts_notes_to_accounts_variant_and_records_candidate_rows(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90", []),
+            PdfPage(12, "Notes to the accounts\n1. Significant accounting policies\n2 Revenue\nRevenue 100 90", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["notes_section_start_page"] == 12
+    candidates = result.metrics["notes_heading_candidates"]
+    assert any(row["Accepted"] == "Yes" and row["Page"] == "12" for row in candidates)
 
 
 def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monkeypatch):
@@ -1411,12 +1431,48 @@ def test_revenue_policy_recognises_revenue_from_contracts_with_customers():
     assert not any("revenue-related balances" in finding.issue.lower() for finding in findings)
 
 
+def test_revenue_policy_recognises_ocr_variant_revenue_from_contract_with_customer():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of profit or loss\nRevenue 1,000 900\nNotes to the financial statements\nAccounting policies\nRevenue from contract with customer is recognised when control transfers.",
+                [],
+            )
+        ]
+    )
+
+    policy_findings = check_policy_relevance(document, CompanyProfile())
+    checklist_findings = check_standard_checklist(document, CompanyProfile())
+
+    assert not any("revenue-related balances" in finding.issue.lower() for finding in policy_findings)
+    assert not any("IFRS 15" in finding.location for finding in checklist_findings)
+
+
 def test_ifrs_16_not_triggered_by_generic_standards_amendments_text():
     document = PdfDocument(
         [
             PdfPage(
                 1,
                 "Notes to the financial statements\nNew standards and amendments\nIFRS 16 Leases amendments are effective for annual periods beginning after the reporting date.",
+                [],
+            )
+        ]
+    )
+
+    policy_findings = check_policy_relevance(document, CompanyProfile())
+    checklist_findings = check_standard_checklist(document, CompanyProfile())
+
+    assert not any("leases policy" in finding.issue.lower() for finding in policy_findings)
+    assert not any("IFRS 16" in finding.location for finding in checklist_findings)
+
+
+def test_ifrs_16_not_triggered_by_right_of_use_wording_inside_amendments_section():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Notes to the financial statements\nNew standards and amendments\nAmendments mention right-of-use asset and lease liability examples effective for annual periods beginning after the reporting date.",
                 [],
             )
         ]

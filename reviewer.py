@@ -344,6 +344,7 @@ def _build_result(
         "note_headings": _format_note_heading_debug(document),
         "notes_section_start_page": _notes_start_page(document) or "Not detected",
         "notes_heading_snippet": _format_notes_heading_snippet(document),
+        "notes_heading_candidates": _notes_heading_candidate_rows(document),
         "primary_statement_pages": _format_primary_statement_debug(document),
         "ocr_statement_rows": _format_ocr_statement_rows_debug(document),
         "note_agreement_results": _note_agreement_result_rows(document),
@@ -494,14 +495,20 @@ def _note_section_page_ranges(document: PdfDocument) -> dict[str, str]:
 
 
 def _notes_start_page(document: PdfDocument) -> int | None:
+    if document.ocr_used:
+        candidates = _notes_heading_candidates(document, include_weak=False)
+        accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
+        if accepted:
+            return int(accepted[0]["page"])
     for page in document.pages:
         if document.ocr_used and _looks_like_front_matter_page(page.text):
             continue
         if _notes_heading_in_text(page.text):
             return page.number
     candidates = _notes_heading_candidates(document, include_weak=False)
-    if candidates:
-        return int(candidates[0]["page"])
+    accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
+    if accepted:
+        return int(accepted[0]["page"])
     return None
 
 
@@ -545,6 +552,9 @@ def _notes_heading_line_score(line: str) -> float:
         "notes financial statements",
         "notes financial statement",
         "notes to financial statements",
+        "notes to the accounts",
+        "notes to accounts",
+        "notes accounts",
         "notes forming part of the financial statements",
         "notes forming part of financial statements",
         "notes forming part financial statements",
@@ -558,6 +568,8 @@ def _notes_heading_line_score(line: str) -> float:
             return 0.96
     if not normalized.startswith("notes"):
         return 0.0
+    if "accounts" in normalized and normalized.startswith("notes"):
+        return max(0.82, SequenceMatcher(None, normalized, "notes to the accounts").ratio())
     if not all(term in normalized for term in ("notes", "financial", "statement")):
         return 0.0
     return max(SequenceMatcher(None, normalized, phrase).ratio() for phrase in phrases)
@@ -577,12 +589,15 @@ def _format_notes_heading_snippet(document: PdfDocument) -> str:
 
 def _possible_notes_heading_snippets(document: PdfDocument) -> list[str]:
     candidates = _notes_heading_candidates(document, include_weak=True)
-    return [f"Possible Page {candidate['page']} | Confidence {candidate['confidence']}: {candidate['snippet']}" for candidate in candidates[:5]]
+    return [f"Possible Page {candidate['page']} | Confidence {candidate['confidence']} | {candidate['accepted']}: {candidate['snippet']}" for candidate in candidates[:5]]
 
 
 def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False) -> list[dict[str, str | int]]:
     candidates: list[tuple[float, dict[str, str | int]]] = []
+    search_start_page = _notes_candidate_search_start_page(document)
     for page in document.pages:
+        if document.ocr_used and page.number < search_start_page:
+            continue
         if document.ocr_used and _looks_like_front_matter_page(page.text):
             continue
         lines = page.text.splitlines()
@@ -594,18 +609,61 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
                 continue
             snippet = " ".join(item.strip() for item in lines[max(0, index - 2) : index + 4] if item.strip())
             cleaned = re.sub(r"\s+", " ", snippet).strip()
+            follows_numbered_policy = _candidate_followed_by_numbered_policy(lines, index)
+            accepted = score >= 0.9 or (score >= 0.82 and follows_numbered_policy)
+            reason = "Accepted: strong notes heading candidate."
+            if follows_numbered_policy and accepted:
+                reason = "Accepted: notes heading candidate is followed by numbered accounting policy headings."
+            elif not accepted:
+                reason = "Rejected: candidate score is below acceptance threshold or lacks numbered note-heading support."
             candidates.append(
                 (
-                    score,
+                    score + (0.03 if follows_numbered_policy else 0),
                     {
                         "page": page.number,
                         "confidence": f"{score:.0%}",
                         "snippet": cleaned,
+                        "accepted": "Yes" if accepted else "No",
+                        "reason": reason,
                     },
                 )
             )
     candidates.sort(key=lambda item: item[0], reverse=True)
     return [candidate for _score, candidate in candidates]
+
+
+def _notes_candidate_search_start_page(document: PdfDocument) -> int:
+    if not document.ocr_used:
+        return 1
+    statement_pages = [page.number for page in _classified_primary_statement_pages(document).values()]
+    return min(max(statement_pages) + 1, max((page.number for page in document.pages), default=1)) if statement_pages else 1
+
+
+def _candidate_followed_by_numbered_policy(lines: list[str], index: int) -> bool:
+    nearby = "\n".join(lines[index : index + 8])
+    return bool(
+        re.search(
+            r"(?:^|\n)\s*(?:note\s+)?1[\).:\s-]+(?:significant\s+)?accounting polic",
+            nearby,
+            flags=re.I,
+        )
+        or re.search(r"(?:^|\n)\s*1[\).:\s-]+.{0,60}\n\s*2[\).:\s-]+", nearby, flags=re.I)
+    )
+
+
+def _notes_heading_candidate_rows(document: PdfDocument) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for candidate in _notes_heading_candidates(document, include_weak=True):
+        rows.append(
+            {
+                "Page": str(candidate["page"]),
+                "Raw OCR snippet": str(candidate["snippet"]),
+                "Similarity score": str(candidate["confidence"]),
+                "Accepted": str(candidate["accepted"]),
+                "Reason": str(candidate["reason"]),
+            }
+        )
+    return rows
 
 
 def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
@@ -1145,7 +1203,7 @@ def _suggest_checklist_areas(lower: str) -> str:
     suggestions = []
     if "revenue from contracts" in lower or "contract asset" in lower or "contract liability" in lower:
         suggestions.append("IFRS 15")
-    if any(term in lower for term in ("lease liability", "right-of-use asset", "right of use asset", "lease expense", "lease maturity", "depreciation of right-of-use", "depreciation of rou")):
+    if _actual_lease_disclosure_present(lower):
         suggestions.append("IFRS 16")
     if "investment property" in lower:
         suggestions.append("IAS 40")
@@ -3125,14 +3183,27 @@ def _accounting_policy_text(document: PdfDocument) -> str:
 def _accounting_policy_map(document: PdfDocument) -> dict[str, bool]:
     policy_text = _accounting_policy_text(document).lower()
     full_text = document.text.lower()
-    search_text = f"{policy_text}\n{full_text if 'revenue from contracts with customers' in full_text else ''}"
+    search_text = f"{policy_text}\n{full_text if _revenue_from_customers_policy_present(full_text) else ''}"
     detected: dict[str, bool] = {}
     for policy_name, rule in POLICY_RULES.items():
         detected[policy_name] = any(keyword in search_text for keyword in rule["policy"])
-    if re.search(r"revenue\s+from\s+contracts\s+with\s+customers", search_text, flags=re.I):
+    if _revenue_from_customers_policy_present(search_text):
         detected["revenue"] = True
     detected["leases"] = _lease_policy_applies(search_text)
     return detected
+
+
+def _revenue_from_customers_policy_present(text: str) -> bool:
+    normalized = _normalise_match_words(text)
+    if re.search(r"revenue\s+from\s+contracts?\s+with\s+customers?", text, flags=re.I):
+        return True
+    variants = (
+        "revenue from contracts with customers",
+        "revenue contracts customers",
+        "revenue from contract with customer",
+        "revenue contract customer",
+    )
+    return any(variant in normalized for variant in variants)
 
 
 def _lease_policy_applies(text: str) -> bool:
@@ -3141,6 +3212,15 @@ def _lease_policy_applies(text: str) -> bool:
 
 def _actual_lease_disclosure_present(text: str) -> bool:
     lower = text.lower()
+    generic_context_terms = (
+        "new standards",
+        "amendments",
+        "issued but not effective",
+        "effective for annual periods",
+        "standards and interpretations",
+        "deferred tax",
+        "amendments to ias",
+    )
     actual_lease_terms = (
         "right-of-use asset",
         "right of use asset",
@@ -3152,17 +3232,21 @@ def _actual_lease_disclosure_present(text: str) -> bool:
         "depreciation of rou",
         "leased asset",
     )
-    if any(term in lower for term in actual_lease_terms):
-        return True
-    if any(term in lower for term in ("new standards", "amendments", "issued but not effective", "effective for annual periods", "standards and interpretations")):
-        return False
+    for term in actual_lease_terms:
+        for match in re.finditer(re.escape(term), lower):
+            context = lower[max(0, match.start() - 160) : match.end() + 160]
+            if not any(generic in context for generic in generic_context_terms):
+                return True
     actual_arrangement_patterns = (
         r"\b(?:the\s+)?company\s+(?:has|entered into|leases|rents)\b.{0,120}\b(?:lease|leased|rental|premises|office|property)\b",
         r"\b(?:lease|rental)\s+arrangements?\b.{0,120}\b(?:company|premises|office|property|agreement|term)\b",
         r"\b(?:leased|rented)\s+(?:premises|office|property|building|warehouse)\b",
     )
-    if any(re.search(pattern, lower, flags=re.I | re.S) for pattern in actual_arrangement_patterns):
-        return True
+    for pattern in actual_arrangement_patterns:
+        for match in re.finditer(pattern, lower, flags=re.I | re.S):
+            context = lower[max(0, match.start() - 160) : match.end() + 160]
+            if not any(generic in context for generic in generic_context_terms):
+                return True
     return False
 
 
@@ -3285,7 +3369,7 @@ def _policy_evidence_present(policy_name: str, evidence_keywords: tuple[str, ...
 
 def _strong_policy_gap(policy_name: str, text: str) -> bool:
     if policy_name == "revenue":
-        if "revenue from contracts with customers" in text:
+        if _revenue_from_customers_policy_present(text):
             return False
         return "revenue" in text and not any(term in text for term in ("revenue is recognised", "revenue is recognized", "(m) revenue"))
     if policy_name == "leases":
@@ -3724,6 +3808,12 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
         lines = page.text.splitlines()
         for index, raw_line in enumerate(lines):
             line = raw_line.strip()
+            embedded = _embedded_note_heading_after_notes_title(line)
+            if embedded:
+                number, title = embedded
+                if _valid_note_heading(number, title):
+                    headings[number.upper()] = (_clean_note_title(title), page.number)
+                    continue
             match = NOTE_HEADING_RE.match(line)
             if match:
                 number, title = match.groups()
@@ -3738,6 +3828,15 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
                     headings[number.upper()] = (_clean_note_title(title), page.number)
             _add_combined_note_heading_candidates(headings, lines, index, line, page.number)
     return headings
+
+
+def _embedded_note_heading_after_notes_title(line: str) -> tuple[str, str] | None:
+    if _notes_heading_line_score(line) < 0.82:
+        return None
+    match = re.search(r"\b(1)\s*[\).:-]\s+(.{3,100})$", line, flags=re.I)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
 
 
 def _add_combined_note_heading_candidates(

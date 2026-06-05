@@ -129,6 +129,21 @@ def _note_heading_rows(result) -> list[dict[str, str]]:
     return rows
 
 
+def _notes_heading_candidate_rows(result) -> list[dict[str, str]]:
+    rows = result.metrics.get("notes_heading_candidates", [])
+    if isinstance(rows, list) and rows:
+        return [row for row in rows if isinstance(row, dict)]
+    return [
+        {
+            "Page": "",
+            "Raw OCR snippet": "No possible notes heading candidates detected.",
+            "Similarity score": "",
+            "Accepted": "No",
+            "Reason": "",
+        }
+    ]
+
+
 def _note_agreement_result_rows(result) -> list[dict[str, str]]:
     rows = result.metrics.get("note_agreement_results", [])
     if isinstance(rows, list):
@@ -238,6 +253,7 @@ def _build_excel_export(result) -> bytes:
         pd.DataFrame(check_results).to_excel(writer, sheet_name="Checks results", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
+        pd.DataFrame(_notes_heading_candidate_rows(result)).to_excel(writer, sheet_name="Possible notes headings", index=False)
         pd.DataFrame(_note_heading_rows(result)).to_excel(writer, sheet_name="Notes detected", index=False)
         pd.DataFrame(_ocr_statement_row_rows(result)).to_excel(writer, sheet_name="OCR statement rows", index=False)
         pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
@@ -253,6 +269,7 @@ def _build_excel_export(result) -> bytes:
         _format_exception_register_sheet(writer.book["Exception register"])
         _format_excel_table_sheet(writer.book["Note agreement results"], "NoteAgreementResults")
         _format_excel_table_sheet(writer.book["Checks results"], "ChecksResults")
+        _format_excel_table_sheet(writer.book["Possible notes headings"], "PossibleNotesHeadings")
         _format_excel_table_sheet(writer.book["OCR statement rows"], "OCRStatementRows")
     return output.getvalue()
 
