@@ -169,6 +169,7 @@ def _build_excel_export(result) -> bytes:
         {"Metric": "Note structure confidence", "Value": result.metrics.get("note_structure_confidence", "0%")},
         {"Metric": "Table arithmetic confidence", "Value": result.metrics.get("table_arithmetic_confidence", "0%")},
         {"Metric": "notes_section_start_page", "Value": result.metrics.get("notes_section_start_page", "Not detected")},
+        {"Metric": "notes_heading_snippet", "Value": result.metrics.get("notes_heading_snippet", "No reliable notes heading detected.")},
         {"Metric": "cautious_note_validation_enabled", "Value": result.metrics.get("cautious_note_validation_enabled", False)},
         {"Metric": "note_validation_mode", "Value": result.metrics.get("note_validation_mode", "skipped")},
         {"Metric": "note_reference_rows_detected", "Value": result.metrics.get("note_reference_rows_detected", 0)},
@@ -177,6 +178,9 @@ def _build_excel_export(result) -> bytes:
     ]
     checks_performed = [{"Check performed": item} for item in _metric_lines(result.metrics.get("checks_performed"), "No deterministic checks completed.")]
     checks_skipped = [{"Check skipped": item} for item in _metric_lines(result.metrics.get("checks_skipped"), "No major checks skipped.")]
+    check_results = result.metrics.get("check_results", [])
+    if not isinstance(check_results, list) or not check_results:
+        check_results = [{"Check": "No deterministic checks completed.", "Result": "Skipped", "Severity": "", "Evidence": ""}]
     detected_profile = result.metrics.get("detected_profile", {})
     profile_rows = [{"Field": key, "Detected value": value} for key, value in detected_profile.items()] if isinstance(detected_profile, dict) else []
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -231,6 +235,7 @@ def _build_excel_export(result) -> bytes:
             }
         ]
         pd.DataFrame(note_agreement_rows).to_excel(writer, sheet_name="Note agreement results", index=False)
+        pd.DataFrame(check_results).to_excel(writer, sheet_name="Checks results", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
         pd.DataFrame(_note_heading_rows(result)).to_excel(writer, sheet_name="Notes detected", index=False)
@@ -247,6 +252,7 @@ def _build_excel_export(result) -> bytes:
                 worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 70)
         _format_exception_register_sheet(writer.book["Exception register"])
         _format_excel_table_sheet(writer.book["Note agreement results"], "NoteAgreementResults")
+        _format_excel_table_sheet(writer.book["Checks results"], "ChecksResults")
         _format_excel_table_sheet(writer.book["OCR statement rows"], "OCRStatementRows")
     return output.getvalue()
 

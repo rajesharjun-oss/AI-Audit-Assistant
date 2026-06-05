@@ -1644,6 +1644,12 @@ def test_ocr_statement_rows_drive_partial_statement_checks(monkeypatch):
     assert "Statement of financial position: total assets checked from extracted asset rows." in result.metrics["checks_performed"]
     assert "Statement of financial position: equity and liabilities equation checked" in result.metrics["checks_performed"]
     assert "Statement-specific OCR checks were skipped" not in "\n".join(finding.issue for finding in result.findings)
+    assert result.metrics["checks_passed_count"] >= 2
+    check_results = result.metrics["check_results"]
+    assert any(
+        row["Result"] == "Passed" and "total assets" in row["Check"].lower()
+        for row in check_results
+    )
 
 
 def test_ocr_income_statement_runs_current_year_only_when_tax_row_has_one_amount(monkeypatch):
@@ -1677,6 +1683,9 @@ def test_ocr_income_statement_runs_current_year_only_when_tax_row_has_one_amount
     assert tax_findings
     assert all(finding.severity in {"Medium", "Low"} for finding in tax_findings)
     assert all("Possible mismatch from OCR line extraction" in finding.issue for finding in tax_findings)
+    assert "Loss/profit before taxation raw line" in tax_findings[0].evidence
+    assert "Taxation raw line" in tax_findings[0].evidence
+    assert "Extracted values" in tax_findings[0].evidence
 
 
 def test_ocr_statement_mismatches_are_review_prompts_not_high(monkeypatch):
