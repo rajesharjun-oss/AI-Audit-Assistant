@@ -479,7 +479,7 @@ def test_note_heading_detection_handles_combined_and_split_table_headings():
     assert headings["7"][0] == "Operating Revenue"
     assert headings["8"][0] == "Operating Expenditure"
     assert headings["10"][0] == "Office accommodation"
-    assert headings["11"][0] == "Personnel costs"
+    assert headings["11"][0] == "Staff costs"
     assert headings["16"][0] == "Inventories"
 
 
@@ -1035,6 +1035,20 @@ def test_ocr_note_headings_never_include_pages_before_notes_start_page():
     assert "11" not in headings
 
 
+def test_note_headings_are_not_overwritten_from_statement_references():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of profit or loss\nRevenue Note 13 707,189 297,041", []),
+            PdfPage(14, "Notes to the financial statements\n3 Investment property\n13 Revenue from contracts with customers", []),
+        ]
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["3"] == ("Investment property", 14)
+    assert headings["13"] == ("Revenue from contracts with customers", 14)
+
+
 def test_notes_start_page_requires_actual_notes_heading_not_front_matter_phrase(monkeypatch):
     document = PdfDocument(
         [
@@ -1478,6 +1492,55 @@ def test_ocr_statement_rows_ignore_title_and_date_lines(monkeypatch):
     assert "total equity and liabilities | 1,500,000 | 1,350,000" in rows
     assert "financial statements for the year ended" not in rows.lower()
     assert "Statement of financial position: equity and liabilities equation checked" in result.metrics["checks_performed"]
+
+
+def test_ocr_statement_rows_ignore_table_of_contents_pages(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Contents",
+                        "Statement of profit or loss ........ 10",
+                        "Statement of financial position .... 11",
+                        "Statement of changes in equity ..... 12",
+                        "Statement of cash flows ............ 13",
+                        "Equity 11",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                11,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Investment property 4,900,000 4,850,000",
+                        "Trade and other receivables 1,910,631 131,254",
+                        "Cash and cash equivalents 739,387 193,627",
+                        "Total assets 7,550,018 5,174,881",
+                        "Equity 2,193,626 619,139",
+                        "Financial liabilities 5,356,392 4,555,742",
+                        "Total equity and liabilities 7,550,018 5,174,881",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    rows = result.metrics["ocr_statement_rows"]
+
+    assert "equity | 11" not in rows.lower()
+    assert "Statement of financial position | Page 11" in rows
+    assert "financial liabilities | 5,356,392 | 4,555,742" in rows
 
 
 def test_ocr_sfp_statement_specific_checks_skip_low_confidence_rows():

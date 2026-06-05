@@ -959,7 +959,7 @@ def _suggest_checklist_areas(lower: str) -> str:
     suggestions = []
     if "revenue from contracts" in lower or "contract asset" in lower or "contract liability" in lower:
         suggestions.append("IFRS 15")
-    if any(term in lower for term in ("lease liability", "right-of-use", "right of use asset")):
+    if any(term in lower for term in ("lease liability", "right-of-use asset", "right of use asset", "lease expense", "lease maturity", "depreciation of right-of-use", "depreciation of rou")):
         suggestions.append("IFRS 16")
     if "investment property" in lower:
         suggestions.append("IAS 40")
@@ -1968,12 +1968,54 @@ def _classified_primary_statement_pages(document: PdfDocument) -> dict[str, PdfP
     classified: dict[str, PdfPage] = {}
     for page in document.pages:
         page_head = "\n".join(page.text.splitlines()[:60 if document.ocr_used else 18])
+        if _looks_like_contents_or_front_matter_page(page.text):
+            continue
         for canonical, candidates in aliases.items():
             if canonical in classified:
                 continue
-            if any(_fuzzy_contains(page_head, candidate) for candidate in candidates):
+            if any(_statement_heading_line_present(page_head, candidate) for candidate in candidates) and _page_has_statement_rows_for(canonical, page.text):
                 classified[canonical] = page
     return classified
+
+
+def _looks_like_contents_or_front_matter_page(text: str) -> bool:
+    head = "\n".join(text.splitlines()[:40]).lower()
+    if re.search(r"\b(table of )?contents\b", head):
+        return True
+    statement_mentions = len(re.findall(r"statement of (?:profit|financial|changes|cash|income|comprehensive)", head))
+    numeric_page_refs = len(re.findall(r"\.{2,}\s*\d{1,3}\b|\b\d{1,3}\s*$", head, flags=re.M))
+    front_terms = ("corporate information", "directors' report", "directors report", "independent auditor", "report of the directors")
+    return statement_mentions >= 2 and (numeric_page_refs >= 2 or any(term in head for term in front_terms))
+
+
+def _statement_heading_line_present(text: str, phrase: str) -> bool:
+    for line in text.splitlines()[:60]:
+        stripped = re.sub(r"\s+", " ", line.strip())
+        if not stripped or re.search(r"\.{2,}\s*\d{1,3}$", stripped):
+            continue
+        if re.search(r"\b(page|contents)\b", stripped, flags=re.I):
+            continue
+        normalized = _normalise_match_words(stripped)
+        normalized_phrase = _normalise_match_words(phrase)
+        if normalized_phrase in normalized and len(normalized.split()) <= len(normalized_phrase.split()) + 6:
+            return True
+        if _fuzzy_contains(stripped, phrase, threshold=0.82) and len(normalized.split()) <= len(normalized_phrase.split()) + 6:
+            return True
+    return False
+
+
+def _page_has_statement_rows_for(statement_name: str, text: str) -> bool:
+    rows = _statement_rows(text)
+    name = statement_name.lower()
+    if "financial position" in name:
+        return any(label in rows for label in ("total assets", "non-current assets", "current assets", "cash and cash equivalents", "trade and other receivables", "investment property", "financial liabilities", "total equity and liabilities"))
+    if "income" in name or "profit" in name:
+        return any(label in rows for label in ("revenue", "profit before tax", "taxation", "profit after tax", "operating revenue", "total income"))
+    if "cash flow" in name:
+        return any("cash" in label for label in rows)
+    if "changes" in name:
+        return bool(rows) or any("balance as at" in line.lower() for line in text.splitlines())
+    return bool(rows)
 
 
 def _fuzzy_contains(text: str, phrase: str, threshold: float = 0.78) -> bool:
@@ -3156,8 +3198,6 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
                 if _valid_note_heading(number, title):
                     headings[number.upper()] = (_clean_note_title(title), page.number)
             _add_combined_note_heading_candidates(headings, lines, index, line, page.number)
-    if strict_notes_start:
-        _augment_note_headings_from_statement_refs(headings, document)
     return headings
 
 
