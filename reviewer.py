@@ -1756,14 +1756,18 @@ def _looks_like_unformatted_amount(token: str) -> bool:
 def _financial_amount_contexts(document: PdfDocument) -> list[str]:
     contexts: list[str] = []
     for page in document.pages:
+        supplement_page = document.ocr_used and _is_post_notes_supplement_page(page.text)
         for table in page.tables:
-            if _classify_table_for_arithmetic(table)["can_run_arithmetic"] or _looks_like_statement_table(table):
+            classification = _classify_table_for_arithmetic(table)
+            if document.ocr_used and not classification["can_run_arithmetic"]:
+                continue
+            if classification["can_run_arithmetic"] or (not supplement_page and _looks_like_statement_table(table)):
                 contexts.extend(
                     line
                     for line in (" ".join(str(cell or "") for cell in row) for row in table)
                     if not _ignore_formatting_line(line)
                 )
-        if document.ocr_used and _is_post_notes_supplement_page(page.text):
+        if supplement_page:
             continue
         for line in page.text.splitlines():
             lower = line.lower()
@@ -3359,6 +3363,8 @@ def _label_matches(normalized_label: str, alias: str) -> bool:
 def _normalise_statement_number_spacing(line: str) -> str:
     line = re.sub(r"\((-?\d{1,3}),\s+(\d{3})\)", r"(\1,\2)", line)
     line = re.sub(r"\((-?\d{1,3})\s+(\d{3})\)", r"(\1,\2)", line)
+    line = re.sub(r"\b(\d{1,3})\.(\d{3})\b", r"\1,\2", line)
+    line = re.sub(r"\((-?\d{1,3})\.(\d{3})\)", r"(\1,\2)", line)
     cleaned = re.sub(r"(\d)\s+,", r"\1,", line)
     cleaned = re.sub(r"\b(\d)\s+(\d,\d{3})(?!,)", r"\1\2", cleaned)
     cleaned = re.sub(r"\b(\d)\s+(\d{2},\d{3})\b", r"\1\2", cleaned)
@@ -5385,6 +5391,19 @@ def _note_heading_title_is_structural(title: str) -> bool:
         "amounts due",
     )
     if any(term in title_lower for term in continuation_terms):
+        return False
+    risk_subheadings = (
+        "credit risk",
+        "liquidity risk",
+        "market risk",
+        "interest rate risk",
+        "currency risk",
+        "capital risk",
+        "fair value hierarchy",
+        "sensitivity analysis",
+        "maturity analysis",
+    )
+    if title_lower in risk_subheadings:
         return False
     policy_or_sentence_terms = (
         "accounted for",

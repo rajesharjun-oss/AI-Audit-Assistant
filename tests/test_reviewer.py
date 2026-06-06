@@ -185,6 +185,20 @@ def test_ocr_statement_row_parser_keeps_split_bracketed_current_year_amount():
     assert rows["profit after tax"].amounts == (Decimal("-448178"), Decimal("-120389"))
 
 
+def test_ocr_statement_amount_parser_normalizes_decimal_thousands_separator():
+    rows = reviewer._statement_row_parses(
+        "\n".join(
+            [
+                "Statement of profit or loss",
+                "Loss before taxation (173,516) (681,559)",
+                "Taxation 53.127 253.124",
+            ]
+        )
+    )
+
+    assert rows["taxation"].amounts == (Decimal("53127"), Decimal("253124"))
+
+
 def test_ocr_income_alignment_infers_missing_current_year_after_tax_from_prior_match():
     rows = reviewer._statement_row_parses(
         "\n".join(
@@ -1498,6 +1512,8 @@ def test_ocr_note_headings_keep_clear_note_lines_and_reject_noise():
                         "20 Related parties",
                         "21 Going concern",
                         "23 Financial instruments and risk management",
+                        "23 Credit risk",
+                        "23 Liquidity risk",
                         "24 This represents the advance payment made by customers",
                         "25 Financial instruments are accounted for at amortised cost",
                     ]
@@ -1534,6 +1550,32 @@ def test_ocr_note_headings_keep_clear_note_lines_and_reject_noise():
         "23": "Financial instruments and risk management",
     }
     assert {ref: title for ref, (title, _page) in headings.items()} == expected
+
+
+def test_ocr_note_headings_reject_financial_instrument_subheadings_without_replacing_main_heading():
+    document = PdfDocument(
+        [
+            PdfPage(
+                14,
+                "\n".join(
+                    [
+                        "Notes to the Financial Statements",
+                        "23 Financial instruments and risk management",
+                        "23 Credit risk",
+                        "23 Liquidity risk",
+                        "23 Market risk",
+                    ]
+                ),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings == {"23": ("Financial instruments and risk management", 14)}
 
 
 def test_ocr_notes_heading_accepts_repeating_report_header_with_numbered_policy(monkeypatch):
@@ -1771,6 +1813,29 @@ def test_ocr_formatting_ignores_financial_review_fragments_without_reliable_tabl
                 32,
                 "5 year financial review\nRevenue 13233 12000\nAssets 55555 44444\n",
                 [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings = check_formatting(document, CompanyProfile(reporting_currency="NGN"))
+
+    assert not any("thousands separators" in finding.issue.lower() for finding in findings)
+
+
+def test_ocr_formatting_ignores_low_confidence_summary_table_fragments():
+    document = PdfDocument(
+        [
+            PdfPage(
+                32,
+                "Five-year financial summary",
+                [
+                    [
+                        ["Revenue", "13233 12000"],
+                        ["Assets", "55555 44444"],
+                    ]
+                ],
             )
         ],
         ocr_used=True,
