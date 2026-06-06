@@ -784,6 +784,50 @@ def test_ocr_revenue_heading_prompt_stays_in_note_results_not_exception_register
     assert not any(finding.metadata and finding.metadata.get("line_item") == "Revenue" for finding in result.findings)
 
 
+def test_ocr_revenue_note_reference_does_not_suggest_weak_tenant_note(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of profit or loss\nRevenue Note 13 707,189 297,041", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n10B Tenant deposits\nTenant balances and rent deposits 707,189 297,041\n13 Investment property\nNarrative only\n"
+                + ("Additional OCR note text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Revenue")
+
+    assert row["Alternative note found"] == ""
+    assert row["Result"] == "Skipped"
+    assert not any(finding.metadata and finding.metadata.get("suggested_note") == "10B" for finding in result.findings)
+
+
+def test_revenue_amount_agreement_does_not_suggest_tenant_note_without_approved_heading(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of profit or loss\nRevenue Note 13 707,189 297,041", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n10B Tenant balances\nTenant rental balances 707,189 297,041\n13 Revenue\nNarrative only",
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Revenue")
+
+    assert row["Alternative note found"] == ""
+    assert not any(finding.metadata and finding.metadata.get("suggested_note") == "10B" for finding in result.findings)
+
+
 def test_cautious_face_to_note_amount_agreement_skips_non_face_linked_lines(monkeypatch):
     document = PdfDocument(
         [

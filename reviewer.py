@@ -4321,7 +4321,7 @@ def _check_possible_wrong_note_references(
             continue
         referenced = referenced or ""
         referenced_match = _note_match_strength(item, referenced_heading, referenced, tolerance)
-        referenced_heading_score = _wording_match_score(item.line_item, referenced_heading)
+        referenced_heading_score = max(_wording_match_score(item.line_item, referenced_heading), _semantic_heading_score(item.line_item, referenced_heading))
         best_ref = ""
         best_score = -1
         best_match: dict[str, bool] = {"wording": False, "amount": False}
@@ -4333,7 +4333,7 @@ def _check_possible_wrong_note_references(
             if not _alternative_note_semantically_allowed(item.line_item, headings.get(candidate_ref, ""), section):
                 continue
             match = _note_match_strength(item, headings.get(candidate_ref, ""), section, tolerance, all_sections=note_sections)
-            heading_score = _wording_match_score(item.line_item, headings.get(candidate_ref, ""))
+            heading_score = max(_wording_match_score(item.line_item, headings.get(candidate_ref, "")), _semantic_heading_score(item.line_item, headings.get(candidate_ref, "")))
             stronger_heading = heading_score >= 0.82 and heading_score > referenced_heading_score + 0.12
             if not (match["wording"] or match["amount"] or stronger_heading):
                 continue
@@ -4350,6 +4350,8 @@ def _check_possible_wrong_note_references(
         if referenced_match["wording"] and not best_match["amount"] and not (best_ref and best_heading_score > referenced_heading_score + 0.12):
             continue
         if not best_ref:
+            continue
+        if _is_revenue_line_item(item.line_item) and not (best_match["wording"] and best_match["amount"]):
             continue
         if cautious_review_prompt and best_match["amount"] and not best_match["wording"]:
             continue
@@ -4552,16 +4554,22 @@ def _alternative_note_for_missing_amounts(
     for ref, section in note_sections.items():
         if ref == item.ref or _is_disclosure_only_note(headings.get(ref, "")):
             continue
-        if not _alternative_note_semantically_allowed(item.line_item, headings.get(ref, ""), section):
+        heading = headings.get(ref, "")
+        if not _alternative_note_semantically_allowed(item.line_item, heading, section):
             continue
-        wording = _wording_match_score(item.line_item, headings.get(ref, ""))
-        if wording < 0.82:
+        wording = _wording_match_score(item.line_item, heading)
+        semantic_score = _semantic_heading_score(item.line_item, heading)
+        if _is_revenue_line_item(item.line_item) and not _revenue_alternative_heading_allowed(heading):
+            continue
+        if max(wording, semantic_score) < 0.82:
             continue
         count = sum(1 for amount in meaningful if _amount_match_in_section(amount, section, tolerance)["found"])
+        if _is_revenue_line_item(item.line_item) and count < min(2, len(meaningful)):
+            continue
         if count > best_count or (count == best_count and count > 0 and wording > best_wording):
             best_ref = ref
             best_count = count
-            best_wording = wording
+            best_wording = max(wording, semantic_score)
     return best_ref if best_count else ""
 
 
@@ -4589,8 +4597,7 @@ def _weak_semantic_alternative_note(
 def _semantic_heading_score(line_item: str, note_heading: str) -> float:
     item = _normalise_match_words(line_item)
     heading = _normalise_match_words(note_heading)
-    revenue_terms = ("revenue", "rental income", "rent income", "operating income", "income", "turnover", "sales")
-    if any(term in item for term in ("revenue", "income", "turnover", "sales")) and any(term in heading for term in revenue_terms):
+    if _is_revenue_line_item(item) and _revenue_alternative_heading_allowed(heading):
         return 0.86
     if any(term in item for term in ("cash", "bank", "cash equivalents")) and any(term in heading for term in ("cash", "bank", "cash equivalents")):
         return 0.86
@@ -4600,13 +4607,29 @@ def _semantic_heading_score(line_item: str, note_heading: str) -> float:
 def _alternative_note_semantically_allowed(line_item: str, note_heading: str, note_section: str = "") -> bool:
     item = _normalise_match_words(line_item)
     heading = _normalise_match_words(note_heading)
-    section = _normalise_match_words(note_section[:1200])
     if any(term in item for term in ("cash", "bank", "cash equivalents")):
         return any(term in heading for term in ("cash", "bank", "cash equivalents"))
-    if any(term in item for term in ("revenue", "income", "turnover", "sales")):
-        revenue_terms = ("revenue", "rental income", "rent income", "operating income", "income", "turnover", "sales")
-        return any(term in heading for term in revenue_terms) or any(term in section for term in revenue_terms)
+    if _is_revenue_line_item(item):
+        return _revenue_alternative_heading_allowed(heading)
     return True
+
+
+def _is_revenue_line_item(line_item: str) -> bool:
+    item = _normalise_match_words(line_item)
+    return any(term in item for term in ("revenue", "operating income", "turnover", "sales", "income from property", "rental income"))
+
+
+def _revenue_alternative_heading_allowed(note_heading: str) -> bool:
+    heading = _normalise_match_words(note_heading)
+    allowed = (
+        "revenue",
+        "rental income",
+        "operating income",
+        "turnover",
+        "income from property",
+        "other operating income",
+    )
+    return any(term in heading for term in allowed)
 
 
 def _amount_match_confidence(current_found: bool, prior_found: bool, alternative_ref: str, cautious_review_prompt: bool) -> str:
