@@ -1763,6 +1763,8 @@ def _financial_amount_contexts(document: PdfDocument) -> list[str]:
                     for line in (" ".join(str(cell or "") for cell in row) for row in table)
                     if not _ignore_formatting_line(line)
                 )
+        if document.ocr_used and _is_post_notes_supplement_page(page.text):
+            continue
         for line in page.text.splitlines():
             lower = line.lower()
             if _ignore_formatting_line(line):
@@ -2978,7 +2980,51 @@ def _statement_row_parses(text: str) -> dict[str, OcrStatementRow]:
         parsed = _parse_ocr_statement_row(line)
         if parsed and parsed.label and _statement_row_label_allowed(parsed.label):
             rows[parsed.label] = parsed
+    return _align_income_statement_columns(rows, text)
+
+
+def _align_income_statement_columns(rows: dict[str, OcrStatementRow], text: str) -> dict[str, OcrStatementRow]:
+    if not _text_has_two_year_columns(text):
+        return rows
+    before = rows.get("profit before tax")
+    tax = rows.get("taxation")
+    after = rows.get("profit after tax")
+    if not before or not tax or not after:
+        return rows
+    if len(before.amounts) < 2 or len(tax.amounts) < 2 or len(after.amounts) != 1:
+        return rows
+    expected_current = _expected_after_tax_amount(before.amounts[0], tax.amounts[0])
+    expected_prior = _expected_after_tax_amount(before.amounts[1], tax.amounts[1])
+    reported_single = after.amounts[0]
+    if abs(reported_single - expected_prior) > Decimal("1"):
+        return rows
+    rows = dict(rows)
+    rows["profit after tax"] = OcrStatementRow(
+        after.label,
+        (expected_current, reported_single),
+        after.raw_line,
+        after.note_ref,
+        "Low-Medium",
+        "Yes",
+        "Current-year profit/loss after tax inferred from before-tax and taxation rows because OCR captured only the prior-year amount.",
+    )
     return rows
+
+
+def _text_has_two_year_columns(text: str) -> bool:
+    years = sorted(set(YEAR_RE.findall(text)))
+    if len(years) >= 2:
+        return True
+    header_lines = "\n".join(text.splitlines()[:25])
+    return bool(re.search(r"\b20\d{2}\b.{0,40}\b20\d{2}\b", header_lines))
+
+
+def _expected_after_tax_amount(before_tax: Decimal, taxation: Decimal) -> Decimal:
+    if before_tax < 0:
+        return before_tax + taxation
+    if taxation < 0:
+        return before_tax + taxation
+    return before_tax - taxation
 
 
 def _statement_row_raw_lines(text: str) -> dict[str, str]:
@@ -4358,6 +4404,8 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
     for page in document.pages:
         if notes_start_page is not None and page.number < notes_start_page:
             continue
+        if notes_start_page is not None and page.number > notes_start_page and _is_post_notes_supplement_page(page.text):
+            break
         if strict_notes_start and _notes_heading_in_text(page.text):
             in_notes = True
         if strict_notes_start and not in_notes:
@@ -4369,22 +4417,35 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
             if embedded:
                 number, title = embedded
                 if _valid_note_heading(number, title):
-                    headings[number.upper()] = (_clean_note_title(title), page.number)
+                    headings.setdefault(number.upper(), (_clean_note_title(title), page.number))
                     continue
             match = NOTE_HEADING_RE.match(line)
             if match:
                 number, title = match.groups()
                 if _valid_note_heading(number, title):
-                    headings[number.upper()] = (_clean_note_title(title), page.number)
+                    headings.setdefault(number.upper(), (_clean_note_title(title), page.number))
                     continue
             number_only = NOTE_NUMBER_ONLY_RE.match(line)
             if number_only and index + 1 < len(lines):
                 number = number_only.group(1)
                 title = lines[index + 1].strip()
                 if _valid_note_heading(number, title):
-                    headings[number.upper()] = (_clean_note_title(title), page.number)
+                    headings.setdefault(number.upper(), (_clean_note_title(title), page.number))
             _add_combined_note_heading_candidates(headings, lines, index, line, page.number)
     return headings
+
+
+def _is_post_notes_supplement_page(text: str) -> bool:
+    head = _normalise_match_words("\n".join(text.splitlines()[:30]))
+    supplement_markers = (
+        "statement of value added",
+        "value added statement",
+        "five year financial summary",
+        "five year summary",
+        "5 year financial summary",
+        "financial summary",
+    )
+    return any(marker in head for marker in supplement_markers)
 
 
 def _embedded_note_heading_after_notes_title(line: str) -> tuple[str, str] | None:
@@ -5178,7 +5239,7 @@ def _valid_note_heading(number: str, title: str) -> bool:
         return False
     if re.search(r"[A-C]$", number) and not _suffixed_note_heading_title_is_structural(title_clean):
         return False
-    if title_lower.startswith(("to the", "are", "and", "for the year", "in thousands", "n'000")):
+    if title_lower.startswith(("to the", "notes to", "are", "and", "for the year", "in thousands", "n'000")):
         return False
     if title_lower.startswith(("financial statements for the year ended", "audited financial statements")):
         return False

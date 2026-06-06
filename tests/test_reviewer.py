@@ -185,6 +185,39 @@ def test_ocr_statement_row_parser_keeps_split_bracketed_current_year_amount():
     assert rows["profit after tax"].amounts == (Decimal("-448178"), Decimal("-120389"))
 
 
+def test_ocr_income_alignment_infers_missing_current_year_after_tax_from_prior_match():
+    rows = reviewer._statement_row_parses(
+        "\n".join(
+            [
+                "Statement of profit or loss",
+                "2022 2021",
+                "Loss before taxation (221,494) (173,516)",
+                "Taxation (226,684) 53,127",
+                "Loss for the year (120,389)",
+            ]
+        )
+    )
+
+    assert rows["profit after tax"].amounts == (Decimal("-448178"), Decimal("-120389"))
+    assert rows["profit after tax"].confidence == "Low-Medium"
+
+
+def test_ocr_income_alignment_does_not_infer_single_amount_without_prior_cast_match():
+    rows = reviewer._statement_row_parses(
+        "\n".join(
+            [
+                "Statement of profit or loss",
+                "2022 2021",
+                "Loss before taxation (221,494) (173,516)",
+                "Taxation (226,684) 53,127",
+                "Loss for the year (999,999)",
+            ]
+        )
+    )
+
+    assert rows["profit after tax"].amounts == (Decimal("-999999"),)
+
+
 def test_ocr_statement_row_parser_does_not_concatenate_two_digit_note_with_revenue():
     rows = reviewer._statement_row_parses("Statement of profit or loss\nRevenue 13 707,189 297,041")
 
@@ -1409,6 +1442,32 @@ def test_ocr_note_heading_rejects_amount_table_rows_after_notes_start():
     assert headings["2"] == ("Revenue", 14)
 
 
+def test_ocr_note_headings_stop_before_value_added_and_five_year_summary_pages():
+    document = PdfDocument(
+        [
+            PdfPage(14, "Notes to the Financial Statements\n1. Significant accounting policies\n7 Cash and cash equivalents", []),
+            PdfPage(31, "Statement of value added\n1 Depreciation 10,000 9,000\n7 Notes to the Financial Statements", []),
+            PdfPage(32, "Five-year financial summary\n8 Assets 13233 12000", []),
+        ],
+        ocr_used=True,
+        ocr_pages=3,
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["1"] == ("Significant accounting policies", 14)
+    assert headings["7"] == ("Cash and cash equivalents", 14)
+    assert "8" not in headings
+
+
+def test_note_heading_rejects_repeated_notes_header_as_title():
+    document = PdfDocument([PdfPage(14, "Notes to the Financial Statements\n7 Notes to the Financial Statements\n7 Cash and cash equivalents", [])])
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["7"] == ("Cash and cash equivalents", 14)
+
+
 def test_ocr_notes_heading_accepts_repeating_report_header_with_numbered_policy(monkeypatch):
     document = PdfDocument(
         [
@@ -1624,7 +1683,7 @@ def test_ocr_formatting_ignores_standalone_fragments_in_unstructured_summary():
         [
             PdfPage(
                 1,
-                "Five-year financial summary\nRevenue growth history\n13233\n2021 2022 2023\n",
+                "Five-year financial summary\nRevenue growth history\n13233\nRevenue 13233 12000\n2021 2022 2023\n",
                 [],
             )
         ],
