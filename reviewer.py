@@ -621,7 +621,8 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
         for score, candidate_type, cleaned, normalized, page_reason in _raw_page_notes_heading_candidates(page.text, include_weak):
             line_candidates = [line for line in lines if line.strip()]
             follows_numbered_policy = _candidate_followed_by_numbered_policy(line_candidates, 0) or _candidate_followed_by_numbered_policy([page.text], 0)
-            diagnostic_only = front_matter or _notes_candidate_diagnostic_only(cleaned, cleaned)
+            strong_notes_section = _strong_notes_section_candidate(score, candidate_type, normalized, follows_numbered_policy)
+            diagnostic_only = (front_matter and not strong_notes_section) or _notes_candidate_diagnostic_only(cleaned, cleaned)
             accepted = not diagnostic_only and (
                 score >= 0.9
                 or (score >= 0.82 and (follows_numbered_policy or candidate_type == "Accounting policies heading"))
@@ -740,6 +741,17 @@ def _raw_page_notes_heading_candidates(text: str, include_weak: bool = False) ->
                 )
             )
     return _dedupe_raw_notes_candidates(candidates)
+
+
+def _strong_notes_section_candidate(score: float, candidate_type: str, normalized: str, follows_numbered_policy: bool) -> bool:
+    if not follows_numbered_policy:
+        return False
+    if candidate_type == "Accounting policies heading":
+        return score >= 0.82 and "accounting" in normalized and "polic" in normalized
+    return score >= 0.9 and (
+        ("notes" in normalized and "financial" in normalized and "statement" in normalized)
+        or ("notes" in normalized and "accounts" in normalized)
+    )
 
 
 def _notes_page_snippet_score(normalized: str, candidate_type: str) -> float:
@@ -3429,17 +3441,23 @@ def _actual_lease_disclosure_present(text: str) -> bool:
     generic_context_terms = (
         "new standards",
         "new standard",
+        "new and amended standards",
+        "standards issued",
+        "standards issued but not effective",
         "amendments",
         "annual improvements",
         "issued but not effective",
         "effective for annual periods",
         "standards and interpretations",
+        "interpretations issued",
         "deferred tax",
         "amendments to ias",
+        "amendments to ifrs",
         "illustrative",
         "example",
         "examples",
         "transition",
+        "single transaction",
     )
     actual_lease_terms = (
         "right-of-use asset",

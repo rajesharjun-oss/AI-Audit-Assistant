@@ -1133,6 +1133,32 @@ def test_ocr_notes_start_page_uses_strong_heading_candidate_with_note_heading_on
     assert headings["1"] == ("Significant accounting policies", 14)
 
 
+def test_ocr_notes_heading_accepts_repeating_report_header_with_numbered_policy(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(3, "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90", []),
+            PdfPage(
+                14,
+                "Example Limited\nFinancial statements for the year ended 31 December 2025\n"
+                "Directors' and independent auditor's reports\n"
+                "Notes to the Financial Statements\n"
+                "1. Significant accounting policies\n2 Revenue\nRevenue 100 90",
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert result.metrics["notes_section_start_page"] == 14
+    assert result.metrics["note_structure_confidence"] != "0%"
+    assert any(row["Accepted"] == "Yes" and row["Page"] == "14" for row in result.metrics["notes_heading_candidates"])
+    assert _note_headings_by_page(document)["1"] == ("Significant accounting policies", 14)
+
+
 def test_ocr_notes_start_page_searches_raw_page_text_with_broken_lines(monkeypatch):
     document = PdfDocument(
         [
@@ -1630,6 +1656,25 @@ def test_ifrs_16_not_triggered_by_generic_deferred_tax_single_transaction_text()
                 1,
                 "Notes to the financial statements\nNew standards and amendments\n"
                 "Deferred tax related to assets and liabilities arising from a single transaction includes examples for right-of-use asset and lease liability.",
+                [],
+            )
+        ]
+    )
+
+    policy_findings = check_policy_relevance(document, CompanyProfile())
+    checklist_findings = check_standard_checklist(document, CompanyProfile())
+
+    assert not any("leases policy" in finding.issue.lower() for finding in policy_findings)
+    assert not any("IFRS 16" in finding.location for finding in checklist_findings)
+
+
+def test_ifrs_16_not_triggered_by_generic_new_and_amended_standards_text():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Notes to the financial statements\nNew and amended standards issued but not effective\n"
+                "The amendments to IFRS 16 discuss lease liability and right-of-use asset measurement examples.",
                 [],
             )
         ]
