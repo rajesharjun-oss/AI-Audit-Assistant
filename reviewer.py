@@ -856,6 +856,24 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
         for item in statement_lines:
             current_amount = item.amounts[0] if item.amounts else None
             prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+            if not item.amounts:
+                rows.append(
+                    _note_agreement_result_row(
+                        item,
+                        current_amount,
+                        prior_amount,
+                        "N/A",
+                        "N/A",
+                        "",
+                        "Low",
+                        "Skipped",
+                        "Skipped - no reliable statement amount was detected after excluding the note-reference column.",
+                        "",
+                        page_ranges.get(item.ref, ""),
+                        "",
+                    )
+                )
+                continue
             alternative_ref = _weak_semantic_alternative_note(item, headings, note_sections)
             alternative_heading = headings.get(alternative_ref, "") if alternative_ref else ""
             review_prompt = bool(alternative_ref) and _heading_only_alternative_is_review_prompt(item.line_item, alternative_heading)
@@ -892,6 +910,24 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     for item in statement_lines:
         current_amount = item.amounts[0] if item.amounts else None
         prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+        if not item.amounts:
+            rows.append(
+                _note_agreement_result_row(
+                    item,
+                    current_amount,
+                    prior_amount,
+                    "N/A",
+                    "N/A",
+                    "",
+                    "Low",
+                    "Skipped",
+                    "Skipped - no reliable statement amount was detected after excluding the note-reference column.",
+                    "",
+                    page_ranges.get(item.ref, ""),
+                    "",
+                )
+            )
+            continue
         skip_reason = _note_agreement_skip_reason(item)
         if skip_reason:
             rows.append(
@@ -4223,16 +4259,32 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     ref = explicit_ref or (implicit_match.group(1).upper() if implicit_match else "")
     if not ref or not _valid_note_number(ref):
         return None
-    amounts = tuple(_amounts_from_statement_line(line)[-2:])
-    if not amounts:
-        return None
     ref_start = note_match.start() if note_match else (implicit_match.start() if implicit_match else len(line))
+    ref_end = note_match.end() if note_match else (implicit_match.end() if implicit_match else ref_start)
     label = _clean_statement_line_item(line[:ref_start])
     if not label:
         return None
     if not note_match and _line_item_not_face_linked(label, statement_name):
         return None
+    parsed_amounts = _amounts_from_statement_line_excluding_note_ref(line, ref_start, ref_end)
+    if _amounts_look_like_note_reference_only(parsed_amounts, ref):
+        parsed_amounts = []
+    amounts = tuple(parsed_amounts[-2:])
     return StatementNoteLine(ref.upper(), label, line.strip(), amounts, page_number, statement_name, bool(note_match))
+
+
+def _amounts_from_statement_line_excluding_note_ref(line: str, ref_start: int, ref_end: int) -> list[Decimal]:
+    cleaned = f"{line[:ref_start]} {line[ref_end:]}"
+    return _amounts_from_statement_line(cleaned)
+
+
+def _amounts_look_like_note_reference_only(amounts: list[Decimal], ref: str) -> bool:
+    if len(amounts) != 1:
+        return False
+    match = re.fullmatch(r"(\d{1,2})[A-C]?", ref.upper())
+    if not match:
+        return False
+    return amounts[0] == Decimal(match.group(1))
 
 
 def _statement_name_from_page(text: str) -> str:
@@ -4861,6 +4913,10 @@ def _valid_note_heading(number: str, title: str) -> bool:
     title_lower = title_clean.lower()
     if not _valid_note_number(number):
         return False
+    if _note_heading_title_looks_narrative(title_clean):
+        return False
+    if re.search(r"[A-C]$", number) and not _suffixed_note_heading_title_is_structural(title_clean):
+        return False
     if title_lower.startswith(("to the", "are", "and", "for the year", "in thousands", "n'000")):
         return False
     if title_lower.startswith(("financial statements for the year ended", "audited financial statements")):
@@ -4890,6 +4946,37 @@ def _valid_note_heading(number: str, title: str) -> bool:
     if YEAR_RE.search(title_clean) and len(words) <= 4:
         return False
     return bool(re.search(r"[A-Za-z]{3,}", title_clean))
+
+
+def _note_heading_title_looks_narrative(title: str) -> bool:
+    title_lower = title.strip().lower()
+    narrative_starts = (
+        "this ",
+        "these ",
+        "the ",
+        "it ",
+        "represents",
+        "representing",
+        "being ",
+        "which ",
+        "where ",
+        "when ",
+    )
+    if title_lower.startswith(narrative_starts):
+        return True
+    if len(title.split()) > 12 and re.search(r"\b(represents?|comprises?|relates?|amounts?|advance payment|payment)\b", title_lower):
+        return True
+    return False
+
+
+def _suffixed_note_heading_title_is_structural(title: str) -> bool:
+    title_lower = title.strip().lower()
+    if not title_lower or _note_heading_title_looks_narrative(title):
+        return False
+    words = title.split()
+    if len(words) > 8:
+        return False
+    return bool(re.search(r"[A-Za-z]{3,}", title))
 
 
 def _valid_note_number(value: str) -> bool:

@@ -937,6 +937,26 @@ def test_cautious_face_to_note_amount_agreement_does_not_treat_amount_digits_as_
     assert not any("current assets references note 8" in finding.issue.lower() for finding in findings)
 
 
+def test_note_agreement_results_skip_rows_where_only_note_number_was_detected_as_amount(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nOther Financial Assets Note 6 6", []),
+            PdfPage(2, "Notes to the financial statements\n6 Other financial assets\nNarrative only", []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Other Financial Assets")
+
+    assert row["Referenced note"] == "6"
+    assert row["Current year amount"] == ""
+    assert row["Result"] == "Skipped"
+    assert "no reliable statement amount" in row["Reason"].lower()
+
+
 def test_review_pdf_reports_cautious_note_reference_override_as_performed(monkeypatch):
     noisy_table = [["Description", "2025", "2024"]]
     noisy_table.extend([["Line item", "100 90", ""] for _ in range(40)])
@@ -1055,6 +1075,23 @@ def test_note_heading_detection_rejects_report_furniture_and_entity_names():
     assert "7" not in headings
     assert headings["9"] == "_ Financial liabilities"
     assert headings["10"] == "Trade and other payables"
+
+
+def test_note_heading_detection_rejects_narrative_suffix_heading():
+    text = "\n".join(
+        [
+            "Notes to the financial statements",
+            "10A Advances from tenants",
+            "10B This represents the advance payment made by tenants for future rental periods",
+            "11 Trade and other payables",
+        ]
+    )
+
+    headings = _note_headings(text)
+
+    assert headings["10A"] == "Advances from tenants"
+    assert "10B" not in headings
+    assert headings["11"] == "Trade and other payables"
 
 
 def test_note_heading_detection_starts_after_notes_heading_when_present():
