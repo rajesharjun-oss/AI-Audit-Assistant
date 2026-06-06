@@ -2003,14 +2003,14 @@ def _checklist_item_applies(
     context: str,
     requested_areas: set[str],
 ) -> bool:
+    if item.standard == "IFRS 16":
+        return _actual_lease_disclosure_present(text)
     if item.area in requested_areas or item.standard.lower() in requested_areas:
         return True
     if item.standard == "IAS 33":
         return bool(re.search(r"\b(eps|earnings per share)\b", text))
     if item.standard == "IFRS 8":
         return "operating segment" in text or "segment revenue" in text or "chief operating decision maker" in text
-    if item.standard == "IFRS 16":
-        return _actual_lease_disclosure_present(text)
     if item.standard == "IAS 12":
         tax_balance_terms = ("tax expense", "current tax", "deferred tax", "tax payable", "income tax expense")
         return any(term in text for term in tax_balance_terms) and not _tax_exempt_context(text)
@@ -3463,6 +3463,7 @@ def _actual_lease_disclosure_present(text: str) -> bool:
         "right-of-use asset",
         "right of use asset",
         "rou asset",
+        "lease asset",
         "lease liability",
         "lease expense",
         "lease maturity",
@@ -3473,19 +3474,58 @@ def _actual_lease_disclosure_present(text: str) -> bool:
     for term in actual_lease_terms:
         for match in re.finditer(re.escape(term), lower):
             context = lower[max(0, match.start() - 160) : match.end() + 160]
-            if not any(generic in context for generic in generic_context_terms):
+            if any(generic in context for generic in generic_context_terms):
+                continue
+            if term in {"right-of-use asset", "right of use asset", "rou asset", "lease asset", "lease liability"} and not _lease_context_has_actual_evidence(context):
+                continue
+            if not _lease_context_is_theoretical_policy_only(context):
                 return True
     actual_arrangement_patterns = (
         r"\b(?:the\s+)?company\s+(?:has|entered into|leases|rents)\b.{0,120}\b(?:lease|leased|rental|premises|office|property)\b",
         r"\b(?:lease|rental)\s+arrangements?\b.{0,120}\b(?:company|premises|office|property|agreement|term)\b",
         r"\b(?:leased|rented)\s+(?:premises|office|property|building|warehouse)\b",
+        r"\b(?:finance|operating)\s+leases?\b.{0,120}\b(?:balance|liability|asset|expense|note|maturity|commitment|payment)\b",
     )
     for pattern in actual_arrangement_patterns:
         for match in re.finditer(pattern, lower, flags=re.I | re.S):
             context = lower[max(0, match.start() - 160) : match.end() + 160]
-            if not any(generic in context for generic in generic_context_terms):
+            if not any(generic in context for generic in generic_context_terms) and not _lease_context_is_theoretical_policy_only(context):
                 return True
     return False
+
+
+def _lease_context_has_actual_evidence(context: str) -> bool:
+    actual_terms = (
+        "balance",
+        "balances",
+        "carrying amount",
+        "current",
+        "non-current",
+        "non current",
+        "statement of financial position",
+        "expense",
+        "maturity",
+        "depreciation",
+        "addition",
+        "payment",
+        "commitment",
+    )
+    return any(term in context for term in actual_terms) or bool(NUMBER_RE.search(context))
+
+
+def _lease_context_is_theoretical_policy_only(context: str) -> bool:
+    theoretical_terms = (
+        "recognition of",
+        "measurement of",
+        "initial recognition",
+        "subsequent measurement",
+        "accounting policy",
+        "policy is applied",
+        "standard requires",
+    )
+    if not any(term in context for term in theoretical_terms):
+        return False
+    return not _lease_context_has_actual_evidence(context)
 
 
 def _check_superseded_standards(findings: list[Finding], document: PdfDocument) -> None:
@@ -3611,7 +3651,7 @@ def _strong_policy_gap(policy_name: str, text: str) -> bool:
             return False
         return "revenue" in text and not any(term in text for term in ("revenue is recognised", "revenue is recognized", "(m) revenue"))
     if policy_name == "leases":
-        return any(term in text for term in ("lease liability", "right-of-use asset", "right of use asset"))
+        return _actual_lease_disclosure_present(text)
     if policy_name == "tax":
         return any(term in text for term in ("tax expense", "deferred tax", "current tax", "tax payable")) and not _tax_exempt_context(text)
     return False

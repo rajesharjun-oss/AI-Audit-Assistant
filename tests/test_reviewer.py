@@ -1687,6 +1687,41 @@ def test_ifrs_16_not_triggered_by_generic_new_and_amended_standards_text():
     assert not any("IFRS 16" in finding.location for finding in checklist_findings)
 
 
+def test_ifrs_16_not_triggered_by_theoretical_lease_asset_liability_wording_even_if_forced():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Notes to the financial statements\nNew standards and deferred tax amendments\n"
+                "The recognition of a lease asset and lease liability may arise from theoretical IFRS 16 examples.",
+                [],
+            )
+        ]
+    )
+
+    policy_findings = check_policy_relevance(document, CompanyProfile())
+    checklist_findings = check_standard_checklist(document, CompanyProfile(checklist_areas=("IFRS 16",)))
+
+    assert not any("leases policy" in finding.issue.lower() for finding in policy_findings)
+    assert not any("IFRS 16" in finding.location for finding in checklist_findings)
+
+
+def test_ifrs_16_triggers_from_actual_lease_liability_amount():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Notes to the financial statements\nLease liabilities\nCurrent lease liability 125\nNon-current lease liability 430",
+                [],
+            )
+        ]
+    )
+
+    findings = check_standard_checklist(document, CompanyProfile())
+
+    assert any("IFRS 16" in finding.location for finding in findings)
+
+
 def test_ifrs_16_triggers_from_actual_lease_arrangement_disclosure():
     document = PdfDocument(
         [
