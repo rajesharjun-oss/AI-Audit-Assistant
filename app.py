@@ -114,7 +114,9 @@ def _note_heading_rows(result) -> list[dict[str, str]]:
                     "Note": parts[0].replace("Note ", "", 1).strip(),
                     "Page": parts[1].replace("Page ", "", 1).strip(),
                     "Page range": parts[2].strip(),
-                    "Heading": " | ".join(parts[3:]).strip(),
+                    "Heading": parts[3].strip(),
+                    "Confidence": parts[4].replace("Confidence:", "", 1).strip() if len(parts) >= 5 else "",
+                    "Source snippet": parts[5].replace("Source:", "", 1).strip() if len(parts) >= 6 else "",
                 }
             )
         elif len(parts) >= 3:
@@ -124,6 +126,8 @@ def _note_heading_rows(result) -> list[dict[str, str]]:
                     "Page": parts[1].replace("Page ", "", 1).strip(),
                     "Page range": parts[1].strip(),
                     "Heading": " | ".join(parts[2:]).strip(),
+                    "Confidence": "",
+                    "Source snippet": "",
                 }
             )
     return rows

@@ -1357,7 +1357,7 @@ def _detect_company_name(document: PdfDocument) -> str:
     for pattern in legal_name_patterns:
         match = re.search(pattern, first_pages, flags=re.I)
         if match:
-            return _title_preserving_acronyms(re.sub(r"\s+", " ", match.group(0)).strip(" -.,"))
+            return _clean_detected_company_name(re.sub(r"\s+", " ", match.group(0)).strip(" -.,"))
     for page in document.pages[:3]:
         for line in page.text.splitlines()[:12]:
             clean = re.sub(r"\s+", " ", line).strip(" -")
@@ -1366,8 +1366,14 @@ def _detect_company_name(document: PdfDocument) -> str:
             if re.search(r"financial statements|annual report|statement of|notes to", clean, re.I):
                 continue
             if clean.isupper() or re.search(r"\b(limited|ltd|plc|incorporated|institute|company|corporation)\b", clean, re.I):
-                return _title_preserving_acronyms(clean) if clean.isupper() else clean
+                return _clean_detected_company_name(clean)
     return "Not detected"
+
+
+def _clean_detected_company_name(name: str) -> str:
+    cleaned = re.sub(r"\s+", " ", name).strip(" -.,")
+    cleaned = re.sub(r"^(?:fl|fi|f1|l|i)\s+(?=[A-Z])", "", cleaned, flags=re.I)
+    return _title_preserving_acronyms(cleaned) if cleaned.isupper() else cleaned
 
 
 def _title_preserving_acronyms(text: str) -> str:
@@ -1714,7 +1720,8 @@ def check_formatting(document: PdfDocument, profile: CompanyProfile) -> list[Fin
     _check_required_statement_names(findings, document, profile)
     for page in document.pages:
         bad_separators = []
-        for line in _financial_amount_contexts(PdfDocument([page])):
+        page_document = PdfDocument([page], ocr_used=document.ocr_used)
+        for line in _financial_amount_contexts(page_document):
             if _ignore_formatting_line(line):
                 continue
             bad_separators.extend(
@@ -1760,6 +1767,10 @@ def _financial_amount_contexts(document: PdfDocument) -> list[str]:
             lower = line.lower()
             if _ignore_formatting_line(line):
                 continue
+            if document.ocr_used:
+                parsed_row = _parse_ocr_statement_row(line)
+                if not parsed_row or parsed_row.confidence == "Low":
+                    continue
             if len(NUMBER_RE.findall(line)) >= 2 and any(
                 keyword in lower
                 for keyword in (
@@ -3278,6 +3289,8 @@ def _label_matches(normalized_label: str, alias: str) -> bool:
 
 
 def _normalise_statement_number_spacing(line: str) -> str:
+    line = re.sub(r"\((-?\d{1,3}),\s+(\d{3})\)", r"(\1,\2)", line)
+    line = re.sub(r"\((-?\d{1,3})\s+(\d{3})\)", r"(\1,\2)", line)
     cleaned = re.sub(r"(\d)\s+,", r"\1,", line)
     cleaned = re.sub(r"\b(\d)\s+(\d,\d{3})(?!,)", r"\1\2", cleaned)
     cleaned = re.sub(r"\b(\d)\s+(\d{2},\d{3})\b", r"\1\2", cleaned)
@@ -4433,8 +4446,30 @@ def _format_note_heading_debug(document: PdfDocument) -> str:
     parts = []
     for ref in sorted(headings, key=_note_sort_key):
         title, page_number = headings[ref]
-        parts.append(f"Note {ref} | Page {page_number} | {page_ranges.get(ref, f'Page {page_number}')} | {title}")
+        confidence, source_snippet = _note_heading_source_detail(document, ref, title, page_number)
+        parts.append(
+            f"Note {ref} | Page {page_number} | {page_ranges.get(ref, f'Page {page_number}')} | {title} | {confidence} | {source_snippet}"
+        )
     return "\n".join(parts)
+
+
+def _note_heading_source_detail(document: PdfDocument, ref: str, title: str, page_number: int) -> tuple[str, str]:
+    page = next((item for item in document.pages if item.number == page_number), None)
+    if not page:
+        return "Confidence: Medium", "Source snippet unavailable."
+    normalized_title = _normalise_match_words(title)
+    for index, raw_line in enumerate(page.text.splitlines()):
+        line = re.sub(r"\s+", " ", raw_line.strip())
+        if not line:
+            continue
+        line_normalized = _normalise_match_words(line)
+        starts_with_ref = bool(re.match(rf"^\s*(?:note\s+)?{re.escape(ref)}(?:\s*[\).:-])?\s+", line, flags=re.I))
+        embedded_ref = ref == "1" and _notes_heading_line_score(line) >= 0.82 and "accounting polic" in line_normalized
+        if (starts_with_ref or embedded_ref) and normalized_title and normalized_title in line_normalized:
+            snippet = " ".join(item.strip() for item in page.text.splitlines()[max(0, index - 1) : index + 2] if item.strip())
+            confidence = "Confidence: High" if starts_with_ref or embedded_ref else "Confidence: Medium"
+            return confidence, f"Source: {snippet[:220]}"
+    return "Confidence: Medium", "Source: heading inferred from nearby notes-section text."
 
 
 def _statement_note_references(document: PdfDocument) -> set[str]:
@@ -5146,6 +5181,8 @@ def _valid_note_heading(number: str, title: str) -> bool:
     if title_lower.startswith(("to the", "are", "and", "for the year", "in thousands", "n'000")):
         return False
     if title_lower.startswith(("financial statements for the year ended", "audited financial statements")):
+        return False
+    if NUMBER_RE.search(title_clean):
         return False
     front_matter_terms = (
         "directors",

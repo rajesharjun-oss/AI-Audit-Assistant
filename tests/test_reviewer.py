@@ -170,6 +170,21 @@ def test_ocr_statement_row_parser_extracts_sfp_note_numbers_without_merging_amou
     assert rows["financial liabilities"].amounts == (Decimal("5356392"), Decimal("4555742"))
 
 
+def test_ocr_statement_row_parser_keeps_split_bracketed_current_year_amount():
+    rows = reviewer._statement_row_parses(
+        "\n".join(
+            [
+                "Statement of profit or loss",
+                "Loss before taxation (221,494) (173,516)",
+                "Taxation (226,684) 53,127",
+                "Loss for the year (448, 178) (120,389)",
+            ]
+        )
+    )
+
+    assert rows["profit after tax"].amounts == (Decimal("-448178"), Decimal("-120389"))
+
+
 def test_ocr_statement_row_parser_does_not_concatenate_two_digit_note_with_revenue():
     rows = reviewer._statement_row_parses("Statement of profit or loss\nRevenue 13 707,189 297,041")
 
@@ -256,6 +271,12 @@ def test_single_page_sfp_extract_runs_limited_scope_checks_without_full_afs_high
     assert "Statement of financial position: total assets checked from line-extracted rows." in result.metrics["checks_performed"]
     assert "Limited-scope review performed on Statement of Financial Position only." in memo
     assert "Full financial statement completeness" in result.metrics["checks_skipped"]
+
+
+def test_detected_company_name_removes_short_ocr_prefix():
+    document = PdfDocument([PdfPage(1, "Fl Funtierra Limited\nFinancial statements", [])])
+
+    assert infer_detected_profile(document)["Company name"] == "Funtierra Limited"
 
 
 def test_ocr_profit_or_loss_rows_are_parsed_with_fuzzy_labels():
@@ -1357,6 +1378,35 @@ def test_ocr_notes_start_page_uses_strong_heading_candidate_with_note_heading_on
     assert "Significant accounting policies" in snippet
     headings = _note_headings_by_page(document)
     assert headings["1"] == ("Significant accounting policies", 14)
+    debug = reviewer._format_note_heading_debug(document)
+    assert "Confidence:" in debug
+    assert "Source:" in debug
+
+
+def test_ocr_note_heading_rejects_amount_table_rows_after_notes_start():
+    document = PdfDocument(
+        [
+            PdfPage(
+                14,
+                "\n".join(
+                    [
+                        "Notes to the Financial Statements",
+                        "1. Significant accounting policies",
+                        "1 Taxation (226,684) 53,127",
+                        "2 Revenue",
+                    ]
+                ),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["1"] == ("Significant accounting policies", 14)
+    assert headings["2"] == ("Revenue", 14)
 
 
 def test_ocr_notes_heading_accepts_repeating_report_header_with_numbered_policy(monkeypatch):
@@ -1567,6 +1617,24 @@ def test_currency_check_ignores_generic_policy_currency_words():
     findings = check_formatting(document, CompanyProfile())
 
     assert not any("currency marker" in finding.issue.lower() for finding in findings)
+
+
+def test_ocr_formatting_ignores_standalone_fragments_in_unstructured_summary():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Five-year financial summary\nRevenue growth history\n13233\n2021 2022 2023\n",
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings = check_formatting(document, CompanyProfile(reporting_currency="NGN"))
+
+    assert not any("thousands separators" in finding.issue.lower() for finding in findings)
 
 
 def test_currency_normalization_accepts_naira_aliases_and_rejects_invalid_code():
