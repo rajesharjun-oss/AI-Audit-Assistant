@@ -1767,16 +1767,6 @@ def check_notes_agreement(
             )
             return findings
         if cautious_low_confidence and headings and _statement_note_lines(document):
-            findings.append(
-                Finding(
-                    "Extraction quality",
-                    "Low",
-                    "Notes agreement",
-                    "Heading-based note-reference validation was run in OCR review-prompt mode.",
-                    "Detailed OCR note amount agreement remains skipped because OCR can misread note tables and figures.",
-                    "Treat any OCR note-reference items as review prompts until confirmed against the signed financial statements.",
-                )
-            )
             return findings
         findings.append(
             Finding(
@@ -3318,6 +3308,7 @@ def _check_profit_tax_equation(
         closest = min(candidates, key=lambda candidate: abs(reported - candidate))
         issue = f"Profit/loss after tax should agree to profit/loss before tax adjusted for taxation. Column {index + 1}."
         if ocr_review:
+            corroboration = _ocr_income_corroboration_assessment(document, taxation[index] if index < len(taxation) else None, reported, tolerance)
             _check_ocr_scalar_equation(
                 findings,
                 page_number,
@@ -3326,7 +3317,9 @@ def _check_profit_tax_equation(
                 closest,
                 reported,
                 tolerance,
-                extra_evidence=_ocr_income_tax_debug(raw_lines or {}, before_tax, taxation, after_tax, document),
+                extra_evidence=_ocr_income_tax_debug(raw_lines or {}, before_tax, taxation, after_tax, document, corroboration),
+                confidence_override="Low" if corroboration.get("casts") else None,
+                issue_prefix="OCR conflict - manual confirmation required: " if corroboration.get("casts") else "",
             )
         else:
             _check_scalar_equation(findings, page_number, location, issue, closest, reported, tolerance)
@@ -3339,8 +3332,17 @@ def _ocr_income_tax_debug(
     taxation: list[Decimal],
     after_tax: list[Decimal],
     document: PdfDocument | None = None,
+    corroboration: dict[str, object] | None = None,
 ) -> str:
     corroborating = _ocr_income_corroborating_debug(document)
+    corroboration = corroboration or {}
+    correction_text = ""
+    if corroboration.get("casts"):
+        correction_text = (
+            " Corroboration assessment: related report/cash-flow values cast correctly using "
+            f"before tax={corroboration.get('before_tax')}, taxation={corroboration.get('taxation')}, "
+            f"after tax={corroboration.get('after_tax')}. Treat as OCR conflict until manually confirmed."
+        )
     return (
         " OCR source lines: "
         f"Loss/profit before taxation raw line: {raw_lines.get('profit before tax', 'Not captured')}; "
@@ -3348,6 +3350,7 @@ def _ocr_income_tax_debug(
         f"Loss/profit after taxation raw line: {raw_lines.get('profit after tax', 'Not captured')}. "
         f"Extracted values: before tax={_format_decimal_list(before_tax)}, taxation={_format_decimal_list(taxation)}, after tax={_format_decimal_list(after_tax)}."
         f"{corroborating}"
+        f"{correction_text}"
     )
 
 
@@ -3376,6 +3379,51 @@ def _ocr_income_corroborating_debug(document: PdfDocument | None) -> str:
     if not parts:
         return ""
     return " Corroborating OCR values from related report/cash-flow lines: " + " | ".join(parts) + "."
+
+
+def _ocr_income_corroboration_assessment(
+    document: PdfDocument | None,
+    primary_tax: Decimal | None,
+    primary_after_tax: Decimal | None,
+    tolerance: Decimal,
+) -> dict[str, object]:
+    if document is None or primary_tax is None or primary_after_tax is None:
+        return {"casts": False}
+    before_values = _corroborating_amount_values(document, ("loss before taxation", "loss before tax", "profit before taxation", "profit before tax"))
+    tax_values = _corroborating_amount_values(document, ("taxation", "tax credit", "tax expense"))
+    after_values = _corroborating_amount_values(document, ("loss after taxation", "loss after tax", "profit after taxation", "profit after tax"))
+    tax_candidates = tax_values or [primary_tax]
+    after_candidates = after_values or [primary_after_tax]
+    for before in before_values:
+        for tax in tax_candidates:
+            for after in after_candidates:
+                candidates = (before - tax, before + tax, before - abs(tax), before + abs(tax))
+                if any(abs(after - candidate) <= tolerance for candidate in candidates):
+                    return {
+                        "casts": True,
+                        "before_tax": f"{before:+,}",
+                        "taxation": f"{tax:+,}",
+                        "after_tax": f"{after:+,}",
+                    }
+    return {"casts": False}
+
+
+def _corroborating_amount_values(document: PdfDocument, phrases: tuple[str, ...]) -> list[Decimal]:
+    values: list[Decimal] = []
+    seen: set[Decimal] = set()
+    for page in document.pages:
+        for line in page.text.splitlines():
+            normalized = _normalise_match_words(line)
+            if not any(phrase in normalized for phrase in phrases):
+                continue
+            amounts = _amounts_from_statement_line(line)
+            if not amounts:
+                continue
+            value = amounts[0]
+            if value not in seen:
+                values.append(value)
+                seen.add(value)
+    return values
 
 
 def _format_decimal_list(values: list[Decimal]) -> str:
@@ -3458,10 +3506,23 @@ def _check_ocr_scalar_equation(
     reported: Decimal,
     tolerance: Decimal,
     extra_evidence: str = "",
+    confidence_override: str | None = None,
+    issue_prefix: str = "",
 ) -> None:
     if abs(reported - expected) <= tolerance:
         return
-    _add_ocr_arithmetic_finding(findings, page_number, location, issue, expected, reported, tolerance, extra_evidence=extra_evidence)
+    _add_ocr_arithmetic_finding(
+        findings,
+        page_number,
+        location,
+        issue,
+        expected,
+        reported,
+        tolerance,
+        extra_evidence=extra_evidence,
+        confidence_override=confidence_override,
+        issue_prefix=issue_prefix,
+    )
 
 
 def _add_ocr_arithmetic_finding(
@@ -3473,15 +3534,17 @@ def _add_ocr_arithmetic_finding(
     reported: Decimal,
     tolerance: Decimal,
     extra_evidence: str = "",
+    confidence_override: str | None = None,
+    issue_prefix: str = "",
 ) -> None:
     diff = reported - expected
-    confidence = "Medium" if abs(diff) > tolerance * 5 else "Low"
+    confidence = confidence_override or ("Medium" if abs(diff) > tolerance * 5 else "Low")
     findings.append(
         Finding(
             "Totals and rounding",
             confidence,
             f"Page {page_number} | {location}",
-            f"Possible mismatch from OCR line extraction: {_ocr_mismatch_issue(issue)}",
+            f"{issue_prefix}Possible mismatch from OCR line extraction: {_ocr_mismatch_issue(issue)}",
             f"Expected {expected:,}; reported {reported:,}; difference {diff:,}. OCR statement structure confidence is below the high-confidence threshold.{extra_evidence}",
             "Review the raw OCR statement rows against the signed financial statement before treating this as an exception.",
             {"confidence": "OCR review prompt", "check_type": "OCR statement arithmetic"},

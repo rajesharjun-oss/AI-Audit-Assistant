@@ -1249,6 +1249,23 @@ def test_review_pdf_does_not_report_ocr_note_validation_performed_without_notes_
     assert result.metrics["note_headings_detected"] == 0
 
 
+def test_ocr_note_validation_status_stays_out_of_exception_register(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nCash Note 7 100 90\n" + ("OCR statement context.\n" * 40), []),
+            PdfPage(2, "Notes to the financial statements\n7 Cash and cash equivalents\nCash 100 90\n" + ("OCR note context.\n" * 40), []),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert "Heading-based note-reference validation performed in OCR review-prompt mode." in result.metrics["checks_performed"]
+    assert not any("Heading-based note-reference validation was run" in finding.issue for finding in result.findings)
+
+
 def test_ocr_notes_start_page_accepts_fuzzy_notes_heading_variants():
     document = PdfDocument(
         [
@@ -2301,8 +2318,10 @@ def test_ocr_income_statement_prompt_includes_corroborating_report_values(monkey
     tax_findings = [finding for finding in result.findings if "Profit/loss after tax" in finding.issue]
 
     assert tax_findings
-    assert tax_findings[0].severity == "Medium"
+    assert tax_findings[0].severity == "Low"
+    assert tax_findings[0].issue.startswith("OCR conflict - manual confirmation required")
     assert "Corroborating OCR values" in tax_findings[0].evidence
+    assert "Corroboration assessment" in tax_findings[0].evidence
     assert "Page 1" in tax_findings[0].evidence
     assert "Page 3" in tax_findings[0].evidence
 
