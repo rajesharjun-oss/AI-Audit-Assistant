@@ -1468,6 +1468,74 @@ def test_note_heading_rejects_repeated_notes_header_as_title():
     assert headings["7"] == ("Cash and cash equivalents", 14)
 
 
+def test_ocr_note_headings_keep_clear_note_lines_and_reject_noise():
+    document = PdfDocument(
+        [
+            PdfPage(
+                14,
+                "\n".join(
+                    [
+                        "Notes to the Financial Statements",
+                        "1 Significant accounting policies",
+                        "The financial statements are prepared under IFRS",
+                        "3 Investment property",
+                        "Investment property is measured at fair value",
+                        "5 Trade and other receivables",
+                        "5 Trade and other receivables 1,910,631 131,254",
+                        "6 Other financial assets",
+                        "7 Notes to the Financial Statements",
+                        "7 Cash and cash equivalents",
+                        "8 Share capital",
+                        "9 Financial liabilities",
+                        "10 Trade and other payables",
+                        "12 Taxation",
+                        "13 Revenue",
+                        "14 Direct costs",
+                        "15 Other operating income",
+                        "16 Other operating gains",
+                        "17 Administrative expenses",
+                        "18 Finance cost",
+                        "20 Related parties",
+                        "21 Going concern",
+                        "23 Financial instruments and risk management",
+                        "24 This represents the advance payment made by customers",
+                        "25 Financial instruments are accounted for at amortised cost",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(31, "Statement of value added\n26 Depreciation 10,000 9,000", []),
+            PdfPage(32, "Five-year financial summary\n27 Revenue 13233 12000", []),
+        ],
+        ocr_used=True,
+        ocr_pages=3,
+    )
+
+    headings = _note_headings_by_page(document)
+
+    expected = {
+        "1": "Significant accounting policies",
+        "3": "Investment property",
+        "5": "Trade and other receivables",
+        "6": "Other financial assets",
+        "7": "Cash and cash equivalents",
+        "8": "Share capital",
+        "9": "Financial liabilities",
+        "10": "Trade and other payables",
+        "12": "Taxation",
+        "13": "Revenue",
+        "14": "Direct costs",
+        "15": "Other operating income",
+        "16": "Other operating gains",
+        "17": "Administrative expenses",
+        "18": "Finance cost",
+        "20": "Related parties",
+        "21": "Going concern",
+        "23": "Financial instruments and risk management",
+    }
+    assert {ref: title for ref, (title, _page) in headings.items()} == expected
+
+
 def test_ocr_notes_heading_accepts_repeating_report_header_with_numbered_policy(monkeypatch):
     document = PdfDocument(
         [

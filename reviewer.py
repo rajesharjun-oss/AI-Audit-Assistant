@@ -5307,6 +5307,8 @@ def _valid_note_heading(number: str, title: str) -> bool:
         return False
     if _note_heading_title_looks_narrative(title_clean):
         return False
+    if not _note_heading_title_is_structural(title_clean):
+        return False
     if re.search(r"[A-C]$", number) and not _suffixed_note_heading_title_is_structural(title_clean):
         return False
     if title_lower.startswith(("to the", "notes to", "are", "and", "for the year", "in thousands", "n'000")):
@@ -5361,6 +5363,56 @@ def _note_heading_title_looks_narrative(title: str) -> bool:
     if len(title.split()) > 12 and re.search(r"\b(represents?|comprises?|relates?|amounts?|advance payment|payment)\b", title_lower):
         return True
     return False
+
+
+def _note_heading_title_is_structural(title: str) -> bool:
+    title_clean = _clean_note_title(title)
+    title_lower = title_clean.lower().strip()
+    if not title_lower:
+        return False
+    words = re.findall(r"[A-Za-z&'-]+", title_clean)
+    if len(words) > 7:
+        return False
+    if re.search(r"[.;:]\s*$", title_clean):
+        return False
+    continuation_terms = (
+        "continued",
+        "brought forward",
+        "carried forward",
+        "for the year",
+        "as at",
+        "balances as",
+        "amounts due",
+    )
+    if any(term in title_lower for term in continuation_terms):
+        return False
+    policy_or_sentence_terms = (
+        "accounted for",
+        "recognised",
+        "recognized",
+        "measured",
+        "depreciated",
+        "amortised",
+        "amortized",
+        "provided",
+        "charged",
+        "classified",
+        "presented",
+        "disclosed",
+        "represents",
+        "comprises",
+        "relates",
+        "includes",
+        "shall",
+        "should",
+        "would",
+        "could",
+    )
+    if any(term in title_lower for term in policy_or_sentence_terms):
+        return False
+    if re.search(r"\b(?:is|are|was|were|has|have|had|will|may|can)\b", title_lower):
+        return False
+    return bool(re.search(r"[A-Za-z]{3,}", title_clean))
 
 
 def _suffixed_note_heading_title_is_structural(title: str) -> bool:
