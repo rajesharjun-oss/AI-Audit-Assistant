@@ -2515,8 +2515,48 @@ def test_ocr_income_statement_prompt_includes_corroborating_report_values(monkey
     assert tax_findings[0].issue.startswith("OCR conflict - manual confirmation required")
     assert "Corroborating OCR values" in tax_findings[0].evidence
     assert "Corroboration assessment" in tax_findings[0].evidence
+    assert "before tax=+1" not in tax_findings[0].evidence
+    assert "before tax=(173,516)" in tax_findings[0].evidence
     assert "Page 1" in tax_findings[0].evidence
     assert "Page 3" in tax_findings[0].evidence
+
+
+def test_ocr_income_incomplete_current_year_after_tax_uses_clear_manual_confirmation_wording(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Directors' report\nThe loss before taxation was (221,494). Taxation was (226,684). Loss after taxation was (448,178).",
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Statement of profit or loss",
+                        "Revenue 707,189 297,041",
+                        "Loss before taxation (221,494) (173,516)",
+                        "Taxation (226,684) 53,127",
+                        "Loss for the year (999,999)",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    tax_findings = [finding for finding in result.findings if "Profit/loss after tax" in finding.issue]
+
+    assert tax_findings
+    assert "Current-year loss after tax could not be confidently extracted from the primary statement row" in tax_findings[0].evidence
+    assert "corroborating lines indicate (448,178)" in tax_findings[0].evidence
+    assert "Manual confirmation required" in tax_findings[0].evidence
 
 
 def test_ocr_statement_mismatches_are_review_prompts_not_high(monkeypatch):

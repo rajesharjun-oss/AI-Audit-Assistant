@@ -2984,14 +2984,14 @@ def _statement_row_parses(text: str) -> dict[str, OcrStatementRow]:
 
 
 def _align_income_statement_columns(rows: dict[str, OcrStatementRow], text: str) -> dict[str, OcrStatementRow]:
-    if not _text_has_two_year_columns(text):
-        return rows
     before = rows.get("profit before tax")
     tax = rows.get("taxation")
     after = rows.get("profit after tax")
     if not before or not tax or not after:
         return rows
     if len(before.amounts) < 2 or len(tax.amounts) < 2 or len(after.amounts) != 1:
+        return rows
+    if not _text_has_two_year_columns(text) and not _row_set_has_two_amount_columns(before, tax):
         return rows
     expected_current = _expected_after_tax_amount(before.amounts[0], tax.amounts[0])
     expected_prior = _expected_after_tax_amount(before.amounts[1], tax.amounts[1])
@@ -3009,6 +3009,10 @@ def _align_income_statement_columns(rows: dict[str, OcrStatementRow], text: str)
         "Current-year profit/loss after tax inferred from before-tax and taxation rows because OCR captured only the prior-year amount.",
     )
     return rows
+
+
+def _row_set_has_two_amount_columns(*rows: OcrStatementRow) -> bool:
+    return all(len(row.amounts) >= 2 for row in rows)
 
 
 def _text_has_two_year_columns(text: str) -> bool:
@@ -3446,11 +3450,20 @@ def _ocr_income_tax_debug(
     corroboration = corroboration or {}
     correction_text = ""
     if corroboration.get("casts"):
-        correction_text = (
-            " Corroboration assessment: related report/cash-flow values cast correctly using "
-            f"before tax={corroboration.get('before_tax')}, taxation={corroboration.get('taxation')}, "
-            f"after tax={corroboration.get('after_tax')}. Treat as OCR conflict until manually confirmed."
-        )
+        if len(after_tax) < 2:
+            correction_text = (
+                " Current-year loss after tax could not be confidently extracted from the primary statement row, "
+                f"but corroborating lines indicate {_format_accounting_amount(corroboration.get('after_tax_value'))}. "
+                "Manual confirmation required."
+            )
+        else:
+            correction_text = (
+                " Corroboration assessment: related report/cash-flow values cast correctly using "
+                f"before tax={_format_accounting_amount(corroboration.get('before_tax_value'))}, "
+                f"taxation={_format_accounting_amount(corroboration.get('taxation_value'))}, "
+                f"after tax={_format_accounting_amount(corroboration.get('after_tax_value'))}. "
+                "Treat as OCR conflict until manually confirmed."
+            )
     return (
         " OCR source lines: "
         f"Loss/profit before taxation raw line: {raw_lines.get('profit before tax', 'Not captured')}; "
@@ -3509,9 +3522,9 @@ def _ocr_income_corroboration_assessment(
                 if any(abs(after - candidate) <= tolerance for candidate in candidates):
                     return {
                         "casts": True,
-                        "before_tax": f"{before:+,}",
-                        "taxation": f"{tax:+,}",
-                        "after_tax": f"{after:+,}",
+                        "before_tax_value": before,
+                        "taxation_value": tax,
+                        "after_tax_value": after,
                     }
     return {"casts": False}
 
@@ -3524,14 +3537,46 @@ def _corroborating_amount_values(document: PdfDocument, phrases: tuple[str, ...]
             normalized = _normalise_match_words(line)
             if not any(phrase in normalized for phrase in phrases):
                 continue
-            amounts = _amounts_from_statement_line(line)
+            amounts = _amounts_from_phrase_context(line, phrases)
             if not amounts:
                 continue
-            value = amounts[0]
+            usable_amounts = [amount for amount in amounts if abs(amount) >= Decimal("1000")]
+            if not usable_amounts:
+                continue
+            value = usable_amounts[0]
             if value not in seen:
                 values.append(value)
                 seen.add(value)
     return values
+
+
+def _amounts_from_phrase_context(line: str, phrases: tuple[str, ...]) -> list[Decimal]:
+    best_start: int | None = None
+    best_phrase_length = 0
+    lower_line = line.lower()
+    for phrase in phrases:
+        clean_phrase = phrase.strip().lower()
+        if not clean_phrase:
+            continue
+        for match in re.finditer(rf"\b{re.escape(clean_phrase)}\b", lower_line):
+            context_before = lower_line[max(0, match.start() - 24) : match.start()]
+            if clean_phrase == "taxation" and re.search(r"\b(before|after)\s+$", context_before):
+                continue
+            if best_start is None or match.start() < best_start or (match.start() == best_start and len(clean_phrase) > best_phrase_length):
+                best_start = match.start()
+                best_phrase_length = len(clean_phrase)
+            break
+    if best_start is None:
+        return _amounts_from_statement_line(line)
+    return _amounts_from_statement_line(line[best_start:])
+
+
+def _format_accounting_amount(value: object) -> str:
+    if not isinstance(value, Decimal):
+        return "not detected"
+    if value < 0:
+        return f"({abs(value):,})"
+    return f"{value:,}"
 
 
 def _format_decimal_list(values: list[Decimal]) -> str:
