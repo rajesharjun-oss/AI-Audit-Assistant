@@ -2572,13 +2572,31 @@ def _check_income_statement_text(
     expenditure = ("office accommodation costs", "personnel costs", "administrative costs", "finance expenses")
     if all(label in rows for label in ("revenue", "profit before tax", "taxation", "profit after tax")):
         raw_lines = _statement_row_raw_lines(page.text)
-        if _check_profit_tax_equation(
+        before_tax_amounts = _row_amounts(rows, "profit before tax")
+        taxation_amounts = _row_amounts(rows, "taxation")
+        after_tax_amounts = _row_amounts(rows, "profit after tax")
+        if ocr_review and len(before_tax_amounts) >= 2 and len(taxation_amounts) >= 2 and len(after_tax_amounts) < 2:
+            skip_message = "Skipped / OCR conflict - current-year after-tax value not confidently extracted."
+            corroboration = _ocr_income_corroboration_assessment(
+                document,
+                taxation_amounts[0],
+                after_tax_amounts[0] if after_tax_amounts else None,
+                tolerance,
+            )
+            if corroboration.get("casts"):
+                skip_message = (
+                    "Skipped / OCR conflict - current-year after-tax value not confidently extracted. "
+                    f"Corroborating lines indicate {_format_accounting_amount(corroboration.get('after_tax_value'))}. "
+                    "Manual confirmation required."
+                )
+            skipped.append(skip_message)
+        elif _check_profit_tax_equation(
             findings,
             page.number,
             "Income statement",
-            _row_amounts(rows, "profit before tax"),
-            _row_amounts(rows, "taxation"),
-            _row_amounts(rows, "profit after tax"),
+            before_tax_amounts,
+            taxation_amounts,
+            after_tax_amounts,
             tolerance,
             ocr_review=ocr_review,
             raw_lines=raw_lines,
@@ -4488,7 +4506,14 @@ def _is_post_notes_supplement_page(text: str) -> bool:
         "five year financial summary",
         "five year summary",
         "5 year financial summary",
+        "year financial summary",
         "financial summary",
+        "five year financial highlights",
+        "year financial highlights",
+        "financial highlights",
+        "five year financial review",
+        "year financial review",
+        "financial review",
     )
     return any(marker in head for marker in supplement_markers)
 

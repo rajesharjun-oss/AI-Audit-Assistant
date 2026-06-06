@@ -1696,6 +1696,24 @@ def test_ocr_formatting_ignores_standalone_fragments_in_unstructured_summary():
     assert not any("thousands separators" in finding.issue.lower() for finding in findings)
 
 
+def test_ocr_formatting_ignores_financial_review_fragments_without_reliable_table():
+    document = PdfDocument(
+        [
+            PdfPage(
+                32,
+                "5 year financial review\nRevenue 13233 12000\nAssets 55555 44444\n",
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+
+    findings = check_formatting(document, CompanyProfile(reporting_currency="NGN"))
+
+    assert not any("thousands separators" in finding.issue.lower() for finding in findings)
+
+
 def test_currency_normalization_accepts_naira_aliases_and_rejects_invalid_code():
     assert normalize_reporting_currency("NGN") == "NGN"
     assert normalize_reporting_currency("Naira") == "NGN"
@@ -2553,10 +2571,41 @@ def test_ocr_income_incomplete_current_year_after_tax_uses_clear_manual_confirma
     result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
     tax_findings = [finding for finding in result.findings if "Profit/loss after tax" in finding.issue]
 
-    assert tax_findings
-    assert "Current-year loss after tax could not be confidently extracted from the primary statement row" in tax_findings[0].evidence
-    assert "corroborating lines indicate (448,178)" in tax_findings[0].evidence
-    assert "Manual confirmation required" in tax_findings[0].evidence
+    assert not tax_findings
+    assert "current-year after-tax value not confidently extracted" in result.metrics["checks_skipped"]
+    assert "Corroborating lines indicate (448,178)" in result.metrics["checks_skipped"]
+    assert "Manual confirmation required" in result.metrics["checks_skipped"]
+
+
+def test_ocr_income_incomplete_after_tax_skips_arithmetic_instead_of_mixing_years(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of profit or loss",
+                        "Revenue 707,189 297,041",
+                        "Loss before taxation (221,494) (173,516)",
+                        "Taxation (226,684) 53,127",
+                        "Loss for the year (999,999)",
+                    ]
+                )
+                + "\n"
+                + ("Additional OCR statement text for coverage.\n" * 80),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+
+    assert "Skipped / OCR conflict - current-year after-tax value not confidently extracted." in result.metrics["checks_skipped"]
+    assert not any("Expected 5,190" in finding.evidence for finding in result.findings)
+    assert not any("reported -120,389" in finding.evidence for finding in result.findings)
 
 
 def test_ocr_statement_mismatches_are_review_prompts_not_high(monkeypatch):
