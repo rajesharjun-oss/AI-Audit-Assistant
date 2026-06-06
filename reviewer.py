@@ -857,9 +857,13 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
             current_amount = item.amounts[0] if item.amounts else None
             prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
             alternative_ref = _weak_semantic_alternative_note(item, headings, note_sections)
-            result = "Review prompt" if alternative_ref else "Skipped"
+            alternative_heading = headings.get(alternative_ref, "") if alternative_ref else ""
+            review_prompt = bool(alternative_ref) and _heading_only_alternative_is_review_prompt(item.line_item, alternative_heading)
+            result = "Review prompt" if review_prompt else "Skipped"
             reason = (
                 f"Heading-only OCR review prompt: Note {alternative_ref} appears semantically closer, but OCR note/table confidence is too low for an exception."
+                if review_prompt
+                else f"Low-confidence heading-only debug result: Note {alternative_ref} may be related, but amount support is not reliable enough for a review prompt."
                 if alternative_ref
                 else "Skipped because the document was OCR-assisted and note amount extraction is not reliable."
             )
@@ -876,7 +880,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                     reason,
                     "",
                     page_ranges.get(item.ref, ""),
-                    "heading match" if alternative_ref else "",
+                    "heading match" if review_prompt else "heading match debug" if alternative_ref else "",
                 )
             )
         return rows
@@ -4592,6 +4596,22 @@ def _weak_semantic_alternative_note(
             best_ref = ref
             best_score = score
     return best_ref
+
+
+def _heading_only_alternative_is_review_prompt(line_item: str, note_heading: str) -> bool:
+    if not _is_revenue_line_item(line_item):
+        return True
+    item = _normalise_match_words(line_item)
+    heading = _normalise_match_words(note_heading)
+    if not _revenue_alternative_heading_allowed(heading):
+        return False
+    if item in heading or heading in item:
+        return True
+    if item == "revenue" and re.search(r"\brevenue\b", heading):
+        return True
+    if "operating revenue" in item and any(term in heading for term in ("operating revenue", "operating income")):
+        return True
+    return False
 
 
 def _semantic_heading_score(line_item: str, note_heading: str) -> float:

@@ -780,8 +780,33 @@ def test_ocr_revenue_heading_prompt_stays_in_note_results_not_exception_register
 
     assert row["Alternative note found"] == "3"
     assert row["Match confidence"] == "Low"
-    assert row["Result"] == "Review prompt"
+    assert row["Result"] == "Skipped"
+    assert "debug" in row["Reason"].lower()
     assert not any(finding.metadata and finding.metadata.get("line_item") == "Revenue" for finding in result.findings)
+
+
+def test_ocr_revenue_heading_prompt_runs_for_direct_revenue_heading(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of profit or loss\nOther Revenue Note 7 307,482 189,751", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n7 Operating revenue\nRevenue 100 90\n9 Other Revenue\nOther Revenue 307,482 189,751\n"
+                + ("Additional OCR note text for coverage.\n" * 80),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Other Revenue")
+
+    assert row["Alternative note found"] == "9"
+    assert row["Result"] == "Review prompt"
+    assert result.metrics["note_reference_findings"] == 0
 
 
 def test_ocr_revenue_note_reference_does_not_suggest_weak_tenant_note(monkeypatch):
