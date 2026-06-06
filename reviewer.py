@@ -35,6 +35,17 @@ class StatementNoteLine:
     explicit_ref: bool = False
 
 
+@dataclass(frozen=True)
+class OcrStatementRow:
+    label: str
+    amounts: tuple[Decimal, ...]
+    raw_line: str
+    note_ref: str = ""
+    confidence: str = "High"
+    correction_applied: str = "No"
+    correction_reason: str = ""
+
+
 POLICY_RULES = {
     "revenue": {
         "policy": ("revenue recognition", "ifrs 15", "revenue from contracts"),
@@ -476,11 +487,25 @@ def _format_ocr_statement_rows_debug(document: PdfDocument) -> str:
         return "No OCR primary statement rows detected."
     rows: list[str] = []
     for statement_name, page in classified.items():
-        for label, amounts in _statement_rows(page.text).items():
-            amount_text = " | ".join(f"{amount:,}" for amount in amounts)
-            raw_line = _statement_row_raw_lines(page.text).get(label, "")
-            confidence, reason = _ocr_statement_row_confidence(label, raw_line, amounts)
-            rows.append(f"{statement_name} | Page {page.number} | {label} | {amount_text} | {raw_line} | {confidence} | {reason}")
+        for row in _statement_row_parses(page.text).values():
+            current_amount = row.amounts[0] if row.amounts else None
+            prior_amount = row.amounts[1] if len(row.amounts) >= 2 else None
+            rows.append(
+                " | ".join(
+                    (
+                        statement_name,
+                        f"Page {page.number}",
+                        row.label,
+                        row.note_ref,
+                        _format_decimal_for_export(current_amount),
+                        _format_decimal_for_export(prior_amount),
+                        row.raw_line,
+                        row.confidence,
+                        row.correction_applied,
+                        row.correction_reason,
+                    )
+                )
+            )
     return "\n".join(rows) if rows else "No OCR primary statement rows detected."
 
 
@@ -2890,38 +2915,121 @@ def _check_cash_flow_text(
 
 
 def _statement_rows(text: str) -> dict[str, list[Decimal]]:
-    rows: dict[str, list[Decimal]] = {}
+    return {label: list(row.amounts) for label, row in _statement_row_parses(text).items()}
+
+
+def _statement_row_parses(text: str) -> dict[str, OcrStatementRow]:
+    rows: dict[str, OcrStatementRow] = {}
     for line in text.splitlines():
-        amounts = _amounts_from_statement_line(line)
-        if len(amounts) < 1:
-            continue
-        label = _statement_label(line)
-        label = _canonical_statement_label(label)
-        if label and _statement_row_label_allowed(label):
-            rows[label] = amounts[-2:]
+        parsed = _parse_ocr_statement_row(line)
+        if parsed and parsed.label and _statement_row_label_allowed(parsed.label):
+            rows[parsed.label] = parsed
     return rows
 
 
 def _statement_row_raw_lines(text: str) -> dict[str, str]:
-    raw_lines: dict[str, str] = {}
-    for line in text.splitlines():
-        amounts = _amounts_from_statement_line(line)
-        if len(amounts) < 1:
+    return {label: row.raw_line for label, row in _statement_row_parses(text).items()}
+
+
+def _parse_ocr_statement_row(line: str) -> OcrStatementRow | None:
+    if not line.strip():
+        return None
+    raw_line = re.sub(r"\s+", " ", line).strip()
+    note_ref, ref_start, ref_end = _detect_statement_row_note_token(line)
+    label_source = line[:ref_start] if note_ref else line
+    label = _canonical_statement_label(_statement_label(label_source))
+    if not label:
+        return None
+    amount_source = f"{line[:ref_start]} {line[ref_end:]}" if note_ref else line
+    amount_tokens = _amount_tokens_from_statement_line(amount_source)
+    amounts = [_parse_decimal(token) for token in amount_tokens]
+    amounts = [amount for amount in amounts if amount is not None and abs(amount) < Decimal("100000000")]
+    correction_applied = "No"
+    correction_reason = ""
+    if note_ref and amounts:
+        corrected = _maybe_reconstruct_note_split_leading_digit(label, note_ref, amount_tokens, amounts)
+        if corrected:
+            amounts[0], correction_reason = corrected
+            correction_applied = "Yes"
+    if _amounts_look_like_note_reference_only(amounts, note_ref):
+        amounts = []
+        correction_reason = "Only numeric value matched the detected note reference; amount treated as unavailable."
+    if not amounts:
+        return None
+    parsed_amounts = tuple(amounts[-2:])
+    confidence, reason = _ocr_statement_row_confidence(label, raw_line, list(parsed_amounts), note_ref, correction_applied, correction_reason)
+    return OcrStatementRow(label, parsed_amounts, raw_line, note_ref, confidence, correction_applied, reason)
+
+
+def _detect_statement_row_note_token(line: str) -> tuple[str, int, int]:
+    for match in re.finditer(r"\b(?:note\s+)?(\d{1,2}[A-C]?)(?!\s*,)\b(?=\s+\(?-?\d)", line, flags=re.I):
+        ref = match.group(1).upper()
+        if not _valid_note_number(ref):
             continue
-        label = _canonical_statement_label(_statement_label(line))
-        if label and _statement_row_label_allowed(label):
-            raw_lines.setdefault(label, re.sub(r"\s+", " ", line).strip())
-    return raw_lines
+        explicit_note = bool(re.match(r"\s*note\b", match.group(0), flags=re.I))
+        tail = line[match.end() :]
+        if not explicit_note and re.fullmatch(r"\d", ref) and re.match(r"\s+\(?-?\d,\d{3}\b", tail):
+            continue
+        if len(_amount_tokens_from_statement_line(tail)) >= 1:
+            return ref, match.start(), match.end()
+    return "", len(line), len(line)
 
 
-def _ocr_statement_row_confidence(label: str, raw_line: str, amounts: list[Decimal]) -> tuple[str, str]:
+def _amount_tokens_from_statement_line(line: str) -> list[str]:
+    cleaned = _normalise_statement_number_spacing(line)
+    cleaned = re.sub(r"\s-\s+(?=\(?\s?\d)", " 0 ", cleaned)
+    return re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", cleaned)
+
+
+def _maybe_reconstruct_note_split_leading_digit(
+    label: str,
+    note_ref: str,
+    amount_tokens: list[str],
+    amounts: list[Decimal],
+) -> tuple[Decimal, str] | None:
+    if not amount_tokens or not amounts:
+        return None
+    if not re.fullmatch(r"\d", note_ref):
+        return None
+    if not _label_allows_note_split_digit_correction(label):
+        return None
+    first_token = amount_tokens[0].strip().strip("()")
+    if not re.fullmatch(r"\d{2},\d{3}", first_token):
+        return None
+    candidate = _parse_decimal(f"{note_ref}{first_token}")
+    if candidate is None:
+        return None
+    if len(amounts) >= 2 and amounts[0] >= amounts[1]:
+        return None
+    if candidate <= amounts[0]:
+        return None
+    return candidate, f"Reconstructed possible leading digit from note {note_ref} and OCR amount token {first_token}; treated as low-confidence."
+
+
+def _label_allows_note_split_digit_correction(label: str) -> bool:
+    lower_label = label.lower()
+    watched_labels = ("cash", "receivable", "revenue", "tax", "asset", "liabilit")
+    return any(term in lower_label for term in watched_labels)
+
+
+def _ocr_statement_row_confidence(
+    label: str,
+    raw_line: str,
+    amounts: list[Decimal],
+    note_ref: str = "",
+    correction_applied: str = "No",
+    correction_reason: str = "",
+) -> tuple[str, str]:
     if not raw_line:
         return "Low", "Raw OCR line not captured."
     normalized_line = _normalise_match_words(raw_line)
     if "#" in raw_line or "?" in raw_line:
         return "Low", "Unreadable OCR placeholder or uncertain character detected."
-    amount_tokens = re.findall(r"\(?-?\d[\d,\s]*\)?", raw_line)
-    if any(re.search(r"\d\s+\d", token) for token in amount_tokens):
+    if correction_applied == "Yes":
+        return "Low-Medium", correction_reason
+    if note_ref:
+        return "High", f"Detected note reference {note_ref}; amounts were parsed after excluding the note column."
+    if re.search(r"\d\s+,|,\s+\d|\b\d\s+\d{3}\b", raw_line):
         return "Low-Medium", "OCR amount contains internal spaces and may have required numeric normalization."
     if _looks_like_possible_missing_leading_digit(label, raw_line, amounts):
         return "Low-Medium", "Possible OCR correction candidate: amount may be missing a leading digit."

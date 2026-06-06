@@ -117,6 +117,48 @@ def test_statement_line_parser_handles_split_amounts_and_note_columns():
     ]
 
 
+def test_ocr_statement_row_parser_separates_note_number_from_amounts(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Share capital 8 10,000 10,000",
+                        "Cash and cash equivalents 7 39,387 193,627",
+                    ]
+                ),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    rows = reviewer._statement_row_parses(document.pages[0].text)
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    debug_rows = result.metrics["ocr_statement_rows"]
+
+    assert rows["share capital"].note_ref == "8"
+    assert rows["share capital"].amounts == (Decimal("10000"), Decimal("10000"))
+    assert rows["cash and cash equivalents"].note_ref == "7"
+    assert rows["cash and cash equivalents"].amounts == (Decimal("739387"), Decimal("193627"))
+    assert rows["cash and cash equivalents"].correction_applied == "Yes"
+    assert "share capital | 8 | 10,000 | 10,000" in debug_rows
+    assert "cash and cash equivalents | 7 | 739,387 | 193,627" in debug_rows
+    assert "Reconstructed possible leading digit" in debug_rows
+
+
+def test_ocr_statement_row_parser_does_not_concatenate_two_digit_note_with_revenue():
+    rows = reviewer._statement_row_parses("Statement of profit or loss\nRevenue 13 707,189 297,041")
+
+    assert rows["revenue"].note_ref == "13"
+    assert rows["revenue"].amounts == (Decimal("707189"), Decimal("297041"))
+    assert rows["revenue"].correction_applied == "No"
+
+
 def test_primary_statement_checks_run_from_line_text_when_tables_are_low_confidence():
     document = PdfDocument(
         [
@@ -2069,15 +2111,15 @@ def test_ocr_statement_rows_ignore_title_and_date_lines(monkeypatch):
     result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
     rows = result.metrics["ocr_statement_rows"]
 
-    assert "revenue | 707,189 | 297,041" in rows
-    assert "profit before tax | -173,516 | -681,559" in rows
-    assert "taxation | 253,124" in rows
-    assert "profit after tax | -120,389 | -428,435" in rows
-    assert "non-current assets | 1,200,000 | 1,100,000" in rows
-    assert "trade and other receivables | 1,910,631 | 131,254" in rows
-    assert "cash and cash equivalents | 739,387 | 193,627" in rows
-    assert "financial liabilities | 5,356,392 | 4,555,742" in rows
-    assert "total equity and liabilities | 1,500,000 | 1,350,000" in rows
+    assert "revenue |  | 707,189 | 297,041" in rows
+    assert "profit before tax |  | -173,516 | -681,559" in rows
+    assert "taxation |  | 253,124" in rows
+    assert "profit after tax |  | -120,389 | -428,435" in rows
+    assert "non-current assets |  | 1,200,000 | 1,100,000" in rows
+    assert "trade and other receivables |  | 1,910,631 | 131,254" in rows
+    assert "cash and cash equivalents |  | 739,387 | 193,627" in rows
+    assert "financial liabilities |  | 5,356,392 | 4,555,742" in rows
+    assert "total equity and liabilities |  | 1,500,000 | 1,350,000" in rows
     assert "financial statements for the year ended" not in rows.lower()
     assert "Statement of financial position: equity and liabilities equation checked" in result.metrics["checks_performed"]
 
@@ -2128,7 +2170,7 @@ def test_ocr_statement_rows_ignore_table_of_contents_pages(monkeypatch):
 
     assert "equity | 11" not in rows.lower()
     assert "Statement of financial position | Page 11" in rows
-    assert "financial liabilities | 5,356,392 | 4,555,742" in rows
+    assert "financial liabilities |  | 5,356,392 | 4,555,742" in rows
 
 
 def test_ocr_statement_rows_drive_partial_statement_checks(monkeypatch):

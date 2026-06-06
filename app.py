@@ -156,20 +156,39 @@ def _ocr_statement_row_rows(result) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for line in _metric_lines(result.metrics.get("ocr_statement_rows"), "No OCR primary statement rows detected."):
         parts = [part.strip() for part in line.split("|")]
-        if len(parts) >= 4:
+        if len(parts) >= 10:
+            rows.append(
+                {
+                    "Statement": parts[0],
+                    "Page": parts[1].replace("Page ", "", 1).strip(),
+                    "Line item": parts[2],
+                    "Note detected": parts[3],
+                    "Current year amount": parts[4],
+                    "Prior year amount": parts[5],
+                    "Raw OCR line": parts[6],
+                    "Parse confidence": parts[7],
+                    "Correction applied?": parts[8],
+                    "Correction reason": parts[9],
+                }
+            )
+        elif len(parts) >= 4:
             has_confidence = len(parts) >= 7
             rows.append(
                 {
                     "Statement": parts[0],
                     "Page": parts[1].replace("Page ", "", 1).strip(),
                     "Line item": parts[2],
+                    "Note detected": "",
+                    "Current year amount": "",
+                    "Prior year amount": "",
                     "Amounts": " | ".join(parts[3:-3]) if has_confidence else (" | ".join(parts[3:-1]) if len(parts) >= 5 else parts[3]),
                     "Raw OCR line": parts[-3] if has_confidence else (parts[-1] if len(parts) >= 5 else ""),
-                    "Row confidence": parts[-2] if has_confidence else "",
-                    "Confidence reason": parts[-1] if has_confidence else "",
+                    "Parse confidence": parts[-2] if has_confidence else "",
+                    "Correction applied?": "",
+                    "Correction reason": parts[-1] if has_confidence else "",
                 }
             )
-    return rows or [{"Statement": "", "Page": "", "Line item": "No OCR primary statement rows detected.", "Amounts": "", "Raw OCR line": "", "Row confidence": "", "Confidence reason": ""}]
+    return rows or [{"Statement": "", "Page": "", "Line item": "No OCR primary statement rows detected.", "Note detected": "", "Current year amount": "", "Prior year amount": "", "Raw OCR line": "", "Parse confidence": "", "Correction applied?": "", "Correction reason": ""}]
 
 
 def _build_excel_export(result) -> bytes:
