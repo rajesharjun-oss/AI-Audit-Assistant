@@ -144,11 +144,30 @@ def test_ocr_statement_row_parser_separates_note_number_from_amounts(monkeypatch
     assert rows["share capital"].note_ref == "8"
     assert rows["share capital"].amounts == (Decimal("10000"), Decimal("10000"))
     assert rows["cash and cash equivalents"].note_ref == "7"
-    assert rows["cash and cash equivalents"].amounts == (Decimal("739387"), Decimal("193627"))
-    assert rows["cash and cash equivalents"].correction_applied == "Yes"
+    assert rows["cash and cash equivalents"].amounts == (Decimal("39387"), Decimal("193627"))
+    assert rows["cash and cash equivalents"].correction_applied == "No"
     assert "share capital | 8 | 10,000 | 10,000" in debug_rows
-    assert "cash and cash equivalents | 7 | 739,387 | 193,627" in debug_rows
-    assert "Reconstructed possible leading digit" in debug_rows
+    assert "cash and cash equivalents | 7 | 39,387 | 193,627" in debug_rows
+
+
+def test_ocr_statement_row_parser_extracts_sfp_note_numbers_without_merging_amounts():
+    rows = reviewer._statement_row_parses(
+        "\n".join(
+            [
+                "Statement of financial position",
+                "Investment property 3 4,072,229 4,112,524",
+                "Trade and other receivables 5 1,910,631 131,254",
+                "Financial liabilities 9 5,356,392 4,555,742",
+            ]
+        )
+    )
+
+    assert rows["investment property"].note_ref == "3"
+    assert rows["investment property"].amounts == (Decimal("4072229"), Decimal("4112524"))
+    assert rows["trade and other receivables"].note_ref == "5"
+    assert rows["trade and other receivables"].amounts == (Decimal("1910631"), Decimal("131254"))
+    assert rows["financial liabilities"].note_ref == "9"
+    assert rows["financial liabilities"].amounts == (Decimal("5356392"), Decimal("4555742"))
 
 
 def test_ocr_statement_row_parser_does_not_concatenate_two_digit_note_with_revenue():
@@ -195,6 +214,48 @@ def test_primary_statement_checks_run_from_line_text_when_tables_are_low_confide
     assert findings == []
     assert any("total income checked" in item for item in performed)
     assert any("total expenditure checked" in item for item in performed)
+
+
+def test_single_page_sfp_extract_runs_limited_scope_checks_without_full_afs_highs(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Funtierra Limited",
+                        "Statement of Financial Position",
+                        "As at 31 December 2025",
+                        "N’000",
+                        "Non-current assets 4,072,229 4,112,524",
+                        "Current assets 2,160,355 324,881",
+                        "Total assets 6,232,584 4,437,405",
+                        "Equity 876,192 (118,337)",
+                        "Liabilities 5,356,392 4,555,742",
+                        "Total equity and liabilities 6,232,584 4,437,405",
+                        "Statement extract detail " * 60,
+                    ]
+                ),
+                [],
+            )
+        ],
+        ocr_used=True,
+        ocr_pages=1,
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    memo = build_ai_review_memo(result)
+
+    assert result.metrics["document_scope"] == "Limited-scope statement extract"
+    assert result.metrics["detected_profile"]["Document scope"] == "Limited-scope statement extract"
+    assert result.metrics["detected_profile"]["Currency"] == "NGN / N'000"
+    assert result.metrics["high"] == 0
+    assert not any("IAS 1" in finding.location for finding in result.findings)
+    assert any(finding.category == "Document scope" for finding in result.findings)
+    assert "Statement of financial position: total assets checked from line-extracted rows." in result.metrics["checks_performed"]
+    assert "Limited-scope review performed on Statement of Financial Position only." in memo
+    assert "Full financial statement completeness" in result.metrics["checks_skipped"]
 
 
 def test_ocr_profit_or_loss_rows_are_parsed_with_fuzzy_labels():
@@ -1513,6 +1574,11 @@ def test_currency_normalization_accepts_naira_aliases_and_rejects_invalid_code()
     assert normalize_reporting_currency("Naira") == "NGN"
     assert normalize_reporting_currency("₦") == "NGN"
     assert normalize_reporting_currency("N’000") == "NGN"
+    assert normalize_reporting_currency("N '000") == "NGN"
+    assert normalize_reporting_currency("N ‘000") == "NGN"
+    assert normalize_reporting_currency("₦’000") == "NGN"
+    assert normalize_reporting_currency("NGN’000") == "NGN"
+    assert normalize_reporting_currency("NGN / N'000") == "NGN"
     assert normalize_reporting_currency("N000") == "NGN"
     assert normalize_reporting_currency("NGB") == ""
 
@@ -1532,7 +1598,7 @@ def test_detected_profile_infers_upload_only_context():
 
     assert profile["Company name"] == "National Institute of Professional Administrators of Nigeria"
     assert profile["Year end"] == "December 31, 2025"
-    assert profile["Currency"] == "NGN"
+    assert profile["Currency"] == "NGN / N'000"
     assert profile["Framework"] == "IFRS"
     assert "professional body" in profile["Entity type"].lower()
     assert profile["Principal activities"] == "Professional membership body, including member services, professional development, training, and certification."

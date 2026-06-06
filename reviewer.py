@@ -267,8 +267,19 @@ def review_pdf(
     checks_performed: list[str] = []
     checks_skipped: list[str] = []
     note_validation_debug = _note_validation_debug(document, options.run_cautious_note_agreement, [])
-    findings.extend(check_extraction_quality(document))
-    if _requires_ocr(document):
+    document_scope = _document_scope(document)
+    limited_scope_extract = document_scope == "Limited-scope statement extract"
+    quality_findings = check_extraction_quality(document)
+    if limited_scope_extract:
+        quality_findings = [
+            finding
+            for finding in quality_findings
+            if "scanned or image-based" not in finding.issue.lower()
+        ]
+    findings.extend(quality_findings)
+    if limited_scope_extract:
+        findings.append(_limited_scope_extract_finding(document))
+    if _requires_ocr(document) and not limited_scope_extract:
         checks_skipped.append("Primary statement checks skipped because PDF extraction is unreliable.")
         if options.run_cautious_note_agreement and not _notes_start_page(document):
             checks_skipped.append("OCR note-reference validation skipped because the notes section start was not detected.")
@@ -279,7 +290,11 @@ def review_pdf(
     statement_findings, statement_performed, statement_skipped = check_primary_statement_consistency(document)
     findings.extend(statement_findings)
     checks_performed.extend(statement_performed)
-    checks_skipped.extend(statement_skipped)
+    checks_skipped.extend(_limited_scope_statement_skips(statement_skipped) if limited_scope_extract else statement_skipped)
+    if limited_scope_extract:
+        checks_performed.append("Limited-scope review performed on Statement of Financial Position only.")
+        checks_skipped.append("Full financial statement completeness, standards checklist, policies, formatting, and note agreement skipped because the upload is a limited-scope statement extract.")
+        return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug)
     totals_findings = check_totals_and_rounding(document)
     findings.extend(totals_findings)
     findings.extend(check_formatting(document, profile))
@@ -318,6 +333,35 @@ def review_pdf(
     return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug)
 
 
+def _document_scope(document: PdfDocument) -> str:
+    return "Limited-scope statement extract" if _is_limited_scope_statement_extract(document) else "Full financial statement or mixed upload"
+
+
+def _is_limited_scope_statement_extract(document: PdfDocument) -> bool:
+    classified = _classified_primary_statement_pages(document)
+    if len(document.pages) != 1 or len(classified) != 1:
+        return False
+    if "Statement of financial position" not in classified:
+        return False
+    return _notes_start_page(document) is None and not _note_headings_by_page(document)
+
+
+def _limited_scope_extract_finding(document: PdfDocument) -> Finding:
+    page_text = document.pages[0].text if document.pages else ""
+    return Finding(
+        "Document scope",
+        "Low",
+        "Upload scope",
+        "Only a Statement of Financial Position page was uploaded.",
+        _snippet_around(page_text, "statement of financial position") or "Single primary statement page detected with no notes section.",
+        "Only a Statement of Financial Position page was uploaded. Full financial statement completeness and note-agreement checks were not performed.",
+    )
+
+
+def _limited_scope_statement_skips(skipped: list[str]) -> list[str]:
+    return [item for item in skipped if "financial position" in item.lower()]
+
+
 def _build_result(
     document: PdfDocument,
     findings: list[Finding],
@@ -331,6 +375,7 @@ def _build_result(
     positive_assurance = _positive_assurance_text(findings, checks_performed_list)
     note_validation_debug = note_validation_debug or _note_validation_debug(document, False, [])
     metrics = {
+        "document_scope": _document_scope(document),
         "pages": len(document.pages),
         "text_pages": document.text_pages,
         "text_chars": document.text_chars,
@@ -1293,6 +1338,7 @@ def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
         "Currency": _detect_currency(text),
         "Framework": _detect_framework(text),
         "Entity type": entity_type,
+        "Document scope": _document_scope(document),
         "Principal activities": _detect_principal_activities(text),
         "Detected balances": _detect_major_balances(lower),
         "Suggested checklist areas": _suggest_checklist_areas(lower),
@@ -1353,6 +1399,9 @@ def _detect_year_end(text: str) -> str:
 
 
 def _detect_currency(text: str) -> str:
+    naira_thousands = r"(?:N|NGN|₦|â‚¦)\s*['’‘â€™]?\s*000|N000"
+    if re.search(naira_thousands, text, flags=re.I):
+        return "NGN / N'000"
     if re.search(r"N['’]?\s?000|N000|Naira|₦|\bNGN\b", text, flags=re.I):
         return "NGN"
     if re.search(r"\bUSD\b|US\$|\bDollar\b|\$", text, flags=re.I):
@@ -2011,9 +2060,12 @@ def findings_to_markdown(result: ReviewResult) -> str:
 
 def build_ai_review_memo(result: ReviewResult) -> str:
     assurance = str(result.metrics.get("positive_assurance", ""))
+    scope_intro = ""
+    if result.metrics.get("document_scope") == "Limited-scope statement extract":
+        scope_intro = "Limited-scope review performed on Statement of Financial Position only. "
     if not result.findings:
         return (
-            f"AI review memo: {assurance or 'No automated exceptions were detected.'} Perform a final manual review of scanned pages, "
+            f"AI review memo: {scope_intro}{assurance or 'No automated exceptions were detected.'} Perform a final manual review of scanned pages, "
             "judgemental disclosures, and any areas where PDF extraction may have missed tables."
         )
     by_category = Counter(finding.category for finding in result.findings)
@@ -2045,6 +2097,7 @@ def build_ai_review_memo(result: ReviewResult) -> str:
     cause_text = "; ".join(likely_causes) if likely_causes else "presentation or extraction exceptions"
     return (
         "AI review memo: "
+        f"{scope_intro}"
         f"{assurance + ' ' if assurance else ''}"
         f"{result.metrics['findings']} findings were identified across {top_categories}. "
         f"{priority} Likely causes include {cause_text}. "
@@ -2958,11 +3011,23 @@ def _detect_statement_row_note_token(line: str) -> tuple[str, int, int]:
             continue
         explicit_note = bool(re.match(r"\s*note\b", match.group(0), flags=re.I))
         tail = line[match.end() :]
-        if not explicit_note and re.fullmatch(r"\d", ref) and re.match(r"\s+\(?-?\d,\d{3}\b", tail):
+        label = _canonical_statement_label(_statement_label(line[: match.start()]))
+        tail_amounts = _amount_tokens_from_statement_line(tail)
+        if (
+            not explicit_note
+            and re.fullmatch(r"\d", ref)
+            and re.match(r"\s+\(?-?\d,\d{3}\b", tail)
+            and _label_prefers_split_leading_digit(label)
+        ):
             continue
-        if len(_amount_tokens_from_statement_line(tail)) >= 1:
+        if len(tail_amounts) >= 1:
             return ref, match.start(), match.end()
     return "", len(line), len(line)
+
+
+def _label_prefers_split_leading_digit(label: str) -> bool:
+    lower_label = label.lower()
+    return lower_label in {"finance income", "finance expenses", "finance costs", "other revenue"}
 
 
 def _amount_tokens_from_statement_line(line: str) -> list[str]:
@@ -2977,23 +3042,7 @@ def _maybe_reconstruct_note_split_leading_digit(
     amount_tokens: list[str],
     amounts: list[Decimal],
 ) -> tuple[Decimal, str] | None:
-    if not amount_tokens or not amounts:
-        return None
-    if not re.fullmatch(r"\d", note_ref):
-        return None
-    if not _label_allows_note_split_digit_correction(label):
-        return None
-    first_token = amount_tokens[0].strip().strip("()")
-    if not re.fullmatch(r"\d{2},\d{3}", first_token):
-        return None
-    candidate = _parse_decimal(f"{note_ref}{first_token}")
-    if candidate is None:
-        return None
-    if len(amounts) >= 2 and amounts[0] >= amounts[1]:
-        return None
-    if candidate <= amounts[0]:
-        return None
-    return candidate, f"Reconstructed possible leading digit from note {note_ref} and OCR amount token {first_token}; treated as low-confidence."
+    return None
 
 
 def _label_allows_note_split_digit_correction(label: str) -> bool:
@@ -3801,6 +3850,9 @@ def _contextual_currency_markers(document: PdfDocument) -> list[str]:
 
 
 def _normalise_currency_marker(marker: str) -> str:
+    normalized_marker = re.sub(r"\s+", "", marker.upper().replace("â€™", "'").replace("’", "'").replace("‘", "'"))
+    if normalized_marker in {"₦", "₦'000", "NGN'000", "N'000", "N000"}:
+        return "NGN"
     marker_upper = re.sub(r"\s+", "", marker.upper().replace("’", "'"))
     if marker_upper in {"NAIRA", "NGN", "₦", "N'000", "N000"}:
         return "NGN"
@@ -3814,6 +3866,9 @@ def _normalise_currency_marker(marker: str) -> str:
 
 
 def normalize_reporting_currency(value: str) -> str:
+    normalized_value = re.sub(r"\s+", "", value.strip().upper().replace("â€™", "'").replace("’", "'").replace("‘", "'"))
+    if re.search(r"(?:NGN|NAIRA|NIGERIANNAIRA|₦|N'?000)", normalized_value):
+        return "NGN"
     cleaned = re.sub(r"\s+", "", value.strip().upper().replace("’", "'"))
     aliases = {
         "": "",
