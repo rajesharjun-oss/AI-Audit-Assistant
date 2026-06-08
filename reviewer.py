@@ -10,6 +10,7 @@ from pathlib import Path
 from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage, ReviewOptions, ReviewResult
 from cross_page_consistency import check_cross_page_consistency
 from policy_reviewer import review_notes_1_and_2
+from extraction import extract_pdf, extract_pdf_with_ocr
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
