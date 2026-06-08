@@ -858,6 +858,88 @@ st.markdown(
             font-size: 30px;
         }
     }
+
+    /* Module Grid */
+    .module-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+    }
+    .module-card {
+        background: var(--panel-bg);
+        border: 1px solid var(--border-color);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-radius: 12px;
+        padding: 20px;
+        transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+    }
+    .module-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2), 0 0 15px rgba(59, 130, 246, 0.15);
+        border-color: rgba(59, 130, 246, 0.4);
+    }
+    .module-index {
+        color: var(--accent-blue);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        margin-bottom: 8px;
+    }
+    .module-title {
+        color: var(--text-primary);
+        font-size: 16px;
+        font-weight: 700;
+        margin-bottom: 8px;
+    }
+    .module-copy {
+        color: var(--text-muted);
+        font-size: 14px;
+        line-height: 1.5;
+    }
+
+    /* Additional Text Classes */
+    .profile-heading {
+        font-size: 16px;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 4px;
+    }
+    .profile-copy {
+        font-size: 14px;
+        color: var(--text-muted);
+        margin-bottom: 12px;
+    }
+    .control-label {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 8px;
+    }
+    
+    /* Memo specific styles */
+    .memo-panel {
+        background: rgba(15, 23, 42, 0.6);
+        border-radius: 12px;
+        border: 1px solid var(--border-color);
+        padding: 24px;
+        margin-bottom: 16px;
+    }
+    .memo-kicker {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--accent-blue);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        margin-bottom: 8px;
+    }
+    .memo-text {
+        font-size: 15px;
+        color: var(--text-primary);
+        line-height: 1.6;
+    }
     </style>
     """,
     unsafe_allow_html=True,
