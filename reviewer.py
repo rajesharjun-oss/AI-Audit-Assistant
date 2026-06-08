@@ -7,8 +7,9 @@ from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from extraction import extract_pdf, extract_pdf_with_ocr
 from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage, ReviewOptions, ReviewResult
+from cross_page_consistency import check_cross_page_consistency
+from policy_reviewer import review_notes_1_and_2
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
@@ -284,7 +285,7 @@ def review_pdf(
         if options.run_cautious_note_agreement and not _notes_start_page(document):
             checks_skipped.append("OCR note-reference validation skipped because the notes section start was not detected.")
         note_validation_debug["note_validation_mode"] = "skipped"
-        return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug)
+        return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug, {})
     if _extraction_unreliable(document):
         checks_skipped.append("Document-level extraction quality is low; detailed table checks are limited to clean page/table evidence.")
     statement_findings, statement_performed, statement_skipped = check_primary_statement_consistency(document)
@@ -294,7 +295,7 @@ def review_pdf(
     if limited_scope_extract:
         checks_performed.append("Limited-scope review performed on Statement of Financial Position only.")
         checks_skipped.append("Full financial statement completeness, standards checklist, policies, formatting, and note agreement skipped because the upload is a limited-scope statement extract.")
-        return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug)
+        return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug, {})
     totals_findings = check_totals_and_rounding(document)
     findings.extend(totals_findings)
     findings.extend(check_formatting(document, profile))
@@ -326,11 +327,18 @@ def review_pdf(
     else:
         checks_performed.append("Cautious note-reference validation completed for primary statement note references.")
         checks_performed.append("Basic note reference and note amount agreement checks completed.")
-    findings.extend(check_policy_relevance(document, profile))
-    findings.extend(check_standard_checklist(document, profile))
+    note_sections = _note_sections(document.text)
+    policy_findings, policy_export = review_notes_1_and_2(document, profile, note_sections)
+    findings.extend(policy_findings)
     if totals_findings:
         checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables where indicated in extraction findings.")
-    return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug)
+    
+    checks_performed.extend(["Accounting policies relevance check", "IFRS/IAS standards alignment check"])
+    cross_page_findings, cross_page_export = check_cross_page_consistency(document)
+    findings.extend(cross_page_findings)
+    checks_performed.append("Notes 1 & 2 policy and standards alignment review")
+
+    return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug, cross_page_export, policy_export)
 
 
 def _document_scope(document: PdfDocument) -> str:
@@ -368,6 +376,8 @@ def _build_result(
     checks_performed: list[str] | None = None,
     checks_skipped: list[str] | None = None,
     note_validation_debug: dict[str, int | str | bool] | None = None,
+    cross_page_export: dict | None = None,
+    policy_export: list[dict] | None = None,
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     checks_skipped_list = list(dict.fromkeys(checks_skipped or []))
@@ -408,6 +418,8 @@ def _build_result(
         "checks_performed": "\n".join(checks_performed_list) or "No deterministic checks completed.",
         "checks_skipped": "\n".join(checks_skipped_list) or "No major checks skipped.",
         "check_results": check_result_rows,
+        "cross_page_export": cross_page_export or {},
+        "policy_export": policy_export or [],
         "checks_performed_count": len(checks_performed_list),
         "checks_passed_count": sum(1 for row in check_result_rows if row.get("Result") == "Passed"),
         "checks_skipped_count": len(checks_skipped_list),
@@ -924,10 +936,27 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
         page_ranges = _note_section_page_ranges(document)
         note_sections = _note_sections(document.text) if _notes_start_page(document) else {}
         for item in statement_lines:
-            if not item.ref and _note_agreement_skip_reason(item):
-                continue
             current_amount = item.amounts[0] if item.amounts else None
             prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+            
+            if not item.ref:
+                rows.append(
+                    _note_agreement_result_row(
+                        item,
+                        current_amount,
+                        prior_amount,
+                        "N/A",
+                        "N/A",
+                        "",
+                        "Low",
+                        "Skipped",
+                        "No note number.",
+                        "",
+                        "",
+                        "",
+                    )
+                )
+                continue
             if not item.amounts:
                 rows.append(
                     _note_agreement_result_row(
@@ -980,10 +1009,27 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     _scale_label, tolerance = _detect_rounding_scale(document.text)
     low_confidence = document.table_extraction_confidence < 80
     for item in statement_lines:
-        if not item.ref and _note_agreement_skip_reason(item):
-            continue
         current_amount = item.amounts[0] if item.amounts else None
         prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+        
+        if not item.ref:
+            rows.append(
+                _note_agreement_result_row(
+                    item,
+                    current_amount,
+                    prior_amount,
+                    "N/A",
+                    "N/A",
+                    "",
+                    "Low",
+                    "Skipped",
+                    "No note number.",
+                    "",
+                    "",
+                    "",
+                )
+            )
+            continue
         if not item.amounts:
             rows.append(
                 _note_agreement_result_row(
@@ -1002,24 +1048,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                 )
             )
             continue
-        if not item.ref:
-            rows.append(
-                _note_agreement_result_row(
-                    item,
-                    current_amount,
-                    prior_amount,
-                    "N/A",
-                    "N/A",
-                    "",
-                    "Low",
-                    "Review prompt",
-                    "Line lacks a note reference.",
-                    "",
-                    "",
-                    "",
-                )
-            )
-            continue
+
         skip_reason = _note_agreement_skip_reason(item)
         if skip_reason:
             rows.append(
@@ -1134,18 +1163,26 @@ def _note_agreement_result_row(
     page_range: str,
     matching_method: str,
 ) -> dict[str, str]:
+    has_note = "Yes" if item.ref else "No"
+    review_req = "Yes" if item.ref else "No"
+    comment = f"This line item is referenced to Note {item.ref}." if item.ref else "No note number."
+
     return {
         "Statement": item.statement_name,
-        "Line item": item.line_item.title(),
-        "Referenced note": item.ref,
+        "Page": str(item.page_number),
+        "Line item description": item.line_item.title(),
+        "Note number": item.ref,
         "Current year amount": _format_decimal_for_export(current_amount),
         "Prior year amount": _format_decimal_for_export(prior_amount),
+        "Has note?": has_note,
+        "Review required?": review_req,
+        "Comment": comment,
+        "Review result": result,
+        "Reason": reason,
         "Current year amount found in referenced note?": current_found,
         "Prior year amount found in referenced note?": prior_found,
         "Alternative note found": alternative_ref,
         "Match confidence": confidence,
-        "Result": result,
-        "Reason": reason,
         "Matched text snippet from referenced note": matched_snippet,
         "Note section page range": page_range,
         "Matching method": matching_method,
@@ -4705,16 +4742,36 @@ def _statement_note_references(document: PdfDocument) -> set[str]:
     return refs
 
 
+def _is_subheading(label: str) -> bool:
+    lower = label.lower().strip()
+    return lower in {
+        "assets",
+        "non-current assets",
+        "current assets",
+        "equity and liabilities",
+        "equity",
+        "liabilities",
+        "non-current liabilities",
+        "current liabilities",
+        "cash flows from operating activities",
+        "adjustments for",
+        "changes in working capital",
+        "cash flows from investing activities",
+        "cash flows from financing activities",
+        "other comprehensive income",
+        "total items that may be reclassified",
+    }
+
+
 def _statement_note_lines(document: PdfDocument) -> list[StatementNoteLine]:
     items: list[StatementNoteLine] = []
-    for page in document.pages:
-        if _is_notes_page(page.text):
-            continue
-        statement_name = _statement_name_from_page(page.text)
-        if _statement_excluded_from_note_agreement(statement_name, page.text):
+    statements = _classified_primary_statement_pages(document)
+    for name, page in statements.items():
+        # Do not perform note-reference review on Statement of Changes in Equity
+        if "changes in accumulated fund" in name.lower() or "changes in equity" in name.lower():
             continue
         for line in page.text.splitlines():
-            parsed = _parse_statement_note_line(line, page.number, statement_name)
+            parsed = _parse_statement_note_line(line, page.number, name)
             if parsed:
                 items.append(parsed)
     return items
@@ -4744,7 +4801,7 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     ref_start = note_match.start() if note_match else (implicit_match.start() if implicit_match else len(line))
     ref_end = note_match.end() if note_match else (implicit_match.end() if implicit_match else ref_start)
     label = _clean_statement_line_item(line[:ref_start])
-    if not label:
+    if not label or _is_subheading(label):
         return None
     if not explicit_ref and _line_item_not_face_linked(label, statement_name, False):
         pass # Allow parsing lines without explicit refs to flag missing note references
@@ -4845,6 +4902,8 @@ def _check_possible_wrong_note_references(
     findings: list[Finding] = []
     flagged: set[tuple[str, str]] = set()
     for item in statement_lines:
+        if not item.ref:
+            continue
         if _note_agreement_skip_reason(item):
             continue
         referenced = note_sections.get(item.ref, "")
@@ -4950,6 +5009,8 @@ def _check_cautious_face_note_amount_agreement(
     findings: list[Finding] = []
     suppressed_lines = suppressed_lines or set()
     for item in statement_lines:
+        if not item.ref:
+            continue
         line_key = f"{item.ref}|{item.line}"
         if line_key in suppressed_lines or _is_disclosure_only_note(headings.get(item.ref, "")):
             continue

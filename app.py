@@ -344,31 +344,31 @@ def _build_excel_export(result) -> bytes:
             }
         ]
         pd.DataFrame(exception_rows).to_excel(writer, sheet_name="Exception register", index=False)
-        note_agreement_rows = _note_agreement_result_rows(result) or [
-            {
-                "Statement": "",
-                "Line item": "",
-                "Referenced note": "",
-                "Current year amount": "",
-                "Prior year amount": "",
-                "Current year amount found in referenced note?": "",
-                "Prior year amount found in referenced note?": "",
-                "Alternative note found": "",
-                "Match confidence": "",
-                "Result": "Skipped",
-                "Reason": "No statement lines with note references were detected.",
-                "Matched text snippet from referenced note": "",
-                "Note section page range": "",
-                "Matching method": "",
-            }
-        ]
-        pd.DataFrame(note_agreement_rows).to_excel(writer, sheet_name="Note agreement results", index=False)
+        
+        note_agreement_rows = _note_agreement_result_rows(result)
+        primary_rows = note_agreement_rows or [{"Statement": "No lines detected"}]
+        no_notes_rows = [r for r in note_agreement_rows if r.get("Has note?") == "No"] or [{"Statement": "None found"}]
+        linked_rows = [r for r in note_agreement_rows if r.get("Has note?") == "Yes"] or [{"Statement": "None found"}]
+        
+        pd.DataFrame(primary_rows).to_excel(writer, sheet_name="Primary statement line items", index=False)
+        pd.DataFrame(no_notes_rows).to_excel(writer, sheet_name="Items without notes summary", index=False)
+        pd.DataFrame(linked_rows).to_excel(writer, sheet_name="Note-linked review", index=False)
+        
+        policy_rows = result.metrics.get("policy_export", []) or [{"Paragraph reviewed": "None found"}]
+        pd.DataFrame(policy_rows).to_excel(writer, sheet_name="Notes 1 and 2 policy review", index=False)
+        
+        cross_export = result.metrics.get("cross_page_export", {})
+        amount_rows = cross_export.get("key_amounts", []) or [{"Metric": "None found"}]
+        name_rows = cross_export.get("names", []) or [{"Name variant 1": "None found"}]
+        date_rows = cross_export.get("dates", []) or [{"Date found": "None found"}]
+        
+        pd.DataFrame(amount_rows).to_excel(writer, sheet_name="Key amount consistency", index=False)
+        pd.DataFrame(name_rows).to_excel(writer, sheet_name="Name consistency", index=False)
+        pd.DataFrame(date_rows).to_excel(writer, sheet_name="Date consistency", index=False)
+        
         pd.DataFrame(check_results).to_excel(writer, sheet_name="Checks results", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
-        pd.DataFrame(_notes_heading_candidate_rows(result)).to_excel(writer, sheet_name="Notes heading candidates", index=False)
-        pd.DataFrame(_note_heading_rows(result)).to_excel(writer, sheet_name="Notes detected", index=False)
-        pd.DataFrame(_ocr_statement_row_rows(result)).to_excel(writer, sheet_name="OCR statement rows", index=False)
         pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
