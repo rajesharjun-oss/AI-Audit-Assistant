@@ -46,8 +46,17 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         if any(kw in text.lower() for kw in ("director", "secretary", "chief executive", "officer", "auditor")):
             for match in NAME_RE.finditer(text):
                 name = match.group(0)
-                # Exclude obvious non-names
-                if not any(stop in name.lower() for stop in ["annual report", "financial statement", "statement of", "notes to", "cash flow", "value added", "the company", "limited", "bank", "plc", "kpmg", "pwc", "deloitte", "ernst", "kreston", "pedabo", "audit", "services", "ifrs", "ias"]):
+                stop_words = [
+                    "annual report", "financial statement", "statement of", "notes to", "cash flow", "value added", 
+                    "the company", "limited", "bank", "plc", "kpmg", "pwc", "deloitte", "ernst", "kreston", "pedabo", 
+                    "audit", "services", "ifrs", "ias", "board of", "directors", "report of", "committee", "chairman", 
+                    "secretary", "executive", "officer", "accounting", "policy", "policies", "standards", "international", 
+                    "reporting", "corporate", "governance", "independent", "opinion", "basis for", "key audit", "matters", 
+                    "other information", "responsibilities of", "consolidated", "separate", "comprehensive income", 
+                    "financial position", "changes in equity", "general information", "address", "registered office", 
+                    "principal place", "business", "nature of", "for the year", "ended", "december", "january"
+                ]
+                if not any(stop in name.lower() for stop in stop_words):
                     name_candidates.append((name, page.number))
 
         for line in text.splitlines():
@@ -55,9 +64,16 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             # Try to match key metrics
             for metric_name, pattern in KEY_METRICS.items():
                 if pattern.match(line):
-                    amounts = re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d{4,}(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)\)?", line)
+                    raw_amounts = re.findall(r"\(?-?\d[\d,\.]*\)?", line)
+                    amounts = []
+                    for a in raw_amounts:
+                        clean = a.replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+                        if not clean: continue
+                        if "." in clean and float(clean) < 100: continue
+                        if len(clean) <= 2 and clean != "0": continue
+                        amounts.append(a)
                     if amounts:
-                        amt_str = amounts[0] if len(amounts) == 1 else amounts[-2] if len(amounts) >= 2 else amounts[0]
+                        amt_str = amounts[0]
                         clean_amt = amt_str.replace(",", "").replace("(", "-").replace(")", "")
                         try:
                             val = Decimal(clean_amt)
@@ -111,11 +127,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                 })
 
     # Process dates
-    preferred_format_count = sum(len(locs) for d, locs in date_occurrences.items() if DATE_FORMAT_1_RE.match(d))
-    other_format_count = sum(len(locs) for d, locs in date_occurrences.items() if DATE_FORMAT_2_RE.match(d))
-    
-    preferred_re = DATE_FORMAT_1_RE if preferred_format_count >= other_format_count else DATE_FORMAT_2_RE
-    expected_format = "31 December 2025 (DD Month YYYY)" if preferred_format_count >= other_format_count else "December 31, 2025 (Month DD, YYYY)"
+    expected_format = "31 December 2025 (DD Month YYYY)"
+    preferred_re = DATE_FORMAT_1_RE
 
     for date_str, pages in date_occurrences.items():
         # Only flag date formatting if the text around it indicates reporting or signing context

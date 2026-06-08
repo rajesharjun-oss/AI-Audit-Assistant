@@ -31,7 +31,7 @@ def _finding_rows(result) -> list[dict[str, str]]:
     for index, finding in enumerate(result.findings, start=1):
         metadata = finding.metadata or {}
         if finding.category == "Notes agreement" and metadata.get("match_confidence") == "Low":
-            continue
+            pass  # We now filter this in reviewer.py before the result is built.
         rows.append(
             {
             "ID": f"EX-{index:03d}",

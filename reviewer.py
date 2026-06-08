@@ -339,6 +339,10 @@ def review_pdf(
     findings.extend(cross_page_findings)
     checks_performed.append("Notes 1 & 2 policy and standards alignment review")
 
+    findings = [
+        f for f in findings
+        if not (f.category == "Notes agreement" and f.metadata and f.metadata.get("match_confidence") == "Low")
+    ]
     return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug, cross_page_export, policy_export)
 
 
@@ -585,7 +589,7 @@ def _notes_start_page(document: PdfDocument) -> int | None:
         if accepted:
             return int(accepted[0]["page"])
     for page in document.pages:
-        if document.ocr_used and _looks_like_front_matter_page(page.text):
+        if _looks_like_front_matter_page(page.text):
             continue
         if _notes_heading_in_text(page.text):
             return page.number
@@ -4542,9 +4546,15 @@ def _is_table_boundary_row(row: list[str | Decimal | None]) -> bool:
     lower = re.sub(r"\s+", " ", text.lower())
     if not lower:
         return True
+    
+    # Break on long narrative text that lacks numbers
+    if len(text) > 40 and not re.search(r"\d", text):
+        return True
+        
     heading_match = NOTE_HEADING_RE.match(text)
     if heading_match and _valid_note_heading(heading_match.group(1), heading_match.group(2)):
         return True
+        
     header_phrases = (
         "note (s)",
         "note(s)",
@@ -4556,6 +4566,11 @@ def _is_table_boundary_row(row: list[str | Decimal | None]) -> bool:
         "receivables and advances",
         "december 31",
         "for the year ended",
+        "statement of value added",
+        "five-year financial summary",
+        "five year financial summary",
+        "financial summary",
+        "value added statement"
     )
     if any(phrase in lower for phrase in header_phrases):
         return True
@@ -4813,7 +4828,7 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     note_match = NOTE_REF_RE.search(line)
     implicit_match = None
     if not explicit_ref:
-        implicit_match = re.search(r"\b(\d{1,2}[A-C]?)\b(?=\s+\(?-?\d[\d,\s]*\)?)", line, flags=re.I)
+        implicit_match = re.search(r"(?<![\.\d])\b(\d{1,2}[A-C]?)\b(?=\s+\(?-?\d[\d,\s]*\)?)", line, flags=re.I)
         if implicit_match and _amounts_in_text(line[: implicit_match.start()]):
             implicit_match = None
     ref = explicit_ref or (implicit_match.group(1).upper() if implicit_match else "")
@@ -5637,6 +5652,20 @@ def _clean_note_title(title: str) -> str:
 def _looks_like_primary_statement_line(line: str) -> bool:
     if len(NUMBER_RE.findall(line)) < 1:
         return False
+        
+    lower = line.lower()
+    reject_phrases = [
+        "financial statements", "statement of", "year ended", "as at", 
+        "signed on", "behalf", "the notes on page", "pages", "director", 
+        "chairman", "secretary", "n n ", "0 0"
+    ]
+    if any(phrase in lower for phrase in reject_phrases):
+        return False
+        
+    text_only = re.sub(r"[\d\.,\(\)\-\|]", "", lower).strip()
+    if len(text_only) < 3 or text_only in ("n n", "n", "m m", "m"):
+        return False
+        
     if _is_subheading(_clean_statement_line_item(line)):
         return False
     return not _is_notes_page(line)
@@ -5691,18 +5720,18 @@ def _check_ocr_statement_of_cash_flows(document: PdfDocument, tolerance: Decimal
                 try:
                     val = Decimal(clean_amt)
                     lower = line.lower()
-                    if "operating activities" in lower and "net cash" in lower:
+                    if "operating activities" in lower:
                         line_row_map["operating"] = val
-                    elif "investing activities" in lower and "net cash" in lower:
+                    elif "investing activities" in lower:
                         line_row_map["investing"] = val
-                    elif "financing activities" in lower and "net cash" in lower:
+                    elif "financing activities" in lower:
                         line_row_map["financing"] = val
                     elif ("increase" in lower or "decrease" in lower) and "cash" in lower and "equivalent" in lower:
                         line_row_map["movement"] = val
-                    elif ("beginning" in lower or "start" in lower or " 1 " in lower) and "cash" in lower and "equivalent" in lower:
+                    elif ("beginning" in lower or "start" in lower or " 1 " in lower or "january" in lower) and "cash" in lower:
                         if "opening" not in line_row_map:
                             line_row_map["opening"] = val
-                    elif ("end" in lower or " 31 " in lower) and "cash" in lower and "equivalent" in lower:
+                    elif ("end" in lower or " 31 " in lower or "december" in lower) and "cash" in lower:
                         line_row_map["closing"] = val
                     elif "exchange" in lower:
                         line_row_map["exchange"] = val
