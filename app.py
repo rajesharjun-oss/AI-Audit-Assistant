@@ -18,7 +18,83 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from models import CompanyProfile, ReviewOptions
 from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
 
+st.set_page_config(page_title="AI Audit Assistant", page_icon="✨", layout="wide")
 
+st.markdown("""
+<style>
+    /* Import modern typography */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    html, body, [class*="css"]  {
+        font-family: 'Inter', sans-serif;
+    }
+
+    /* Glassmorphism for metrics */
+    div[data-testid="metric-container"] {
+        background: rgba(30, 41, 59, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border-radius: 12px;
+        padding: 1rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    
+    div[data-testid="metric-container"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+    }
+
+    /* Premium buttons with gradient */
+    div.stButton > button {
+        background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+        font-weight: 500;
+        transition: all 0.2s ease;
+        box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.4);
+    }
+    
+    div.stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 8px -1px rgba(59, 130, 246, 0.6);
+        border: none;
+        color: white;
+    }
+
+    /* Expanders styling */
+    .streamlit-expanderHeader {
+        background-color: #1E293B !important;
+        border-radius: 8px;
+        font-weight: 600;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    
+    div[data-testid="stExpander"] {
+        background-color: #0F172A;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+        overflow: hidden;
+    }
+
+    /* Smooth dataframes */
+    .dataframe {
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    
+    /* Headers gradient */
+    h1, h2, h3 {
+        background: -webkit-linear-gradient(45deg, #60A5FA, #3B82F6);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+</style>
+""", unsafe_allow_html=True)
 def _metric_lines(value: object, empty: str) -> list[str]:
     text = str(value or "").strip()
     if not text or text == empty:
