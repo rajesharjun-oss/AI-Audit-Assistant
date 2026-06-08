@@ -41,6 +41,11 @@ st.markdown("""
         transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
     
+    div[data-testid="metric-container"] label,
+    div[data-testid="metric-container"] div {
+        color: #F8FAFC !important;
+    }
+    
     div[data-testid="metric-container"]:hover {
         transform: translateY(-2px);
         box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
@@ -49,7 +54,7 @@ st.markdown("""
     /* Premium buttons with gradient */
     div.stButton > button {
         background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
-        color: white;
+        color: white !important;
         border: none;
         border-radius: 8px;
         padding: 0.5rem 1rem;
@@ -62,7 +67,7 @@ st.markdown("""
         transform: translateY(-2px);
         box-shadow: 0 6px 8px -1px rgba(59, 130, 246, 0.6);
         border: none;
-        color: white;
+        color: white !important;
     }
 
     /* Expanders styling */
@@ -71,6 +76,7 @@ st.markdown("""
         border-radius: 8px;
         font-weight: 600;
         border: 1px solid rgba(255, 255, 255, 0.05);
+        color: #F8FAFC !important;
     }
     
     div[data-testid="stExpander"] {
@@ -79,6 +85,10 @@ st.markdown("""
         border: 1px solid rgba(255, 255, 255, 0.05);
         box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
         overflow: hidden;
+    }
+    
+    div[data-testid="stExpander"] * {
+        color: #F8FAFC !important;
     }
 
     /* Smooth dataframes */
