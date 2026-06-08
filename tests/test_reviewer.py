@@ -3015,13 +3015,14 @@ def test_metrics_include_ocr_table_count():
     assert document.ocr_tables == 1
 
 
-def test_notes_agreement_flags_missing_note_reference_on_face_statement():
+def test_notes_agreement_flags_missing_note_reference_on_face_statement(monkeypatch):
     document = PdfDocument(
         [
-            PdfPage(1, "Statement of profit or loss\nRevenue 10,000", []),
+            PdfPage(1, "Statement of profit or loss\nRevenue 10,000 8,000", []),
             PdfPage(2, "Notes to the financial statements\n1. Revenue\nSales of goods 10,000", []),
         ]
     )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
     findings = check_notes_agreement(document)
     finding = next((f for f in findings if "lacks a note reference" in f.issue), None)
     assert finding is not None
@@ -3031,16 +3032,17 @@ def test_notes_agreement_flags_missing_note_reference_on_face_statement():
     assert "Suggested Note 1" in finding.evidence
 
 
-def test_notes_agreement_flags_missing_note_reference_when_no_note_found():
+def test_notes_agreement_flags_missing_note_reference_when_no_note_found(monkeypatch):
     document = PdfDocument(
         [
-            PdfPage(1, "Statement of profit or loss\nOther income 5,000", []),
+            PdfPage(1, "Statement of profit or loss\nAssets 5,000 4,000", []),
             PdfPage(2, "Notes to the financial statements\n1. Revenue\nSales of goods 10,000", []),
         ]
     )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
     findings = check_notes_agreement(document)
     finding = next((f for f in findings if "has no note reference" in f.issue), None)
     assert finding is not None
     assert finding.severity == "Low"
-    assert "Other Income" in finding.issue
+    assert "Assets" in finding.issue
     assert "no matching note was found" in finding.issue
