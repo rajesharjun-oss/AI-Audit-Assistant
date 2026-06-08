@@ -294,10 +294,14 @@ def _build_excel_export(result) -> bytes:
                 max_length = max((len(str(cell.value or "")) for cell in column_cells), default=10)
                 worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 70)
         _format_exception_register_sheet(writer.book["Exception register"])
-        _format_excel_table_sheet(writer.book["Note agreement results"], "NoteAgreementResults")
+        _format_excel_table_sheet(writer.book["Primary statement line items"], "PrimaryLineItems")
+        _format_excel_table_sheet(writer.book["Items without notes summary"], "NoNotesSummary")
+        _format_excel_table_sheet(writer.book["Note-linked review"], "NoteLinkedReview")
+        _format_excel_table_sheet(writer.book["Notes 1 and 2 policy review"], "PolicyReview")
+        _format_excel_table_sheet(writer.book["Key amount consistency"], "AmountConsistency")
+        _format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
+        _format_excel_table_sheet(writer.book["Date consistency"], "DateConsistency")
         _format_excel_table_sheet(writer.book["Checks results"], "ChecksResults")
-        _format_excel_table_sheet(writer.book["Notes heading candidates"], "NotesHeadingCandidates")
-        _format_excel_table_sheet(writer.book["OCR statement rows"], "OCRStatementRows")
     return output.getvalue()
 
 
