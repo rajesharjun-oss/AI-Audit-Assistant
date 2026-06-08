@@ -1958,6 +1958,70 @@ def check_notes_agreement(
             _check_tax_note(findings, ref, section, tolerance)
         if any(keyword in title or keyword in section.lower() for keyword in ("depreciation", "property, plant", "ppe")):
             _check_depreciation_note(findings, ref, section, tolerance)
+
+    for item in _statement_note_lines(document):
+        if item.ref:
+            continue
+        if _note_agreement_skip_reason(item):
+            continue
+        if not item.amounts:
+            continue
+
+        current_amount = item.amounts[0] if len(item.amounts) >= 1 else None
+        prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+
+        best_ref = ""
+        best_score = -1
+        best_match: dict[str, bool] = {"wording": False, "amount": False}
+        best_heading_score = 0.0
+
+        for candidate_ref in headings:
+            if _is_disclosure_only_note(headings.get(candidate_ref, "")):
+                continue
+            section = note_sections.get(candidate_ref, "")
+            if not _alternative_note_semantically_allowed(item.line_item, headings.get(candidate_ref, ""), section):
+                continue
+
+            current_found = _amount_match_in_section(current_amount, section, tolerance)["found"]
+            prior_found = _amount_match_in_section(prior_amount, section, tolerance)["found"] if prior_amount is not None else True
+            amount_match = current_found and prior_found
+
+            heading_score = max(_wording_match_score(item.line_item, headings.get(candidate_ref, "")), _semantic_heading_score(item.line_item, headings.get(candidate_ref, "")))
+            wording_match = heading_score >= 0.82
+
+            if not (amount_match or wording_match):
+                continue
+
+            score = (3 if amount_match else 0) + (2 if wording_match else 0) + int(heading_score * 10)
+            if score > best_score:
+                best_ref = candidate_ref
+                best_score = score
+                best_match = {"wording": wording_match, "amount": amount_match}
+                best_heading_score = heading_score
+
+        if best_ref:
+            findings.append(
+                Finding(
+                    "Notes agreement",
+                    "Medium",
+                    f"Page {item.page_number} | {item.statement_name}",
+                    f"Line item '{item.line_item.title()}' lacks a note reference, but Note {best_ref} appears to be a match.",
+                    f"Line: {item.line[:160]}. Suggested Note {best_ref}: {headings.get(best_ref, '')}. Amount matched: {_yes_no(best_match['amount'])}. Wording matched: {_yes_no(best_match['wording'])}.",
+                    f"Add a reference to Note {best_ref} on the face of the financial statement."
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "Notes agreement",
+                    "Low",
+                    f"Page {item.page_number} | {item.statement_name}",
+                    f"Line item '{item.line_item.title()}' has no note reference and no matching note was found.",
+                    f"Line: {item.line[:160]}. Amounts: {', '.join(f'{a:,}' for a in item.amounts)}.",
+                    "If a note exists for this line item, add a note reference on the face of the financial statement."
+                )
+            )
+
     return findings
 
 
@@ -4647,8 +4711,6 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
         return None
     explicit_ref = next(iter(_refs_in_text(line)), "")
     note_match = NOTE_REF_RE.search(line)
-    if "cash flow" in statement_name.lower() and not explicit_ref:
-        return None
     implicit_match = None
     if not explicit_ref:
         implicit_match = re.search(r"\b(\d{1,2}[A-C]?)\b(?=\s+\(?-?\d[\d,\s]*\)?)", line, flags=re.I)
@@ -4656,19 +4718,19 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
             implicit_match = None
     ref = explicit_ref or (implicit_match.group(1).upper() if implicit_match else "")
     if not ref or not _valid_note_number(ref):
-        return None
+        ref = ""
     ref_start = note_match.start() if note_match else (implicit_match.start() if implicit_match else len(line))
     ref_end = note_match.end() if note_match else (implicit_match.end() if implicit_match else ref_start)
     label = _clean_statement_line_item(line[:ref_start])
     if not label:
         return None
-    if not note_match and _line_item_not_face_linked(label, statement_name):
+    if not explicit_ref and _line_item_not_face_linked(label, statement_name):
         return None
     parsed_amounts = _amounts_from_statement_line_excluding_note_ref(line, ref_start, ref_end)
-    if _amounts_look_like_note_reference_only(parsed_amounts, ref):
+    if ref and _amounts_look_like_note_reference_only(parsed_amounts, ref):
         parsed_amounts = []
     amounts = tuple(parsed_amounts[-2:])
-    return StatementNoteLine(ref.upper(), label, line.strip(), amounts, page_number, statement_name, bool(note_match))
+    return StatementNoteLine(ref.upper() if ref else "", label, line.strip(), amounts, page_number, statement_name, bool(note_match))
 
 
 def _amounts_from_statement_line_excluding_note_ref(line: str, ref_start: int, ref_end: int) -> list[Decimal]:

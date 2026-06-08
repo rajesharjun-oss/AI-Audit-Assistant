@@ -1,0 +1,12 @@
+.git
+__pycache__
+*.pyc
+.venv
+venv
+.env
+*.pdf
+*.docx
+*.xlsx
+*.png
+*.jpg
+*.jpeg
