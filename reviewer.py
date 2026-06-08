@@ -589,10 +589,10 @@ def _notes_start_page(document: PdfDocument) -> int | None:
         if accepted:
             return int(accepted[0]["page"])
     for page in document.pages:
-        if _looks_like_front_matter_page(page.text):
-            continue
         if _notes_heading_in_text(page.text):
             return page.number
+        if _looks_like_front_matter_page(page.text):
+            continue
     if document.ocr_used:
         candidates = _notes_heading_candidates(document, include_weak=False)
         accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
@@ -1704,7 +1704,7 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
         for table_index, table in enumerate(page.tables, start=1):
             if len(table) < 3:
                 continue
-            table_quality = _classify_table_for_arithmetic(table)
+            table_quality = _classify_table_for_arithmetic(table, page.text)
             if not table_quality["can_run_arithmetic"]:
                 skipped_tables.append(
                     f"Page {page.number}, table {table_index}: {table_quality['type']} ({table_quality['reason']})"
@@ -1726,6 +1726,11 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                     if f.severity == "High":
                         f.severity = "Medium"
                         f.issue += " (Downgraded severity because specific cross-footing passed for this primary statement)."
+            else:
+                for f in table_findings:
+                    if f.severity == "High":
+                        f.severity = "Medium"
+                        f.issue += " (Downgraded severity because table structure in notes may be complex)."
             findings.extend(table_findings)
     if skipped_tables:
         details = "\n".join(skipped_tables)
@@ -3075,68 +3080,62 @@ def _check_cash_flow_text(
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
-    if _has_rows(rows, ("net cash inflow from operating activities", "net cash absorbed in investing activities", "net cash inflow from financing activities", "net increase in cash and cash equivalents")):
-        expected = [
-            a + b + c
-            for a, b, c in zip(
-                _row_amounts(rows, "net cash inflow from operating activities"),
-                _row_amounts(rows, "net cash absorbed in investing activities"),
-                _row_amounts(rows, "net cash inflow from financing activities"),
-            )
-        ]
+    op = next((v for k, v in rows.items() if "operating activities" in k), None)
+    inv = next((v for k, v in rows.items() if "investing activities" in k), None)
+    fin = next((v for k, v in rows.items() if "financing activities" in k), None)
+    mov = next((v for k, v in rows.items() if ("increase" in k or "decrease" in k) and "cash" in k and "equivalent" in k), None)
+
+    if op and inv and fin and mov:
+        expected = [a + b + c for a, b, c in zip(op, inv, fin)]
         _check_vector_equation(
             findings,
             page.number,
             "Statement of cash flows",
             "Operating, investing, and financing cash flows agree to net increase in cash.",
             expected,
-            _row_amounts(rows, "net increase in cash and cash equivalents"),
+            mov,
             tolerance,
             ocr_review=ocr_review,
         )
         performed.append("Statement of cash flows: net cash increase checked.")
     else:
-        skipped.append("Statement of cash flows: net cash increase skipped because cash flow subtotals were not confidently parsed.")
-    if _has_rows(rows, ("net increase in cash and cash equivalents", "cash and cash equivalents at the beginning of the year", "cash and cash equivalents as at the end of the year")):
-        expected = [
-            a + b
-            for a, b in zip(
-                _row_amounts(rows, "net increase in cash and cash equivalents"),
-                _row_amounts(rows, "cash and cash equivalents at the beginning of the year"),
-            )
-        ]
+        findings.append(Finding(
+            "Totals and rounding",
+            "Review prompt",
+            f"Page {page.number} | Statement of cash flows",
+            "Operating, investing, and financing cash flows agree to net increase in cash.",
+            "Subtotal math failed or rows could not be perfectly identified.",
+            "Review the statement manually."
+        ))
+    open_cash = next((v for k, v in rows.items() if ("beginning" in k or "start" in k or " 1 " in k or "january" in k) and "cash" in k), None)
+    close_cash = next((v for k, v in rows.items() if ("end" in k or " 31 " in k or "december" in k) and "cash" in k), None)
+    exc = next((v for k, v in rows.items() if "exchange" in k), None)
+
+    if open_cash and close_cash and mov:
+        if exc:
+            expected = [a + b + c for a, b, c in zip(open_cash, mov, exc)]
+        else:
+            expected = [a + b for a, b in zip(open_cash, mov)]
         _check_vector_equation(
             findings,
             page.number,
             "Statement of cash flows",
             "Closing cash agrees to opening cash plus net increase.",
             expected,
-            _row_amounts(rows, "cash and cash equivalents as at the end of the year"),
+            close_cash,
             tolerance,
             ocr_review=ocr_review,
         )
         performed.append("Statement of cash flows: closing cash movement checked.")
-    elif _has_rows(rows, ("cash at beginning", "net increase in cash and cash equivalents", "cash at end")):
-        expected = [
-            a + b
-            for a, b in zip(
-                _row_amounts(rows, "cash at beginning"),
-                _row_amounts(rows, "net increase in cash and cash equivalents"),
-            )
-        ]
-        _check_vector_equation(
-            findings,
-            page.number,
-            "Statement of cash flows",
-            "Cash at end agrees to cash at beginning plus net cash movement.",
-            expected,
-            _row_amounts(rows, "cash at end"),
-            tolerance,
-            ocr_review=ocr_review,
-        )
-        performed.append("Statement of cash flows: cash at beginning/end checked from line-extracted rows.")
     else:
-        skipped.append("Statement of cash flows: closing cash movement skipped because rows were not confidently parsed.")
+        findings.append(Finding(
+            "Totals and rounding",
+            "Review prompt",
+            f"Page {page.number} | Statement of cash flows",
+            "Closing cash agrees to opening cash plus net increase.",
+            "Opening or closing cash rows could not be perfectly identified.",
+            "Review the statement manually."
+        ))
     return findings, performed, skipped
 
 
@@ -4418,11 +4417,12 @@ def _note_columns(table: list[list[str]]) -> set[int]:
     return {index for index, cell in enumerate(header) if str(cell).strip().lower() in {"note", "notes", "ref", "reference"}}
 
 
-def _classify_table_for_arithmetic(table: list[list[str]]) -> dict[str, object]:
+def _classify_table_for_arithmetic(table: list[list[str]], page_text: str = "") -> dict[str, object]:
     text = " ".join(" ".join(str(cell or "") for cell in row) for row in table).lower()
-    if "value added" in text or "value-added" in text:
+    full_text = text + " " + page_text.lower()
+    if "value added" in full_text or "value-added" in full_text:
         return {"type": "value-added statement", "can_run_arithmetic": False, "reason": "value-added statements have presentation-specific subtotals"}
-    if "five year" in text or "5 year" in text or "financial summary" in text:
+    if "five year" in full_text or "5 year" in full_text or "financial summary" in full_text:
         return {"type": "multi-year summary", "can_run_arithmetic": False, "reason": "multi-year summaries should not be cast like primary statements"}
     if _table_has_merged_numeric_cells(table):
         return {"type": "merged extraction", "can_run_arithmetic": False, "reason": "one or more cells contain multiple numeric values"}
@@ -5656,7 +5656,7 @@ def _looks_like_primary_statement_line(line: str) -> bool:
     lower = line.lower()
     reject_phrases = [
         "financial statements", "statement of", "year ended", "as at", 
-        "signed on", "behalf", "the notes on page", "pages", "director", 
+        "signed on", "behalf", "behal b", "the notes on page", "pages", "director", 
         "chairman", "secretary", "n n ", "0 0"
     ]
     if any(phrase in lower for phrase in reject_phrases):

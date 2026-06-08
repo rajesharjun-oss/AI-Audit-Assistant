@@ -27,6 +27,8 @@ def _extract_nature_of_business(document: PdfDocument, note_1_2_text: str) -> st
     match = re.search(r"(?:nature of business|principal activities?)(?:[\s\S]{1,300})", doc_text_lower)
     if match:
         return match.group(0).strip()
+    if note_1_2_text:
+        return text_lower[:500]
         
     return ""
 

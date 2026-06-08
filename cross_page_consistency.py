@@ -6,7 +6,7 @@ from models import PdfDocument, Finding
 
 # 1. Key Amounts Consistency
 KEY_METRICS = {
-    "Revenue": re.compile(r"^(?:Revenue|Turnover|Gross Earnings)\b(?!.*contract liabilit)", re.I),
+    "Revenue": re.compile(r"^(?:Revenue|Turnover|Gross Earnings)\b(?!.*contract)", re.I),
     "Profit before tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?\s+before\s+tax(?:ation)?\b", re.I),
     "Taxation": re.compile(r"^(?:Taxation|Income tax expense)\b", re.I),
     "Profit after tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?(?:\s+after\s+tax(?:ation)?)?(?:\s+for\s+the\s+(?:year|period))?\b(?!.*loss allowance)(?!.*loss on foreign)(?!.*loss carried forward)", re.I),
@@ -14,8 +14,9 @@ KEY_METRICS = {
 }
 
 # 2. Dates
-DATE_FORMAT_1_RE = re.compile(r"\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b")
-DATE_FORMAT_2_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+20\d{2}\b")
+DATE_FORMAT_1_RE = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b", re.I)
+DATE_FORMAT_2_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+20\d{2}\b", re.I)
+DATE_FORMAT_3_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b", re.I)
 
 def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], dict[str, list[dict[str, str]]]]:
     findings = []
@@ -41,6 +42,10 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             date_occurrences[match.group(0)].append(page.number)
         for match in DATE_FORMAT_2_RE.finditer(text):
             date_occurrences[match.group(0)].append(page.number)
+        for match in DATE_FORMAT_3_RE.finditer(text):
+            # Only add if it wasn't already matched as part of FORMAT 1 or 2
+            if not any(match.group(0) in d for d in date_occurrences.keys()):
+                date_occurrences[match.group(0)].append(page.number)
             
         # Extract potential names in signature blocks or directors lists
         if any(kw in text.lower() for kw in ("director", "secretary", "chief executive", "officer", "auditor")):
@@ -54,7 +59,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     "reporting", "corporate", "governance", "independent", "opinion", "basis for", "key audit", "matters", 
                     "other information", "responsibilities of", "consolidated", "separate", "comprehensive income", 
                     "financial position", "changes in equity", "general information", "address", "registered office", 
-                    "principal place", "business", "nature of", "for the year", "ended", "december", "january"
+                    "principal place", "business", "nature of", "for the year", "ended", "december", "january",
+                    "street", "road", "cost", "accumulated", "carrying", "to pay", "employees", "government"
                 ]
                 if not any(stop in name.lower() for stop in stop_words):
                     name_candidates.append((name, page.number))
@@ -71,6 +77,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                         if not clean: continue
                         if "." in clean and float(clean) < 100: continue
                         if len(clean) <= 2 and clean != "0": continue
+                        if len(clean) <= 4 and clean.startswith("20"): continue # Exclude years
                         amounts.append(a)
                     if amounts:
                         amt_str = amounts[0]
@@ -128,7 +135,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
 
     # Process dates
     expected_format = "31 December 2025 (DD Month YYYY)"
-    preferred_re = DATE_FORMAT_1_RE
+    preferred_re = re.compile(r"\b(?:\d{1,2}\s+)?(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b", re.I)
 
     for date_str, pages in date_occurrences.items():
         # Only flag date formatting if the text around it indicates reporting or signing context
