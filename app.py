@@ -586,7 +586,7 @@ st.markdown(
         color: var(--text-muted);
         max-width: 800px;
         line-height: 1.6;
-
+    }
 
     @media (max-width: 1100px) {
         .module-grid {
