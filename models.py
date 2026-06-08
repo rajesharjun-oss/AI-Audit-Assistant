@@ -129,7 +129,7 @@ class CompanyProfile:
 class ReviewOptions:
     use_ocr: bool = False
     ocr_max_pages: int | None = 60
-    ocr_dpi: int = 200
+    ocr_dpi: int = 300
     run_cautious_note_agreement: bool = False
 
 

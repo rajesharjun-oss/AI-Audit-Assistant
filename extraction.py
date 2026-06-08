@@ -32,7 +32,8 @@ def extract_pdf(path: str | Path) -> PdfDocument:
             if not text.strip():
                 pages.append(PdfPage(index, "", []))
                 continue
-            tables = page.extract_tables() or []
+            table_settings = {"vertical_strategy": "text", "horizontal_strategy": "text"}
+            tables = page.extract_tables(table_settings) or []
             cleaned_tables = [
                 [[_clean_cell(cell) for cell in row] for row in table if any(row)]
                 for table in tables
