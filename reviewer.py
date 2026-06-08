@@ -432,7 +432,7 @@ def _note_validation_debug(
     return {
         "cautious_note_validation_enabled": bool(enabled),
         "note_validation_mode": mode,
-        "note_reference_rows_detected": len(_statement_note_lines(document)) if document.pages else 0,
+        "note_reference_rows_detected": sum(1 for i in _statement_note_lines(document) if i.ref) if document.pages else 0,
         "note_headings_detected": len(_note_headings_by_page(document)) if document.pages else 0,
         "notes_section_start_page": _notes_start_page(document) or "Not detected",
         "note_reference_findings": note_reference_findings,
@@ -924,6 +924,8 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
         page_ranges = _note_section_page_ranges(document)
         note_sections = _note_sections(document.text) if _notes_start_page(document) else {}
         for item in statement_lines:
+            if not item.ref and _note_agreement_skip_reason(item):
+                continue
             current_amount = item.amounts[0] if item.amounts else None
             prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
             if not item.amounts:
@@ -978,6 +980,8 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     _scale_label, tolerance = _detect_rounding_scale(document.text)
     low_confidence = document.table_extraction_confidence < 80
     for item in statement_lines:
+        if not item.ref and _note_agreement_skip_reason(item):
+            continue
         current_amount = item.amounts[0] if item.amounts else None
         prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
         if not item.amounts:
@@ -994,6 +998,24 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                     "Skipped - no reliable statement amount was detected after excluding the note-reference column.",
                     "",
                     page_ranges.get(item.ref, ""),
+                    "",
+                )
+            )
+            continue
+        if not item.ref:
+            rows.append(
+                _note_agreement_result_row(
+                    item,
+                    current_amount,
+                    prior_amount,
+                    "N/A",
+                    "N/A",
+                    "",
+                    "Low",
+                    "Review prompt",
+                    "Line lacks a note reference.",
+                    "",
+                    "",
                     "",
                 )
             )
@@ -4724,8 +4746,8 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     label = _clean_statement_line_item(line[:ref_start])
     if not label:
         return None
-    if not explicit_ref and _line_item_not_face_linked(label, statement_name):
-        return None
+    if not explicit_ref and _line_item_not_face_linked(label, statement_name, False):
+        pass # Allow parsing lines without explicit refs to flag missing note references
     parsed_amounts = _amounts_from_statement_line_excluding_note_ref(line, ref_start, ref_end)
     if ref and _amounts_look_like_note_reference_only(parsed_amounts, ref):
         parsed_amounts = []
@@ -4781,12 +4803,12 @@ def _note_agreement_skip_reason(item: StatementNoteLine) -> str:
     statement = item.statement_name.lower()
     if "value added" in statement or "five year" in statement or "financial summary" in statement:
         return "not a face-linked note line"
-    if _line_item_not_face_linked(item.line_item, item.statement_name):
+    if _line_item_not_face_linked(item.line_item, item.statement_name, item.explicit_ref):
         return "not a face-linked note line"
     return ""
 
 
-def _line_item_not_face_linked(line_item: str, statement_name: str) -> bool:
+def _line_item_not_face_linked(line_item: str, statement_name: str, explicit_ref: bool = False) -> bool:
     statement = statement_name.lower()
     label = _normalise_match_words(line_item)
     raw_label = line_item.lower()
@@ -4805,10 +4827,10 @@ def _line_item_not_face_linked(line_item: str, statement_name: str) -> bool:
         "cash used operations",
     }
     if label in broad_labels:
-        return "not a face-linked note line"
-    if raw_label.startswith(("total ", "net cash", "surplus for the year")) and not item.explicit_ref:
-        return "not a face-linked note line"
-    if "cash flow" in statement and re.search(r"\b(total|net|cash generated|cash used|increase|decrease)\b", raw_label):
+        return True
+    if raw_label.startswith(("total ", "net cash", "surplus for the year")) and not explicit_ref:
+        return True
+    if "cash flow" in statement and re.search(r"\b(total|net|cash generated|cash used|increase|decrease|cash inflow|cash outflow|cash absorbed)\b", raw_label):
         return True
     return False
 
@@ -4829,7 +4851,7 @@ def _check_possible_wrong_note_references(
         referenced_heading = headings.get(item.ref, "")
         if _is_disclosure_only_note(referenced_heading):
             continue
-        if not referenced_heading:
+        if item.ref and not referenced_heading:
             if not item.explicit_ref:
                 continue
             findings.append(_note_reference_review_prompt(item, "", "Low", "Referenced note heading was not detected.", cautious_review_prompt))

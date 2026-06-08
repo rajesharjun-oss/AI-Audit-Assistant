@@ -32,13 +32,20 @@ def extract_pdf(path: str | Path) -> PdfDocument:
             if not text.strip():
                 pages.append(PdfPage(index, "", []))
                 continue
-            table_settings = {"vertical_strategy": "text", "horizontal_strategy": "text"}
-            tables = page.extract_tables(table_settings) or []
+            tables = page.extract_tables() or []
             cleaned_tables = [
                 [[_clean_cell(cell) for cell in row] for row in table if any(row)]
                 for table in tables
             ]
-            if not cleaned_tables:
+            
+            # If the extracted tables don't have good column structure, fallback to text lines
+            has_good_structure = False
+            for table in cleaned_tables:
+                if sum(1 for row in table if len(row) >= 2) >= 3:
+                    has_good_structure = True
+                    break
+            
+            if not cleaned_tables or not has_good_structure:
                 cleaned_tables = _tables_from_text_lines(text)
             pages.append(PdfPage(index, text, cleaned_tables))
     if pages:
