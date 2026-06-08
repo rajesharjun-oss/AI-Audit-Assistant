@@ -18,93 +18,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from models import CompanyProfile, ReviewOptions
 from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
 
-st.set_page_config(page_title="AI Audit Assistant", page_icon="✨", layout="wide")
-
-st.markdown("""
-<style>
-    /* Import modern typography */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
-    html, body, [class*="css"]  {
-        font-family: 'Inter', sans-serif;
-    }
-
-    /* Glassmorphism for metrics */
-    div[data-testid="metric-container"] {
-        background: rgba(30, 41, 59, 0.7);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
-        border-radius: 12px;
-        padding: 1rem;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    
-    div[data-testid="metric-container"] label,
-    div[data-testid="metric-container"] div {
-        color: #F8FAFC !important;
-    }
-    
-    div[data-testid="metric-container"]:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-    }
-
-    /* Premium buttons with gradient */
-    div.stButton > button {
-        background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
-        color: white !important;
-        border: none;
-        border-radius: 8px;
-        padding: 0.5rem 1rem;
-        font-weight: 500;
-        transition: all 0.2s ease;
-        box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.4);
-    }
-    
-    div.stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 8px -1px rgba(59, 130, 246, 0.6);
-        border: none;
-        color: white !important;
-    }
-
-    /* Expanders styling */
-    .streamlit-expanderHeader {
-        background-color: #1E293B !important;
-        border-radius: 8px;
-        font-weight: 600;
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        color: #F8FAFC !important;
-    }
-    
-    div[data-testid="stExpander"] {
-        background-color: #0F172A;
-        border-radius: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
-        overflow: hidden;
-    }
-    
-    div[data-testid="stExpander"] * {
-        color: #F8FAFC !important;
-    }
-
-    /* Smooth dataframes */
-    .dataframe {
-        border-radius: 8px;
-        overflow: hidden;
-    }
-    
-    /* Headers gradient */
-    h1, h2, h3 {
-        background: -webkit-linear-gradient(45deg, #60A5FA, #3B82F6);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="AI Audit Assistant", page_icon="✨", layout="wide", initial_sidebar_state="expanded")
 def _metric_lines(value: object, empty: str) -> list[str]:
     text = str(value or "").strip()
     if not text or text == empty:
@@ -578,82 +492,100 @@ def _build_word_memo_export(result) -> bytes:
     return output.getvalue()
 
 
-st.set_page_config(page_title="AI Audit Assistant", layout="wide", initial_sidebar_state="expanded")
-
 st.markdown(
     """
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
     :root {
-        --ink: #101820;
-        --muted: #627181;
-        --line: #d9e0e8;
-        --panel: #ffffff;
-        --panel-soft: #f6f8fb;
-        --navy: #071629;
-        --navy-2: #0d243d;
-        --gold: #b9934a;
-        --gold-soft: #efe4cf;
-        --green: #126c55;
-        --red: #9d2433;
+        --bg-color: #0B1120;
+        --panel-bg: rgba(30, 41, 59, 0.7);
+        --text-primary: #F8FAFC;
+        --text-muted: #94A3B8;
+        --accent-blue: #3B82F6;
+        --accent-purple: #8B5CF6;
+        --border-color: rgba(255, 255, 255, 0.1);
+        --gold: #F59E0B;
+        --green: #10B981;
+        --red: #EF4444;
+    }
+
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif !important;
+        color: var(--text-primary);
     }
 
     .stApp {
-        background:
-            linear-gradient(180deg, #f4f6f9 0%, #fbfcfd 38%, #ffffff 100%);
-        color: var(--ink);
+        background: var(--bg-color);
+        background-image: 
+            radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.15) 0px, transparent 50%),
+            radial-gradient(at 100% 0%, rgba(139, 92, 246, 0.15) 0px, transparent 50%);
+        background-attachment: fixed;
     }
 
     [data-testid="stHeader"] {
-        background: rgba(244,246,249,.82);
-        backdrop-filter: blur(10px);
+        background: transparent !important;
     }
 
     .block-container {
         max-width: 1440px;
-        padding-top: 2rem;
+        padding-top: 3rem;
         padding-bottom: 4rem;
     }
 
-    h1, h2, h3 {
-        letter-spacing: 0;
-        color: var(--ink);
+    h1, h2, h3, h4, h5, h6 {
+        letter-spacing: -0.02em;
+        color: var(--text-primary);
+        font-weight: 600;
     }
 
+    /* Premium Hero Section */
     .premium-hero {
-        background:
-            linear-gradient(135deg, rgba(7,22,41,.98), rgba(13,36,61,.94)),
-            radial-gradient(circle at 85% 12%, rgba(185,147,74,.28), transparent 34%);
-        border: 1px solid rgba(185,147,74,.22);
-        border-radius: 8px;
-        padding: 34px 38px 30px;
-        box-shadow: 0 24px 70px rgba(7,22,41,.18);
-        margin-bottom: 24px;
+        background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.9));
+        border: 1px solid var(--border-color);
+        border-radius: 16px;
+        padding: 40px 48px;
+        box-shadow: 0 20px 40px -10px rgba(0,0,0,0.5);
+        margin-bottom: 32px;
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .premium-hero::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0; height: 1px;
+        background: linear-gradient(90deg, transparent, var(--accent-blue), var(--accent-purple), transparent);
+        opacity: 0.5;
     }
 
     .eyebrow {
-        color: var(--gold);
-        font-size: 12px;
+        color: var(--accent-blue);
+        font-size: 13px;
         font-weight: 700;
-        letter-spacing: .16em;
+        letter-spacing: 0.15em;
         text-transform: uppercase;
         margin-bottom: 12px;
     }
 
     .premium-title {
-        color: #ffffff !important;
         font-size: 42px;
-        line-height: 1.05;
-        font-weight: 700;
-        margin: 0;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+        margin-bottom: 16px;
+        background: linear-gradient(135deg, #FFFFFF, #94A3B8);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        line-height: 1.1;
     }
 
     .premium-subtitle {
-        color: #c9d5df !important;
-        max-width: 780px;
-        font-size: 16px;
+        font-size: 18px;
+        color: var(--text-muted);
+        max-width: 800px;
         line-height: 1.6;
-        margin: 14px 0 0;
-    }
 
     .module-grid {
         display: grid;
