@@ -35,8 +35,8 @@ def _infer_expected_policies(nature_text: str) -> list[str]:
     nature_text = nature_text.lower()
     if any(w in nature_text for w in ["sell", "sale", "retail", "wholesale", "goods", "trading", "consumer"]):
         policies.extend(["revenue from customer contracts", "inventory", "trade receivables and ECL"])
-    if any(w in nature_text for w in ["software", "technology", "platform", "app ", "digital", "loyalty"]):
-        policies.extend(["revenue from customer contracts", "contract liabilities", "intangible assets/software"])
+    if any(w in nature_text for w in ["software", "technology", "platform", "app ", "digital", "loyalty", "reward"]):
+        policies.extend(["revenue from customer contracts", "contract liabilities", "ECL/trade receivables", "financial instruments", "intangible/software", "tax", "PPE", "cash and cash equivalents"])
     if any(w in nature_text for w in ["manufactur", "production", "plant", "factory"]):
         policies.extend(["property, plant and equipment", "inventory", "revenue from customer contracts"])
     if any(w in nature_text for w in ["bank", "financ", "lend", "loan", "credit", "invest"]):
@@ -55,6 +55,10 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
         return findings, export_rows
         
     nature_of_business = _extract_nature_of_business(document, combined_text)
+    
+    if nature_of_business and nature_of_business in combined_text:
+        combined_text = combined_text.replace(nature_of_business, "")
+        
     expected_policies = _infer_expected_policies(nature_of_business)
     industry_context_str = f"Nature of business mentions {nature_of_business[:60]}..." if nature_of_business else "Nature of business not clearly detected."
     

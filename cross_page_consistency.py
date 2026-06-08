@@ -6,10 +6,11 @@ from models import PdfDocument, Finding
 
 # 1. Key Amounts Consistency
 KEY_METRICS = {
-    "Revenue": re.compile(r"^(?:Revenue|Turnover|Gross Earnings)\b", re.I),
+    "Revenue": re.compile(r"^(?:Revenue|Turnover|Gross Earnings)\b(?!.*contract liabilit)", re.I),
     "Profit before tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?\s+before\s+tax(?:ation)?\b", re.I),
     "Taxation": re.compile(r"^(?:Taxation|Income tax expense)\b", re.I),
-    "Profit after tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?(?:\s+after\s+tax(?:ation)?)?(?:\s+for\s+the\s+(?:year|period))?\b", re.I),
+    "Profit after tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?(?:\s+after\s+tax(?:ation)?)?(?:\s+for\s+the\s+(?:year|period))?\b(?!.*loss allowance)(?!.*loss on foreign)(?!.*loss carried forward)", re.I),
+    "Total comprehensive income": re.compile(r"^Total\s+comprehensive\s+(?:income|loss)\b", re.I)
 }
 
 # 2. Dates
@@ -42,11 +43,11 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             date_occurrences[match.group(0)].append(page.number)
             
         # Extract potential names in signature blocks or directors lists
-        if any(kw in text.lower() for kw in ("director", "secretary", "signed on behalf", "auditor")):
+        if any(kw in text.lower() for kw in ("director", "secretary", "chief executive", "officer", "auditor")):
             for match in NAME_RE.finditer(text):
                 name = match.group(0)
                 # Exclude obvious non-names
-                if not any(stop in name.lower() for stop in ["annual report", "financial statement", "statement of", "notes to", "cash flow", "value added", "the company", "limited"]):
+                if not any(stop in name.lower() for stop in ["annual report", "financial statement", "statement of", "notes to", "cash flow", "value added", "the company", "limited", "bank", "plc", "kpmg", "pwc", "deloitte", "ernst", "kreston", "pedabo", "audit", "services", "ifrs", "ias"]):
                     name_candidates.append((name, page.number))
 
         for line in text.splitlines():
@@ -54,10 +55,9 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             # Try to match key metrics
             for metric_name, pattern in KEY_METRICS.items():
                 if pattern.match(line):
-                    amounts = re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", line)
+                    amounts = re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d{4,}(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)\)?", line)
                     if amounts:
-                        # Extract the first amount found (current year)
-                        amt_str = amounts[0]
+                        amt_str = amounts[0] if len(amounts) == 1 else amounts[-2] if len(amounts) >= 2 else amounts[0]
                         clean_amt = amt_str.replace(",", "").replace("(", "-").replace(")", "")
                         try:
                             val = Decimal(clean_amt)
@@ -118,23 +118,26 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
     expected_format = "31 December 2025 (DD Month YYYY)" if preferred_format_count >= other_format_count else "December 31, 2025 (Month DD, YYYY)"
 
     for date_str, pages in date_occurrences.items():
-        if not preferred_re.match(date_str):
-            export_data["dates"].append({
-                "Date found": date_str,
-                "Page": ", ".join(map(str, set(pages))),
-                "Expected format": expected_format,
-                "Comment": "Inconsistent date format."
-            })
-            findings.append(
-                Finding(
-                    "Formatting",
-                    "Low",
-                    "Inconsistent Date Format",
-                    f"Date '{date_str}' does not match the preferred format.",
-                    f"Found on pages: {', '.join(map(str, set(pages)))}",
-                    f"Update to match the predominant format ({expected_format})."
+        # Only flag date formatting if the text around it indicates reporting or signing context
+        context_text = " ".join([page.text for p in document.pages if p.number in pages]).lower()
+        if any(kw in context_text for kw in ("ended", "signed", "dated", "approved", "as at")):
+            if not preferred_re.match(date_str):
+                export_data["dates"].append({
+                    "Date found": date_str,
+                    "Page": ", ".join(map(str, set(pages))),
+                    "Expected format": expected_format,
+                    "Comment": "Inconsistent date format."
+                })
+                findings.append(
+                    Finding(
+                        "Formatting",
+                        "Low",
+                        "Inconsistent Date Format",
+                        f"Date '{date_str}' does not match the preferred format.",
+                        f"Found on pages: {', '.join(map(str, set(pages)))}",
+                        f"Update to match the predominant format ({expected_format})."
+                    )
                 )
-            )
 
     # Process names using sequence matcher
     unique_names = defaultdict(list)

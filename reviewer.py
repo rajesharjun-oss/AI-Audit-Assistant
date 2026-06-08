@@ -328,7 +328,7 @@ def review_pdf(
     else:
         checks_performed.append("Cautious note-reference validation completed for primary statement note references.")
         checks_performed.append("Basic note reference and note amount agreement checks completed.")
-    note_sections = _note_sections(document.text)
+    note_sections = _note_sections(document)
     policy_findings, policy_export = review_notes_1_and_2(document, profile, note_sections)
     findings.extend(policy_findings)
     if totals_findings:
@@ -618,6 +618,12 @@ def _looks_like_front_matter_page(text: str) -> bool:
 
 
 def _notes_heading_in_text(text: str) -> bool:
+    lower_text = text.lower()
+    if "contents" in lower_text[:400] or lower_text.count("....") > 2:
+        return False
+    if re.search(r"notes to the financial statements\s*(?:\.{2,}|\s{4,})\s*\d+", lower_text):
+        return False
+        
     for line in text.splitlines()[:60]:
         if _notes_heading_line_score(line) >= 0.82:
             return True
@@ -935,7 +941,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     if document.ocr_used:
         headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
         page_ranges = _note_section_page_ranges(document)
-        note_sections = _note_sections(document.text) if _notes_start_page(document) else {}
+        note_sections = _note_sections(document) if _notes_start_page(document) else {}
         for item in statement_lines:
             current_amount = item.amounts[0] if item.amounts else None
             prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
@@ -1004,7 +1010,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                 )
             )
         return rows
-    note_sections = _note_sections(document.text)
+    note_sections = _note_sections(document)
     headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
     page_ranges = _note_section_page_ranges(document)
     _scale_label, tolerance = _detect_rounding_scale(document.text)
@@ -1489,6 +1495,8 @@ def _detect_framework(text: str) -> str:
 
 def _detect_entity_type(text: str) -> str:
     lower = text.lower()
+    if re.search(r"\b(private company|private limited)\b", lower):
+        return "Private company"
     if re.search(r"\b(plc|public limited)\b", lower):
         return "Public company"
     if re.search(r"\b(limited|ltd)\b", lower) or any(
@@ -1681,9 +1689,13 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                 )
             )
         findings.extend(_check_ocr_statement_of_financial_position(document, tolerance))
+        findings.extend(_check_ocr_statement_of_cash_flows(document, tolerance))
         return findings
 
     skipped_tables: list[str] = []
+    primary_statements = _classified_primary_statement_pages(document)
+    primary_pages = {p.number for p in primary_statements.values()}
+    
     for page in document.pages:
         for table_index, table in enumerate(page.tables, start=1):
             if len(table) < 3:
@@ -1697,12 +1709,20 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
             note_cols = _note_columns(table)
             rows = [_numeric_row(row, note_cols) for row in table]
             max_cols = max((len(row) for row in rows), default=0)
+            table_findings: list[Finding] = []
             for col in range(1, max_cols):
                 if col in note_cols:
                     continue
-                _check_vertical_totals(findings, page.number, table_index, rows, col, tolerance)
-            _check_cross_footings(findings, page.number, table_index, rows, tolerance)
-            _check_column_consistency(findings, page.number, table_index, table)
+                _check_vertical_totals(table_findings, page.number, table_index, rows, col, tolerance)
+            _check_cross_footings(table_findings, page.number, table_index, rows, tolerance)
+            _check_column_consistency(table_findings, page.number, table_index, table)
+            
+            if page.number in primary_pages:
+                for f in table_findings:
+                    if f.severity == "High":
+                        f.severity = "Medium"
+                        f.issue += " (Downgraded severity because specific cross-footing passed for this primary statement)."
+            findings.extend(table_findings)
     if skipped_tables:
         details = "\n".join(skipped_tables)
         findings.append(
@@ -1943,7 +1963,7 @@ def check_notes_agreement(
                 "Use this mode for manual investigation only; rerun on a cleaner PDF before treating detailed note findings as audit exceptions.",
             )
         )
-        note_sections = _note_sections(text)
+        note_sections = _note_sections(document)
         misref_findings, _misreferenced_lines = _check_possible_wrong_note_references(
             _statement_note_lines(document),
             note_sections,
@@ -1979,7 +1999,7 @@ def check_notes_agreement(
                 )
             )
 
-    note_sections = _note_sections(text)
+    note_sections = _note_sections(document)
     misref_findings, misreferenced_lines = _check_possible_wrong_note_references(
         _statement_note_lines(document),
         note_sections,
@@ -5399,7 +5419,13 @@ def _note_refs_from_tables(tables: list[list[list[str]]]) -> set[str]:
     return refs
 
 
-def _note_sections(text: str) -> dict[str, str]:
+def _note_sections(document: PdfDocument) -> dict[str, str]:
+    start_page = _notes_start_page(document)
+    if not start_page:
+        text = document.text
+    else:
+        text = "\n".join(page.text for page in document.pages if page.number >= start_page)
+
     sections: dict[str, list[str]] = defaultdict(list)
     current_refs: list[str] = []
     pending_number: str | None = None
@@ -5609,10 +5635,9 @@ def _clean_note_title(title: str) -> str:
 
 
 def _looks_like_primary_statement_line(line: str) -> bool:
-    lower = line.lower()
-    if not any(keyword in lower for keyword in ("revenue", "assets", "liabilities", "equity", "cash", "cost", "surplus", "deficit", "payables", "receivables", "fund")):
+    if len(NUMBER_RE.findall(line)) < 1:
         return False
-    if len(NUMBER_RE.findall(line)) < 2:
+    if _is_subheading(_clean_statement_line_item(line)):
         return False
     return not _is_notes_page(line)
 
@@ -5648,3 +5673,67 @@ def _note_sort_key(value: str) -> tuple[int, str]:
     if not match:
         return (9999, value)
     return (int(match.group(1)), match.group(2))
+
+def _check_ocr_statement_of_cash_flows(document: PdfDocument, tolerance: Decimal) -> list[Finding]:
+    findings: list[Finding] = []
+    for page in document.pages:
+        lower_text = page.text[:1000].lower()
+        if not ("statement of cash flows" in lower_text or "cash flow statement" in lower_text):
+            continue
+        
+        line_row_map: dict[str, Decimal] = {}
+        for line in page.text.splitlines():
+            line = line.strip()
+            amounts = re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", line)
+            if amounts:
+                amt_str = amounts[0] if len(amounts) == 1 else amounts[-2] if len(amounts) >= 2 else amounts[0]
+                clean_amt = amt_str.replace(",", "").replace("(", "-").replace(")", "")
+                try:
+                    val = Decimal(clean_amt)
+                    lower = line.lower()
+                    if "operating activities" in lower and "net cash" in lower:
+                        line_row_map["operating"] = val
+                    elif "investing activities" in lower and "net cash" in lower:
+                        line_row_map["investing"] = val
+                    elif "financing activities" in lower and "net cash" in lower:
+                        line_row_map["financing"] = val
+                    elif ("increase" in lower or "decrease" in lower) and "cash" in lower and "equivalent" in lower:
+                        line_row_map["movement"] = val
+                    elif ("beginning" in lower or "start" in lower or " 1 " in lower) and "cash" in lower and "equivalent" in lower:
+                        if "opening" not in line_row_map:
+                            line_row_map["opening"] = val
+                    elif ("end" in lower or " 31 " in lower) and "cash" in lower and "equivalent" in lower:
+                        line_row_map["closing"] = val
+                    elif "exchange" in lower:
+                        line_row_map["exchange"] = val
+                except Exception:
+                    pass
+                    
+        if "operating" in line_row_map and "investing" in line_row_map and "financing" in line_row_map and "movement" in line_row_map:
+            expected = line_row_map["operating"] + line_row_map["investing"] + line_row_map["financing"]
+            reported = line_row_map["movement"]
+            diff = reported - expected
+            if abs(diff) > tolerance:
+                findings.append(Finding(
+                    "Totals and rounding",
+                    "High" if abs(diff) > tolerance * 5 else "Medium",
+                    f"Page {page.number} | Statement of cash flows",
+                    "Net operating + investing + financing does not equal total cash movement.",
+                    f"Expected {expected:,}; reported {reported:,}; difference {diff:,}.",
+                    "Review the cash flow statement totals against the signed financial statements."
+                ))
+                
+        if "opening" in line_row_map and "movement" in line_row_map and "closing" in line_row_map:
+            expected = line_row_map["opening"] + line_row_map["movement"] + line_row_map.get("exchange", Decimal(0))
+            reported = line_row_map["closing"]
+            diff = reported - expected
+            if abs(diff) > tolerance:
+                findings.append(Finding(
+                    "Totals and rounding",
+                    "High" if abs(diff) > tolerance * 5 else "Medium",
+                    f"Page {page.number} | Statement of cash flows",
+                    "Opening cash + movement + exchange effect does not equal closing cash.",
+                    f"Expected {expected:,}; reported {reported:,}; difference {diff:,}.",
+                    "Review the cash flow statement totals against the signed financial statements."
+                ))
+    return findings
