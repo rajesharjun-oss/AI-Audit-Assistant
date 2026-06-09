@@ -2029,15 +2029,18 @@ def check_notes_agreement(
             if ref_match and ref_match.group(1) in passed_refs:
                 continue
             findings.append(f)
-        findings.extend(
-            _check_cautious_face_note_amount_agreement(
-                _statement_note_lines(document),
-                note_sections,
-                headings,
-                tolerance,
-                cautious_review_prompt=True,
-            )
+        cautious_findings = _check_cautious_face_note_amount_agreement(
+            _statement_note_lines(document),
+            note_sections,
+            headings,
+            tolerance,
+            cautious_review_prompt=True,
         )
+        for f in cautious_findings:
+            ref_match = re.search(r"Note (\d+[A-Z]?)", f.issue)
+            if ref_match and ref_match.group(1) in passed_refs:
+                continue
+            findings.append(f)
         return findings
     if statement_refs:
         for ref in sorted(heading_refs - statement_refs, key=_note_sort_key):
@@ -3094,8 +3097,8 @@ def _check_cash_flow_text(
         findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Operating, investing, and financing cash flows agree to net increase.", "Equation passed.", ""))
     else:
         skipped.append("Statement of cash flows: skipped because operating/investing/financing/movement rows were not confidently parsed.")
-    open_cash = next((v for k, v in rows.items() if ("beginning" in k or "start" in k or " 1 " in k or "january" in k) and "cash" in k), None)
-    close_cash = next((v for k, v in rows.items() if ("end" in k or " 31 " in k or "december" in k) and "cash" in k), None)
+    open_cash = next((v for k, v in rows.items() if ("beginning" in k or "start" in k or " 1 " in k or "january" in k or "brought forward" in k) and ("cash" in k or "balance" in k or "1 " in k or "jan" in k)), None)
+    close_cash = next((v for k, v in rows.items() if ("end" in k or " 31 " in k or "december" in k or "carried forward" in k) and ("cash" in k or "balance" in k or "31 " in k or "dec" in k)), None)
     exc = next((v for k, v in rows.items() if "exchange" in k), None)
 
     if open_cash and close_cash and mov:
@@ -4812,7 +4815,7 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     note_match = NOTE_REF_RE.search(line)
     implicit_match = None
     if not explicit_ref:
-        implicit_match = re.search(r"(?<![\.\d])\b(\d{1,2}[A-C]?)\b(?=\s+\(?-?\d[\d,\s]*\)?)", line, flags=re.I)
+        implicit_match = re.search(r"(?<![\.\d])\b(\d{1,2}[A-C]?)\b(?=\s+[-=]?\s*\(?-?\d[\d,\s]*\)?)", line, flags=re.I)
         if implicit_match and _amounts_in_text(line[: implicit_match.start()]):
             implicit_match = None
     ref = explicit_ref or (implicit_match.group(1).upper() if implicit_match else "")
@@ -4821,7 +4824,7 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     ref_start = note_match.start() if note_match else (implicit_match.start() if implicit_match else len(line))
     ref_end = note_match.end() if note_match else (implicit_match.end() if implicit_match else ref_start)
     label = _clean_statement_line_item(line[:ref_start])
-    if not label or _is_subheading(label):
+    if not label or _is_subheading(label) or not _statement_row_label_allowed(label):
         return None
     if not explicit_ref and _line_item_not_face_linked(label, statement_name, False):
         pass # Allow parsing lines without explicit refs to flag missing note references
@@ -5439,6 +5442,10 @@ def _note_sections(document: PdfDocument) -> dict[str, str]:
             continue
         match = NOTE_HEADING_RE.match(stripped)
         if match and _valid_note_heading(match.group(1), match.group(2)):
+            # Ignore split policy subsections (e.g. `1.`\n`4 Intangible assets`)
+            prev_line = lines[index-1].strip() if index > 0 else ""
+            if prev_line in {f"{current_refs[0]}.", f"{current_refs[0]}"} if current_refs else False:
+                continue
             current_refs = [match.group(1).upper()]
             pending_number = None
         else:
