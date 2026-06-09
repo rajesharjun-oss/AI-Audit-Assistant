@@ -2019,8 +2019,6 @@ def check_notes_agreement(
         # Actually, let's just use the main rows builder.
         try:
             # We call the same function the exporter uses to get the True/False passed states
-            if document.ocr_used:
-                check_result_rows = [] # Wait, _note_agreement_result_rows(document) handles OCR too!
             check_result_rows = _note_agreement_result_rows(document)
             passed_refs = {row["Note reference"] for row in check_result_rows if row["Result"] == "Passed"}
         except Exception:
@@ -3247,7 +3245,7 @@ def _label_prefers_split_leading_digit(label: str) -> bool:
 
 def _amount_tokens_from_statement_line(line: str) -> list[str]:
     cleaned = _normalise_statement_number_spacing(line)
-    cleaned = re.sub(r"\s[-=]\s*(?=\(?\s?\d)", " 0 ", cleaned)
+    cleaned = re.sub(r"\s+[-=]\s*(?=\(?\s?\d)", " 0 ", cleaned)
     return re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", cleaned)
 
 
@@ -3511,7 +3509,7 @@ def _normalise_statement_number_spacing(line: str) -> str:
 
 def _amounts_from_statement_line(line: str) -> list[Decimal]:
     cleaned = _normalise_statement_number_spacing(line)
-    cleaned = re.sub(r"\s[-=]\s*(?=\(?\s?\d)", " 0 ", cleaned)
+    cleaned = re.sub(r"\s+[-=]\s*(?=\(?\s?\d)", " 0 ", cleaned)
     tokens = re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", cleaned)
     amounts = [_parse_decimal(token) for token in tokens]
     amounts = [amount for amount in amounts if amount is not None]
@@ -5480,6 +5478,9 @@ def _is_notes_page(text: str) -> bool:
 
 def _valid_note_heading(number: str, title: str) -> bool:
     number = number.upper().strip()
+    # Reject policy subsections starting with a number like "1.4" or ".4"
+    if re.match(r"^\.?\d+\b", title.strip()):
+        return False
     title_clean = _clean_note_title(title)
     title_lower = title_clean.lower()
     if not _valid_note_number(number):
@@ -5640,7 +5641,7 @@ def _looks_like_primary_statement_line(line: str) -> bool:
     if len(NUMBER_RE.findall(line)) < 1:
         return False
         
-    lower = line.lower()
+    lower = re.sub(r"\s+", " ", line.lower()).strip()
     reject_phrases = [
         "financial statements", "statement of", "year ended", "as at", 
         "signed on", "behalf", "behal b", "the notes on page", "pages", "director", 
@@ -5652,6 +5653,8 @@ def _looks_like_primary_statement_line(line: str) -> bool:
     text_only = re.sub(r"[\d\.,\(\)\-\|]", "", lower).strip()
     # Reject lines that contain only letters N, M, O (common unit/currency artifacts) or are too short.
     letters_only = re.sub(r"[^a-z]", "", lower)
+    if letters_only == "nn" or letters_only == "behalb":
+        return False
     if len(letters_only) < 3 or set(letters_only).issubset({"n", "m", "o"}):
         return False
         
