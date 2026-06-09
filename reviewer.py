@@ -2105,7 +2105,15 @@ def check_notes_agreement(
         if any(keyword in title or keyword in section.lower() for keyword in ("depreciation", "property, plant", "ppe")):
             _check_depreciation_note(findings, ref, section, tolerance)
 
-
+    import re
+    filtered_findings = []
+    for f in findings:
+        if f.category == "Notes agreement" and "not found" in f.issue.lower():
+            ref_match = re.search(r"Note (\d+[A-Z]?)", f.issue)
+            if ref_match and ref_match.group(1) in passed_refs:
+                continue
+        filtered_findings.append(f)
+    findings = filtered_findings
 
     return findings
 
@@ -3384,6 +3392,18 @@ def _statement_row_label_allowed(label: str) -> bool:
         "net cash inflow from operating activities",
         "net cash absorbed in investing activities",
         "net cash inflow from financing activities",
+        "net cash generated from operating activities",
+        "net cash used in operating activities",
+        "net cash from operating activities",
+        "net cash generated from investing activities",
+        "net cash used in investing activities",
+        "net cash from investing activities",
+        "net cash generated from financing activities",
+        "net cash used in financing activities",
+        "net cash from financing activities",
+        "net cash",
+        "net increase in cash",
+        "net decrease in cash",
     }
     if normalized in {_normalise_match_words(item) for item in allowed_exact}:
         return True
@@ -3451,6 +3471,18 @@ def _canonical_statement_label(label: str) -> str:
         "net cash inflow from operating activities",
         "net cash absorbed in investing activities",
         "net cash inflow from financing activities",
+        "net cash generated from operating activities",
+        "net cash used in operating activities",
+        "net cash from operating activities",
+        "net cash generated from investing activities",
+        "net cash used in investing activities",
+        "net cash from investing activities",
+        "net cash generated from financing activities",
+        "net cash used in financing activities",
+        "net cash from financing activities",
+        "net cash",
+        "net increase in cash",
+        "net decrease in cash",
     }
     if normalized in {_normalise_match_words(item) for item in protected_labels}:
         return label
@@ -4990,6 +5022,7 @@ def _note_reference_review_prompt(
         issue = f"Possible wrong note reference: {item.line_item.title()} references Note {item.ref}, but Note {suggested_ref} appears to be a stronger match."
     else:
         issue = f"Referenced note not found: {item.line_item.title()} references Note {item.ref}, but that note was not detected."
+        confidence = "Low"
     evidence = (
         f"Line: {item.line[:160]}. Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}. "
         f"Reason: {reason}"
@@ -5436,9 +5469,10 @@ def _note_sections(document: PdfDocument) -> dict[str, str]:
         match = NOTE_HEADING_RE.match(stripped)
         if match and _valid_note_heading(match.group(1), match.group(2)):
             prev_line = lines[index-1].strip() if index > 0 else ""
-            # If the previous line is literally just '1.', '2.', '3.', '4.', '5.' we are in a split policy!
             if re.match(r"^\d+\.$", prev_line):
-                continue
+                prev_num = prev_line.strip(".")
+                if prev_num != match.group(1):
+                    continue
             current_refs = [match.group(1).upper()]
             pending_number = None
         else:
