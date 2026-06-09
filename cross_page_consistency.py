@@ -9,7 +9,7 @@ KEY_METRICS = {
     "Revenue": re.compile(r"^(?:Revenue|Turnover|Gross Earnings)\b", re.I),
     "Profit before tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?\s+before\s+tax(?:ation)?\b", re.I),
     "Taxation": re.compile(r"^(?:Taxation|Income tax expense)\b", re.I),
-    "Profit after tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?(?:\s+after\s+tax(?:ation)?)?(?:\s+for\s+the\s+(?:year|period))?\b", re.I),
+    "Profit after tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?(?:\s+after\s+tax(?:ation)?|\s+for\s+the\s+(?:year|period))\b", re.I),
     "Total comprehensive income": re.compile(r"^Total\s+comprehensive\s+(?:income|loss)\b", re.I)
 }
 
@@ -50,7 +50,13 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         # Extract potential names in signature blocks or directors lists
         if any(kw in text.lower() for kw in ("director", "secretary", "chief executive", "officer", "auditor")):
             for match in NAME_RE.finditer(text):
-                name = re.sub(r"(?i)\s+(?:board|director|directors|manager|officer|table|notes|chief|executive|committee|chairman)$", "", match.group(0))
+                name = re.sub(r"(?i)\b(?:chief|mr|mrs|dr|sir|board|director|directors|manager|officer|table|notes|executive|committee|chairman)\b", " ", match.group(0))
+                name = re.sub(r"\s+", " ", name).strip()
+                if len(name.split()) >= 4:
+                    parts = name.split()
+                    name_candidates.append((" ".join(parts[:2]), page.number))
+                    name_candidates.append((" ".join(parts[2:]), page.number))
+                    continue
                 stop_words = [
                     "annual report", "financial statement", "statement of", "notes to", "cash flow", "value added", 
                     "the company", "limited", "bank", "plc", "kpmg", "pwc", "deloitte", "ernst", "kreston", "pedabo", 

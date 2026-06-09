@@ -271,6 +271,9 @@ def _build_excel_export(result) -> bytes:
         policy_rows = result.metrics.get("policy_export", []) or [{"Paragraph reviewed": "None found"}]
         pd.DataFrame(policy_rows).to_excel(writer, sheet_name="Notes 1 and 2 policy review", index=False)
         
+        unref_rows = result.metrics.get("unreferenced_notes", []) or [{"Note": "None", "Heading": "None found", "Comment": "All notes referenced or filtered"}]
+        pd.DataFrame(unref_rows).to_excel(writer, sheet_name="Unreferenced notes", index=False)
+        
         cross_export = result.metrics.get("cross_page_export", {})
         amount_rows = cross_export.get("key_amounts", []) or [{"Metric": "None found"}]
         name_rows = cross_export.get("names", []) or [{"Name variant 1": "None found"}]
@@ -298,6 +301,7 @@ def _build_excel_export(result) -> bytes:
         _format_excel_table_sheet(writer.book["Items without notes summary"], "NoNotesSummary")
         _format_excel_table_sheet(writer.book["Note-linked review"], "NoteLinkedReview")
         _format_excel_table_sheet(writer.book["Notes 1 and 2 policy review"], "PolicyReview")
+        _format_excel_table_sheet(writer.book["Unreferenced notes"], "UnreferencedNotes")
         _format_excel_table_sheet(writer.book["Key amount consistency"], "AmountConsistency")
         _format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
         _format_excel_table_sheet(writer.book["Date consistency"], "DateConsistency")

@@ -346,6 +346,22 @@ def review_pdf(
     return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug, cross_page_export, policy_export)
 
 
+def _get_note_section_with_fallback(ref: str, note_sections: dict[str, str]) -> str:
+    section = _get_note_section_with_fallback(ref, note_sections)
+    if section: return section
+    if re.search(r'[A-Za-z]$', ref):
+        parent = re.sub(r'[A-Za-z]+$', '', ref)
+        return note_sections.get(parent, "")
+    return ""
+
+def _get_note_heading_with_fallback(ref: str, headings: dict[str, str]) -> str:
+    heading = _get_note_heading_with_fallback(ref, headings)
+    if heading: return heading
+    if re.search(r'[A-Za-z]$', ref):
+        parent = re.sub(r'[A-Za-z]+$', '', ref)
+        return headings.get(parent, "")
+    return ""
+
 def _document_scope(document: PdfDocument) -> str:
     return "Limited-scope statement extract" if _is_limited_scope_statement_extract(document) else "Full financial statement or mixed upload"
 
@@ -1079,8 +1095,8 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                 )
             )
             continue
-        referenced_section = note_sections.get(item.ref, "")
-        if _is_disclosure_only_note(headings.get(item.ref, "")):
+        referenced_section = _get_note_section_with_fallback(item.ref, note_sections)
+        if _is_disclosure_only_note(_get_note_heading_with_fallback(item.ref, headings)):
             rows.append(
                 _note_agreement_result_row(
                     item,
@@ -1943,12 +1959,12 @@ def check_notes_agreement(
             continue
         findings.append(
             Finding(
+                "Extraction quality",
+                "Low",
                 "Notes agreement",
-                "High",
-                "Primary statements",
-                f"Statement references note {ref}, but a matching note heading was not found.",
+                f"Statement references note {ref}, but a matching note heading was not confidently detected or parsed; review prompt only.",
                 f"Detected statement reference: Note {ref}.",
-                "Add the missing note or correct the note reference in the primary statement.",
+                "Confirm if the note exists manually. (Downgraded to Low to avoid false positives from OCR/heading extraction misses).",
             )
         )
     if not detailed_note_checks_allowed and not cautious_low_confidence:
@@ -1999,16 +2015,12 @@ def check_notes_agreement(
                 continue
             if _is_disclosure_only_note(headings[ref]):
                 continue
-            findings.append(
-                Finding(
-                    "Notes agreement",
-                    "Low",
-                    f"Note {ref}",
-                    f"Note {ref} exists but was not referenced from the extracted primary statements.",
-                    headings[ref][:90],
-                    "Confirm whether this is a required disclosure-only note or whether a statement reference is missing.",
-                )
-            )
+            document.unreferenced_notes = getattr(document, "unreferenced_notes", [])
+            document.unreferenced_notes.append({
+                "Note": ref,
+                "Heading": headings[ref],
+                "Comment": "Note exists but was not referenced from the extracted primary statements."
+            })
 
     note_sections = _note_sections(document)
     misref_findings, misreferenced_lines = _check_possible_wrong_note_references(
@@ -2022,8 +2034,8 @@ def check_notes_agreement(
     for ref, line, amount in _statement_lines_with_note_refs(document):
         if (ref, line) in misreferenced_lines:
             continue
-        section = note_sections.get(ref, "")
-        if not section or _is_disclosure_only_note(headings.get(ref, "")):
+        section = _get_note_section_with_fallback(ref, note_sections)
+        if not section or _is_disclosure_only_note(_get_note_heading_with_fallback(ref, headings)):
             continue
         note_amounts = _amounts_in_text(section)
         if note_amounts and not any(abs(note_amount - amount) <= tolerance for note_amount in note_amounts):
@@ -2039,7 +2051,7 @@ def check_notes_agreement(
             )
 
     for ref, section in note_sections.items():
-        title = headings.get(ref, "").lower()
+        title = _get_note_heading_with_fallback(ref, headings).lower()
         _check_note_internal_total(findings, ref, title, section, tolerance)
         if any(keyword in title or keyword in section.lower() for keyword in ("segment", "operating segment")):
             _check_segment_note(findings, ref, section, tolerance)
@@ -3024,7 +3036,7 @@ def _check_cash_flow_text(
     op = next((v for k, v in rows.items() if "operating activities" in k), None)
     inv = next((v for k, v in rows.items() if "investing activities" in k), None)
     fin = next((v for k, v in rows.items() if "financing activities" in k), None)
-    mov = next((v for k, v in rows.items() if ("increase" in k or "decrease" in k) and "cash" in k and "equivalent" in k), None)
+    mov = next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k) and "cash" in k), None)
 
     if op and inv and fin and mov:
         expected = [a + b + c for a, b, c in zip(op, inv, fin)]
@@ -4867,8 +4879,8 @@ def _check_possible_wrong_note_references(
             continue
         if _note_agreement_skip_reason(item):
             continue
-        referenced = note_sections.get(item.ref, "")
-        referenced_heading = headings.get(item.ref, "")
+        referenced = _get_note_section_with_fallback(item.ref, note_sections)
+        referenced_heading = _get_note_heading_with_fallback(item.ref, headings)
         if _is_disclosure_only_note(referenced_heading):
             continue
         if item.ref and not referenced_heading:
@@ -4885,13 +4897,13 @@ def _check_possible_wrong_note_references(
         best_match: dict[str, bool] = {"wording": False, "amount": False}
         best_heading_score = 0.0
         for candidate_ref in headings:
-            if candidate_ref == item.ref or _is_disclosure_only_note(headings.get(candidate_ref, "")):
+            if candidate_ref == item.ref or _is_disclosure_only_note(_get_note_heading_with_fallback(candidate_ref, headings)):
                 continue
-            section = note_sections.get(candidate_ref, "")
-            if not _alternative_note_semantically_allowed(item.line_item, headings.get(candidate_ref, ""), section):
+            section = _get_note_section_with_fallback(candidate_ref, note_sections)
+            if not _alternative_note_semantically_allowed(item.line_item, _get_note_heading_with_fallback(candidate_ref, headings), section):
                 continue
-            match = _note_match_strength(item, headings.get(candidate_ref, ""), section, tolerance, all_sections=note_sections)
-            heading_score = max(_wording_match_score(item.line_item, headings.get(candidate_ref, "")), _semantic_heading_score(item.line_item, headings.get(candidate_ref, "")))
+            match = _note_match_strength(item, _get_note_heading_with_fallback(candidate_ref, headings), section, tolerance, all_sections=note_sections)
+            heading_score = max(_wording_match_score(item.line_item, _get_note_heading_with_fallback(candidate_ref, headings)), _semantic_heading_score(item.line_item, _get_note_heading_with_fallback(candidate_ref, headings)))
             stronger_heading = heading_score >= 0.82 and heading_score > referenced_heading_score + 0.12
             if not (match["wording"] or match["amount"] or stronger_heading):
                 continue
@@ -4973,13 +4985,13 @@ def _check_cautious_face_note_amount_agreement(
         if not item.ref:
             continue
         line_key = f"{item.ref}|{item.line}"
-        if line_key in suppressed_lines or _is_disclosure_only_note(headings.get(item.ref, "")):
+        if line_key in suppressed_lines or _is_disclosure_only_note(_get_note_heading_with_fallback(item.ref, headings)):
             continue
         if _note_agreement_skip_reason(item):
             continue
         if not item.amounts or len(item.amounts) < 1:
             continue
-        referenced_section = note_sections.get(item.ref, "")
+        referenced_section = _get_note_section_with_fallback(item.ref, note_sections)
         if not referenced_section:
             continue
         current_amount = item.amounts[0] if len(item.amounts) >= 1 else None
@@ -4990,7 +5002,7 @@ def _check_cautious_face_note_amount_agreement(
         prior_found = prior_match["found"]
         if current_found and (prior_amount is None or prior_found):
             continue
-        heading_score = _wording_match_score(item.line_item, headings.get(item.ref, ""))
+        heading_score = _wording_match_score(item.line_item, _get_note_heading_with_fallback(item.ref, headings))
         if heading_score >= 0.82 and (current_found or prior_found):
             continue
         alternative_ref = _alternative_note_for_missing_amounts(item, note_sections, headings, tolerance)
@@ -5112,9 +5124,9 @@ def _alternative_note_for_missing_amounts(
     best_count = 0
     best_wording = 0.0
     for ref, section in note_sections.items():
-        if ref == item.ref or _is_disclosure_only_note(headings.get(ref, "")):
+        if ref == item.ref or _is_disclosure_only_note(_get_note_heading_with_fallback(ref, headings)):
             continue
-        heading = headings.get(ref, "")
+        heading = _get_note_heading_with_fallback(ref, headings)
         if not _alternative_note_semantically_allowed(item.line_item, heading, section):
             continue
         wording = _wording_match_score(item.line_item, heading)
@@ -5138,14 +5150,14 @@ def _weak_semantic_alternative_note(
     headings: dict[str, str],
     note_sections: dict[str, str],
 ) -> str:
-    referenced_heading = headings.get(item.ref, "")
+    referenced_heading = _get_note_heading_with_fallback(item.ref, headings)
     referenced_score = _wording_match_score(item.line_item, referenced_heading)
     best_ref = ""
     best_score = referenced_score
     for ref, heading in headings.items():
         if ref == item.ref:
             continue
-        if not _alternative_note_semantically_allowed(item.line_item, heading, note_sections.get(ref, "")):
+        if not _alternative_note_semantically_allowed(item.line_item, heading, _get_note_section_with_fallback(ref, note_sections)):
             continue
         score = max(_wording_match_score(item.line_item, heading), _semantic_heading_score(item.line_item, heading))
         if score >= 0.82 and score > best_score + 0.12:
@@ -5435,7 +5447,7 @@ def _valid_note_heading(number: str, title: str) -> bool:
         return False
     if title_lower.startswith(("financial statements for the year ended", "audited financial statements")):
         return False
-    if NUMBER_RE.search(title_clean):
+    if len(NUMBER_RE.findall(title_clean)) > 1:
         return False
     front_matter_terms = (
         "directors",
@@ -5586,12 +5598,12 @@ def _looks_like_primary_statement_line(line: str) -> bool:
         "signed on", "behalf", "behal b", "the notes on page", "pages", "director", 
         "chairman", "secretary", "approval", "n n", "0 0"
     ]
-    if any(phrase in lower for phrase in reject_phrases):
+    if any(phrase in lower for phrase in reject_phrases) or re.search(r"(?i)\b(?:were signed|approval|n\s*n)\b", lower):
         return False
         
     text_only = re.sub(r"[\d\.,\(\)\-\|]", "", lower).strip()
     # Reject lines that contain only letters N, M, O (common unit/currency artifacts) or are too short.
-    if len(text_only) < 3 or not re.sub(r"[nmo\s]", "", text_only):
+    if len(re.sub(r"[nmo\s]", "", text_only)) < 3:
         return False
         
     if _is_subheading(_clean_statement_line_item(line)):
