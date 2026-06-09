@@ -1752,9 +1752,8 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                 if f.severity == "High":
                     f.severity = "Medium"
                     f.issue += " (Downgraded severity because table structure in notes may be complex)."
-                if getattr(document, "table_extraction_confidence", 100) < 90 and f.severity in ("Medium", "High"):
-                    f.severity = "Low"
-                    f.issue += " (Downgraded to Low because table structure confidence is < 90%)."
+                # Wait, I can't put this inside the loop easily without access to total skipped tables.
+                pass
             findings.extend(table_findings)
     if skipped_tables:
         details = "\n".join(skipped_tables)
@@ -2007,7 +2006,31 @@ def check_notes_agreement(
             tolerance,
             cautious_review_prompt=True,
         )
-        findings.extend(misref_findings)
+        # Filter contradictions
+        cautious_findings = _check_cautious_face_note_amount_agreement(
+            _statement_note_lines(document),
+            headings,
+            _note_section_page_ranges(document),
+            document,
+            tolerance,
+        )
+        passed_refs = set()
+        # By default, cautious findings only emits findings for FAILURES. If a note is NOT in cautious_findings, it might have passed!
+        # Actually, let's just use the main rows builder.
+        try:
+            # We call the same function the exporter uses to get the True/False passed states
+            if document.ocr_used:
+                check_result_rows = [] # Wait, _note_agreement_result_rows(document) handles OCR too!
+            check_result_rows = _note_agreement_result_rows(document)
+            passed_refs = {row["Note reference"] for row in check_result_rows if row["Result"] == "Passed"}
+        except Exception:
+            pass
+            
+        for f in misref_findings:
+            ref_match = re.search(r"Note (\d+[A-Z]?)", f.evidence)
+            if ref_match and ref_match.group(1) in passed_refs:
+                continue
+            findings.append(f)
         findings.extend(
             _check_cautious_face_note_amount_agreement(
                 _statement_note_lines(document),
@@ -2039,7 +2062,17 @@ def check_notes_agreement(
         tolerance,
         cautious_review_prompt=not detailed_note_checks_allowed and cautious_low_confidence,
     )
-    findings.extend(misref_findings)
+    try:
+        check_result_rows = _note_agreement_result_rows(document)
+        passed_refs = {row["Note reference"] for row in check_result_rows if row["Result"] == "Passed"}
+    except Exception:
+        passed_refs = set()
+        
+    for f in misref_findings:
+        ref_match = re.search(r"Note (\d+[A-Z]?)", f.evidence)
+        if ref_match and ref_match.group(1) in passed_refs:
+            continue
+        findings.append(f)
     for ref, line, amount in _statement_lines_with_note_refs(document):
         if (ref, line) in misreferenced_lines:
             continue
@@ -3187,7 +3220,7 @@ def _parse_ocr_statement_row(line: str) -> OcrStatementRow | None:
 
 
 def _detect_statement_row_note_token(line: str) -> tuple[str, int, int]:
-    for match in re.finditer(r"\b(?:note\s+)?(\d{1,2}[A-C]?)(?!\s*,)\b(?=\s*(?:[=:]\s*)?\(?-?\d)", line, flags=re.I):
+    for match in re.finditer(r"\b(?:note\s+)?(\d{1,2}[A-Za-z]?)(?!\s*,)\b(?=\s*(?:[=:]\s*)?\(?-?\d)", line, flags=re.I):
         ref = match.group(1).upper()
         if not _valid_note_number(ref):
             continue
@@ -3214,7 +3247,7 @@ def _label_prefers_split_leading_digit(label: str) -> bool:
 
 def _amount_tokens_from_statement_line(line: str) -> list[str]:
     cleaned = _normalise_statement_number_spacing(line)
-    cleaned = re.sub(r"\s-\s+(?=\(?\s?\d)", " 0 ", cleaned)
+    cleaned = re.sub(r"\s[-=]\s*(?=\(?\s?\d)", " 0 ", cleaned)
     return re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", cleaned)
 
 
@@ -3478,7 +3511,7 @@ def _normalise_statement_number_spacing(line: str) -> str:
 
 def _amounts_from_statement_line(line: str) -> list[Decimal]:
     cleaned = _normalise_statement_number_spacing(line)
-    cleaned = re.sub(r"\s-\s+(?=\(?\s?\d)", " 0 ", cleaned)
+    cleaned = re.sub(r"\s[-=]\s*(?=\(?\s?\d)", " 0 ", cleaned)
     tokens = re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", cleaned)
     amounts = [_parse_decimal(token) for token in tokens]
     amounts = [amount for amount in amounts if amount is not None]
@@ -5455,8 +5488,7 @@ def _valid_note_heading(number: str, title: str) -> bool:
         return False
     if not _note_heading_title_is_structural(title_clean):
         return False
-    if re.match(r"^\d+\b", title_clean):
-        return False
+
     if re.search(r"[A-C]$", number) and not _suffixed_note_heading_title_is_structural(title_clean):
         return False
     if title_lower.startswith(("to the", "notes to", "are", "and", "for the year", "in thousands", "n'000")):
