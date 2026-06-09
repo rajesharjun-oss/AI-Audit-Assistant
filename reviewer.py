@@ -598,11 +598,6 @@ def _note_section_page_ranges(document: PdfDocument) -> dict[str, str]:
 
 
 def _notes_start_page(document: PdfDocument) -> int | None:
-    if document.ocr_used:
-        candidates = _notes_heading_candidates(document, include_weak=False)
-        accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
-        if accepted:
-            return int(accepted[0]["page"])
     pages = list(document.pages)
     for i, page in enumerate(pages):
         text_lower = page.text.lower()
@@ -1757,6 +1752,9 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                 if f.severity == "High":
                     f.severity = "Medium"
                     f.issue += " (Downgraded severity because table structure in notes may be complex)."
+                if getattr(document, "table_extraction_confidence", 100) < 90 and f.severity in ("Medium", "High"):
+                    f.severity = "Low"
+                    f.issue += " (Downgraded to Low because table structure confidence is < 90%)."
             findings.extend(table_findings)
     if skipped_tables:
         details = "\n".join(skipped_tables)
@@ -3164,6 +3162,9 @@ def _parse_ocr_statement_row(line: str) -> OcrStatementRow | None:
     label = _canonical_statement_label(_statement_label(label_source))
     if not label:
         return None
+    letters_only = re.sub(r"[^a-z]", "", label.lower())
+    if label.lower().strip() in {"n n", "0 0"} or len(letters_only) < 3 or set(letters_only).issubset({"n", "m", "o", "v"}):
+        return None
     amount_source = f"{line[:ref_start]} {line[ref_end:]}" if note_ref else line
     amount_tokens = _amount_tokens_from_statement_line(amount_source)
     amounts = [_parse_decimal(token) for token in amount_tokens]
@@ -3279,7 +3280,7 @@ def _statement_row_label_allowed(label: str) -> bool:
     if not normalized:
         return False
     letters_only = re.sub(r"[^a-z]", "", label.lower())
-    if len(letters_only) < 3 or set(letters_only).issubset({"n", "m", "o"}):
+    if label.lower().strip() in {"n n", "0 0"} or len(letters_only) < 3 or set(letters_only).issubset({"n", "m", "o", "v"}):
         return False
     blocked_terms = (
         "financial statements",
@@ -5676,13 +5677,13 @@ def _check_ocr_statement_of_cash_flows(document: PdfDocument, tolerance: Decimal
                 try:
                     val = Decimal(clean_amt)
                     lower = line.lower()
-                    if "operating activities" in lower:
+                    if "operat" in lower and not "operating" in line_row_map:
                         line_row_map["operating"] = val
-                    elif "investing activities" in lower:
+                    elif "invest" in lower and not "investing" in line_row_map:
                         line_row_map["investing"] = val
-                    elif "financing activities" in lower:
+                    elif "financ" in lower and not "financing" in line_row_map:
                         line_row_map["financing"] = val
-                    elif ("increase" in lower or "decrease" in lower) and "cash" in lower and "equivalent" in lower:
+                    elif ("increase" in lower or "decrease" in lower or "movement" in lower or "net cash" in lower or "cash flow" in lower) and not any(x in lower for x in ["operat", "invest", "financ"]) and "movement" not in line_row_map:
                         line_row_map["movement"] = val
                     elif ("beginning" in lower or "start" in lower or " 1 " in lower or "january" in lower) and "cash" in lower:
                         if "opening" not in line_row_map:
@@ -5707,6 +5708,8 @@ def _check_ocr_statement_of_cash_flows(document: PdfDocument, tolerance: Decimal
                     f"Expected {expected:,}; reported {reported:,}; difference {diff:,}.",
                     "Review the cash flow statement totals against the signed financial statements."
                 ))
+            else:
+                findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Operating, investing, and financing cash flows agree to net increase.", "Equation passed.", ""))
                 
         if "opening" in line_row_map and "movement" in line_row_map and "closing" in line_row_map:
             expected = line_row_map["opening"] + line_row_map["movement"] + line_row_map.get("exchange", Decimal(0))
@@ -5721,4 +5724,6 @@ def _check_ocr_statement_of_cash_flows(document: PdfDocument, tolerance: Decimal
                     f"Expected {expected:,}; reported {reported:,}; difference {diff:,}.",
                     "Review the cash flow statement totals against the signed financial statements."
                 ))
+            else:
+                findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Closing cash agrees to opening cash plus net increase.", "Equation passed.", ""))
     return findings

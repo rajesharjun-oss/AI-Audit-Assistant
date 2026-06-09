@@ -107,7 +107,7 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
         mentioned_standards = list(dict.fromkeys(mentioned_standards))
         
         aligned = False
-        extended_topics = expected_policies + ["basis of preparation", "judgement", "judgment", "going concern", "cash and cash equivalents", "tax", "receivables", "ecl", "property, plant and equipment", "intangible", "revenue", "contract liabilit"]
+        extended_topics = expected_policies + ["basis of preparation", "judgement", "judgment", "going concern", "cash and cash equivalents", "tax", "receivables", "ecl", "property, plant and equipment", "intangible", "revenue", "contract liabilit", "financial instruments", "cash"]
         for policy in extended_topics:
             if policy.lower() in para.lower():
                 aligned = True
