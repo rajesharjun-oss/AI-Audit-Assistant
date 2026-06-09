@@ -347,7 +347,7 @@ def review_pdf(
 
 
 def _get_note_section_with_fallback(ref: str, note_sections: dict[str, str]) -> str:
-    section = _get_note_section_with_fallback(ref, note_sections)
+    section = note_sections.get(ref, "")
     if section: return section
     if re.search(r'[A-Za-z]$', ref):
         parent = re.sub(r'[A-Za-z]+$', '', ref)
@@ -355,7 +355,7 @@ def _get_note_section_with_fallback(ref: str, note_sections: dict[str, str]) -> 
     return ""
 
 def _get_note_heading_with_fallback(ref: str, headings: dict[str, str]) -> str:
-    heading = _get_note_heading_with_fallback(ref, headings)
+    heading = headings.get(ref, "")
     if heading: return heading
     if re.search(r'[A-Za-z]$', ref):
         parent = re.sub(r'[A-Za-z]+$', '', ref)
