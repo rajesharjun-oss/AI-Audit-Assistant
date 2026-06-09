@@ -1722,15 +1722,17 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
             _check_column_consistency(table_findings, page.number, table_index, table)
             
             if page.number in primary_pages:
-                for f in table_findings:
-                    if f.severity == "High":
-                        f.severity = "Medium"
-                        f.issue += " (Downgraded severity because specific cross-footing passed for this primary statement)."
-            else:
-                for f in table_findings:
-                    if f.severity == "High":
-                        f.severity = "Medium"
-                        f.issue += " (Downgraded severity because table structure in notes may be complex)."
+                # Suppress generic table math findings on primary statements because statement-specific checks handle them.
+                continue
+            
+            if document.table_extraction_confidence < 80:
+                skipped_tables.append(f"Page {page.number}, table {table_index}: skipped because overall table extraction confidence is low ({document.table_extraction_confidence}%).")
+                continue
+
+            for f in table_findings:
+                if f.severity == "High":
+                    f.severity = "Medium"
+                    f.issue += " (Downgraded severity because table structure in notes may be complex)."
             findings.extend(table_findings)
     if skipped_tables:
         details = "\n".join(skipped_tables)
@@ -2048,68 +2050,7 @@ def check_notes_agreement(
         if any(keyword in title or keyword in section.lower() for keyword in ("depreciation", "property, plant", "ppe")):
             _check_depreciation_note(findings, ref, section, tolerance)
 
-    for item in _statement_note_lines(document):
-        if item.ref:
-            continue
-        if _note_agreement_skip_reason(item):
-            continue
-        if not item.amounts:
-            continue
 
-        current_amount = item.amounts[0] if len(item.amounts) >= 1 else None
-        prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
-
-        best_ref = ""
-        best_score = -1
-        best_match: dict[str, bool] = {"wording": False, "amount": False}
-        best_heading_score = 0.0
-
-        for candidate_ref in headings:
-            if _is_disclosure_only_note(headings.get(candidate_ref, "")):
-                continue
-            section = note_sections.get(candidate_ref, "")
-            if not _alternative_note_semantically_allowed(item.line_item, headings.get(candidate_ref, ""), section):
-                continue
-
-            current_found = _amount_match_in_section(current_amount, section, tolerance)["found"]
-            prior_found = _amount_match_in_section(prior_amount, section, tolerance)["found"] if prior_amount is not None else True
-            amount_match = current_found and prior_found
-
-            heading_score = max(_wording_match_score(item.line_item, headings.get(candidate_ref, "")), _semantic_heading_score(item.line_item, headings.get(candidate_ref, "")))
-            wording_match = heading_score >= 0.82
-
-            if not (amount_match or wording_match):
-                continue
-
-            score = (3 if amount_match else 0) + (2 if wording_match else 0) + int(heading_score * 10)
-            if score > best_score:
-                best_ref = candidate_ref
-                best_score = score
-                best_match = {"wording": wording_match, "amount": amount_match}
-                best_heading_score = heading_score
-
-        if best_ref:
-            findings.append(
-                Finding(
-                    "Notes agreement",
-                    "Medium",
-                    f"Page {item.page_number} | {item.statement_name}",
-                    f"Line item '{item.line_item.title()}' lacks a note reference, but Note {best_ref} appears to be a match.",
-                    f"Line: {item.line[:160]}. Suggested Note {best_ref}: {headings.get(best_ref, '')}. Amount matched: {_yes_no(best_match['amount'])}. Wording matched: {_yes_no(best_match['wording'])}.",
-                    f"Add a reference to Note {best_ref} on the face of the financial statement."
-                )
-            )
-        else:
-            findings.append(
-                Finding(
-                    "Notes agreement",
-                    "Low",
-                    f"Page {item.page_number} | {item.statement_name}",
-                    f"Line item '{item.line_item.title()}' has no note reference and no matching note was found.",
-                    f"Line: {item.line[:160]}. Amounts: {', '.join(f'{a:,}' for a in item.amounts)}.",
-                    "If a note exists for this line item, add a note reference on the face of the financial statement."
-                )
-            )
 
     return findings
 
@@ -3099,14 +3040,7 @@ def _check_cash_flow_text(
         )
         performed.append("Statement of cash flows: net cash increase checked.")
     else:
-        findings.append(Finding(
-            "Totals and rounding",
-            "Review prompt",
-            f"Page {page.number} | Statement of cash flows",
-            "Operating, investing, and financing cash flows agree to net increase in cash.",
-            "Subtotal math failed or rows could not be perfectly identified.",
-            "Review the statement manually."
-        ))
+        skipped.append("Statement of cash flows: skipped because operating/investing/financing/movement rows were not confidently parsed.")
     open_cash = next((v for k, v in rows.items() if ("beginning" in k or "start" in k or " 1 " in k or "january" in k) and "cash" in k), None)
     close_cash = next((v for k, v in rows.items() if ("end" in k or " 31 " in k or "december" in k) and "cash" in k), None)
     exc = next((v for k, v in rows.items() if "exchange" in k), None)
@@ -3128,14 +3062,7 @@ def _check_cash_flow_text(
         )
         performed.append("Statement of cash flows: closing cash movement checked.")
     else:
-        findings.append(Finding(
-            "Totals and rounding",
-            "Review prompt",
-            f"Page {page.number} | Statement of cash flows",
-            "Closing cash agrees to opening cash plus net increase.",
-            "Opening or closing cash rows could not be perfectly identified.",
-            "Review the statement manually."
-        ))
+        skipped.append("Statement of cash flows: skipped because opening/closing cash rows were not confidently parsed.")
     return findings, performed, skipped
 
 
@@ -4770,11 +4697,9 @@ def _note_heading_source_detail(document: PdfDocument, ref: str, title: str, pag
 
 def _statement_note_references(document: PdfDocument) -> set[str]:
     refs: set[str] = set()
-    for page in document.pages:
-        if _is_notes_page(page.text):
-            continue
-        refs.update(_refs_in_text(page.text))
-        refs.update(_note_refs_from_tables(page.tables))
+    for item in _statement_note_lines(document):
+        if item.ref:
+            refs.add(item.ref.upper())
     return refs
 
 
@@ -5502,6 +5427,8 @@ def _valid_note_heading(number: str, title: str) -> bool:
         return False
     if not _note_heading_title_is_structural(title_clean):
         return False
+    if re.match(r"^\d+\b", title_clean):
+        return False
     if re.search(r"[A-C]$", number) and not _suffixed_note_heading_title_is_structural(title_clean):
         return False
     if title_lower.startswith(("to the", "notes to", "are", "and", "for the year", "in thousands", "n'000")):
@@ -5657,13 +5584,14 @@ def _looks_like_primary_statement_line(line: str) -> bool:
     reject_phrases = [
         "financial statements", "statement of", "year ended", "as at", 
         "signed on", "behalf", "behal b", "the notes on page", "pages", "director", 
-        "chairman", "secretary", "n n ", "0 0"
+        "chairman", "secretary", "approval", "n n", "0 0"
     ]
     if any(phrase in lower for phrase in reject_phrases):
         return False
         
     text_only = re.sub(r"[\d\.,\(\)\-\|]", "", lower).strip()
-    if len(text_only) < 3 or text_only in ("n n", "n", "m m", "m"):
+    # Reject lines that contain only letters N, M, O (common unit/currency artifacts) or are too short.
+    if len(text_only) < 3 or not re.sub(r"[nmo\s]", "", text_only):
         return False
         
     if _is_subheading(_clean_statement_line_item(line)):

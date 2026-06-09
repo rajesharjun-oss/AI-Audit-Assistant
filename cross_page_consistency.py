@@ -6,10 +6,10 @@ from models import PdfDocument, Finding
 
 # 1. Key Amounts Consistency
 KEY_METRICS = {
-    "Revenue": re.compile(r"^(?:Revenue|Turnover|Gross Earnings)\b(?!.*contract)", re.I),
+    "Revenue": re.compile(r"^(?:Revenue|Turnover|Gross Earnings)\b", re.I),
     "Profit before tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?\s+before\s+tax(?:ation)?\b", re.I),
     "Taxation": re.compile(r"^(?:Taxation|Income tax expense)\b", re.I),
-    "Profit after tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?(?:\s+after\s+tax(?:ation)?)?(?:\s+for\s+the\s+(?:year|period))?\b(?!.*loss allowance)(?!.*loss on foreign)(?!.*loss carried forward)", re.I),
+    "Profit after tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?(?:\s+after\s+tax(?:ation)?)?(?:\s+for\s+the\s+(?:year|period))?\b", re.I),
     "Total comprehensive income": re.compile(r"^Total\s+comprehensive\s+(?:income|loss)\b", re.I)
 }
 
@@ -50,7 +50,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         # Extract potential names in signature blocks or directors lists
         if any(kw in text.lower() for kw in ("director", "secretary", "chief executive", "officer", "auditor")):
             for match in NAME_RE.finditer(text):
-                name = match.group(0)
+                name = re.sub(r"(?i)\s+(?:board|director|directors|manager|officer|table|notes|chief|executive|committee|chairman)$", "", match.group(0))
                 stop_words = [
                     "annual report", "financial statement", "statement of", "notes to", "cash flow", "value added", 
                     "the company", "limited", "bank", "plc", "kpmg", "pwc", "deloitte", "ernst", "kreston", "pedabo", 
@@ -60,7 +60,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     "other information", "responsibilities of", "consolidated", "separate", "comprehensive income", 
                     "financial position", "changes in equity", "general information", "address", "registered office", 
                     "principal place", "business", "nature of", "for the year", "ended", "december", "january",
-                    "street", "road", "cost", "accumulated", "carrying", "to pay", "employees", "government"
+                    "street", "road", "cost", "accumulated", "carrying", "to pay", "employees", "government",
+                    "manager", "table", "notes", "board"
                 ]
                 if not any(stop in name.lower() for stop in stop_words):
                     name_candidates.append((name, page.number))
@@ -70,21 +71,33 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             # Try to match key metrics
             for metric_name, pattern in KEY_METRICS.items():
                 if pattern.match(line):
+                    lower = line.lower()
+                    if any(sw in lower for sw in ["loss allowance", "loss on foreign", "loss carried forward", "revenue contract", "contract liabilit"]):
+                        continue
                     raw_amounts = re.findall(r"\(?-?\d[\d,\.]*\)?", line)
                     amounts = []
                     for a in raw_amounts:
                         clean = a.replace(",", "").replace("(", "").replace(")", "").replace("-", "")
                         if not clean: continue
                         if "." in clean and float(clean) < 100: continue
-                        if len(clean) <= 2 and clean != "0": continue
+                        if len(clean) <= 2 and clean != "0": continue # Exclude note numbers
                         if len(clean) <= 4 and clean.startswith("20"): continue # Exclude years
                         amounts.append(a)
                     if amounts:
                         amt_str = amounts[0]
                         clean_amt = amt_str.replace(",", "").replace("(", "-").replace(")", "")
+                        
+                        prior_str = amounts[1] if len(amounts) >= 2 else None
+                        prior_amt = None
+                        if prior_str:
+                            try:
+                                prior_amt = Decimal(prior_str.replace(",", "").replace("(", "-").replace(")", ""))
+                            except Exception:
+                                pass
+                        
                         try:
                             val = Decimal(clean_amt)
-                            amount_occurrences[metric_name].append((val, page.number, line))
+                            amount_occurrences[metric_name].append((val, prior_amt, page.number, line))
                         except Exception:
                             pass
 
@@ -93,11 +106,15 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         if not occurrences:
             continue
         val_map = defaultdict(list)
-        for val, page_num, line in occurrences:
+        all_prior_amts = set()
+        for val, prior_amt, page_num, line in occurrences:
             val_map[val].append((page_num, line))
+            if prior_amt is not None:
+                all_prior_amts.add(prior_amt)
         
         # If multiple different values found for the same metric
-        if len(val_map) > 1:
+        val_keys = [k for k in val_map.keys() if k not in all_prior_amts]
+        if len(val_keys) > 1:
             desc = []
             for val, locs in val_map.items():
                 pages = [str(p) for p, l in locs]
@@ -158,6 +175,13 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                         f"Update to match the predominant format ({expected_format})."
                     )
                 )
+            else:
+                export_data["dates"].append({
+                    "Date found": date_str,
+                    "Page": ", ".join(map(str, set(pages))),
+                    "Expected format": expected_format,
+                    "Comment": "Consistent."
+                })
 
     # Process names using sequence matcher
     unique_names = defaultdict(list)

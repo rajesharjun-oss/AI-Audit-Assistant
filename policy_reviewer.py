@@ -18,15 +18,32 @@ STANDARD_TOPICS = {
 def _extract_nature_of_business(document: PdfDocument, note_1_2_text: str) -> str:
     """Attempts to extract the nature of business from Note 1/2 or General Info."""
     text_lower = note_1_2_text.lower()
-    match = re.search(r"(?:nature of business|principal activities?|principal business)(?:[\s\S]{1,300})", text_lower)
-    if match:
-        return match.group(0).strip()
+    
+    def _clean_match(text: str) -> str:
+        # Split into paragraphs and just take the first one containing the keywords
+        paragraphs = re.split(r'\n\s*\n', text)
+        for p in paragraphs:
+            if re.search(r"(?:nature of business|principal activities?|principal business)", p):
+                # Clean out signature lines if any sneaked in
+                clean = re.split(r"(?i)\b(?:by order of the board|frc/|director|secretary|dated|signed on its behalf|behalf of the board)\b", p)[0]
+                return clean.strip()
+        # Fallback to greedy if paragraph split fails
+        match = re.search(r"(?:nature of business|principal activities?|principal business)(?:[\s\S]{1,300})", text)
+        if match:
+            clean = re.split(r"(?i)\b(?:by order of the board|frc/|director|secretary|dated|signed on its behalf|behalf of the board)\b", match.group(0))[0]
+            return clean.strip()
+        return ""
+
+    found = _clean_match(text_lower)
+    if found:
+        return found
     
     # Check whole document first 15 pages
     doc_text_lower = "\n".join(p.text.lower() for p in document.pages[:15])
-    match = re.search(r"(?:nature of business|principal activities?)(?:[\s\S]{1,300})", doc_text_lower)
-    if match:
-        return match.group(0).strip()
+    found_doc = _clean_match(doc_text_lower)
+    if found_doc:
+        return found_doc
+        
     if note_1_2_text:
         return text_lower[:500]
         
