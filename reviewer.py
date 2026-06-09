@@ -2105,7 +2105,6 @@ def check_notes_agreement(
         if any(keyword in title or keyword in section.lower() for keyword in ("depreciation", "property, plant", "ppe")):
             _check_depreciation_note(findings, ref, section, tolerance)
 
-    import re
     filtered_findings = []
     for f in findings:
         if f.category == "Notes agreement" and "not found" in f.issue.lower():
@@ -2486,12 +2485,20 @@ def _check_note_internal_total(findings: list[Finding], ref: str, title: str, se
             expected = sum(running, Decimal("0"))
             diff = amount - expected
             if running and abs(diff) > tolerance:
+                severity = "Medium"
+                issue = "A note subtotal or total does not agree to visible note line items."
+                massive_deviation = False
+                if abs(amount) > 0 and abs(expected) / abs(amount) > 10:
+                    massive_deviation = True
+                if massive_deviation:
+                    severity = "Low"
+                    issue += " (Downgraded to Low because massive deviation indicates table parser extracted unrelated adjacent values)."
                 findings.append(
                     Finding(
                         "Notes agreement",
-                        "Medium",
+                        severity,
                         f"Note {ref}",
-                        "A note subtotal or total does not agree to visible note line items.",
+                        issue,
                         f"Note title: {title or 'untitled'} | reported {amount:,}; visible sum {expected:,}; difference {diff:,}.",
                         "Review the note table and agree it back to the supporting schedule and face statement.",
                     )
