@@ -604,11 +604,16 @@ def _notes_start_page(document: PdfDocument) -> int | None:
         accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
         if accepted:
             return int(accepted[0]["page"])
-    for page in document.pages:
+    pages = list(document.pages)
+    for i, page in enumerate(pages):
         text_lower = page.text.lower()
-        if "notes to the financial" in text_lower and ("accounting policies" in text_lower or "material accounting" in text_lower):
-            if not _looks_like_front_matter_page(page.text):
-                return page.number
+        if "notes to the financial" in text_lower:
+            if "accounting policies" in text_lower or "material accounting" in text_lower:
+                if not _looks_like_front_matter_page(page.text):
+                    return page.number
+            elif i + 1 < len(pages) and ("accounting policies" in pages[i+1].text.lower() or "material accounting" in pages[i+1].text.lower()):
+                if not _looks_like_front_matter_page(page.text):
+                    return page.number
         if _notes_heading_in_text(page.text):
             return page.number
         if _looks_like_front_matter_page(page.text):
@@ -3037,10 +3042,10 @@ def _check_cash_flow_text(
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
-    op = next((v for k, v in rows.items() if "operating" in k), None)
-    inv = next((v for k, v in rows.items() if "investing" in k), None)
-    fin = next((v for k, v in rows.items() if "financing" in k), None)
-    mov = next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k) and "cash" in k), None)
+    op = next((v for k, v in rows.items() if "operat" in k), None)
+    inv = next((v for k, v in rows.items() if "invest" in k), None)
+    fin = next((v for k, v in rows.items() if "financ" in k), None)
+    mov = next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k or "net cash" in k or "cash flow" in k) and not any(x in k for x in ["operat", "invest", "financ"])), None)
 
     if op and inv and fin and mov:
         expected = [a + b + c for a, b, c in zip(op, inv, fin)]
@@ -5608,8 +5613,8 @@ def _looks_like_primary_statement_line(line: str) -> bool:
         
     text_only = re.sub(r"[\d\.,\(\)\-\|]", "", lower).strip()
     # Reject lines that contain only letters N, M, O (common unit/currency artifacts) or are too short.
-    text_only_clean = re.sub(r"[nmo0\s\|]", "", text_only)
-    if len(text_only_clean) < 3:
+    letters_only = re.sub(r"[^a-z]", "", lower)
+    if len(letters_only) < 3 or set(letters_only).issubset({"n", "m", "o"}):
         return False
         
     if _is_subheading(_clean_statement_line_item(line)):
