@@ -3076,9 +3076,9 @@ def _check_cash_flow_text(
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
-    op = next((v for k, v in rows.items() if "operat" in k), None)
-    inv = next((v for k, v in rows.items() if "invest" in k), None)
-    fin = next((v for k, v in rows.items() if "financ" in k), None)
+    op = next((v for k, v in rows.items() if "operat" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "operat" in k), None)
+    inv = next((v for k, v in rows.items() if "invest" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "invest" in k), None)
+    fin = next((v for k, v in rows.items() if "financ" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "financ" in k), None)
     mov = next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k or "net cash" in k or "cash flow" in k) and not any(x in k for x in ["operat", "invest", "financ"])), None)
 
     if op and inv and fin and mov:
@@ -4019,22 +4019,12 @@ def _actual_lease_disclosure_present(text: str) -> bool:
 
 
 def _lease_context_has_actual_evidence(context: str) -> bool:
-    actual_terms = (
-        "balance",
-        "balances",
-        "carrying amount",
-        "current",
-        "non-current",
-        "non current",
-        "statement of financial position",
-        "expense",
-        "maturity",
-        "depreciation",
-        "addition",
-        "payment",
-        "commitment",
-    )
-    return any(term in context for term in actual_terms) or bool(NUMBER_RE.search(context))
+    context = context.lower()
+    has_lease = any(keyword in context for keyword in ["right-of-use", "lease liability", "lease expense", "maturity", "depreciation of right-of-use", "actual lease arrangement"])
+    has_quant = any(keyword in context for keyword in ["carrying amount", "maturity", "depreciation", "recognised"])
+    if not (has_lease and has_quant):
+        return False
+    return not _lease_context_is_theoretical_policy_only(context)
 
 
 def _lease_context_is_theoretical_policy_only(context: str) -> bool:
@@ -4824,7 +4814,10 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     ref_start = note_match.start() if note_match else (implicit_match.start() if implicit_match else len(line))
     ref_end = note_match.end() if note_match else (implicit_match.end() if implicit_match else ref_start)
     label = _clean_statement_line_item(line[:ref_start])
-    if not label or _is_subheading(label) or not _statement_row_label_allowed(label):
+    if not label or _is_subheading(label):
+        return None
+    letters_only = re.sub(r"[^a-z]", "", label.lower())
+    if label.lower().strip() in {"n n", "nn", "0 0"} or len(letters_only) < 3 or set(letters_only).issubset({"n", "m", "o"}):
         return None
     if not explicit_ref and _line_item_not_face_linked(label, statement_name, False):
         pass # Allow parsing lines without explicit refs to flag missing note references
@@ -5442,9 +5435,9 @@ def _note_sections(document: PdfDocument) -> dict[str, str]:
             continue
         match = NOTE_HEADING_RE.match(stripped)
         if match and _valid_note_heading(match.group(1), match.group(2)):
-            # Ignore split policy subsections (e.g. `1.`\n`4 Intangible assets`)
             prev_line = lines[index-1].strip() if index > 0 else ""
-            if prev_line in {f"{current_refs[0]}.", f"{current_refs[0]}"} if current_refs else False:
+            # If the previous line is literally just '1.', '2.', '3.', '4.', '5.' we are in a split policy!
+            if re.match(r"^\d+\.$", prev_line):
                 continue
             current_refs = [match.group(1).upper()]
             pending_number = None
