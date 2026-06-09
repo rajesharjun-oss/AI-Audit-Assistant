@@ -321,9 +321,8 @@ def review_pdf(
         else:
             checks_performed.append("Cautious note-reference validation performed in review-prompt mode; no possible wrong note references detected.")
         checks_skipped.append("Detailed note agreement skipped because table extraction confidence is below threshold.")
-    elif any(finding.location == "Notes agreement" and finding.category == "Extraction quality" for finding in note_findings):
+    elif document.table_extraction_confidence < 80 and not document.ocr_used:
         checks_performed.append("Basic note heading existence checks completed where statement note references were clearly detected.")
-        checks_skipped.append("Cautious note-reference validation skipped because note extraction confidence is below threshold.")
         checks_skipped.append("Detailed note agreement skipped because table extraction confidence is below threshold.")
     else:
         checks_performed.append("Cautious note-reference validation completed for primary statement note references.")
@@ -1964,6 +1963,9 @@ def check_notes_agreement(
     heading_refs = set(headings)
     detailed_note_checks_allowed = document.table_extraction_confidence >= 80
     for ref in sorted(statement_refs - heading_refs, key=_note_sort_key):
+        parent_ref = re.sub(r'[A-Za-z]+$', '', ref)
+        if parent_ref in heading_refs:
+            continue
         if not detailed_note_checks_allowed and cautious_low_confidence:
             continue
         findings.append(
@@ -3184,7 +3186,7 @@ def _parse_ocr_statement_row(line: str) -> OcrStatementRow | None:
 
 
 def _detect_statement_row_note_token(line: str) -> tuple[str, int, int]:
-    for match in re.finditer(r"\b(?:note\s+)?(\d{1,2}[A-C]?)(?!\s*,)\b(?=\s+\(?-?\d)", line, flags=re.I):
+    for match in re.finditer(r"\b(?:note\s+)?(\d{1,2}[A-C]?)(?!\s*,)\b(?=\s*(?:[=:]\s*)?\(?-?\d)", line, flags=re.I):
         ref = match.group(1).upper()
         if not _valid_note_number(ref):
             continue
@@ -3275,6 +3277,9 @@ def _looks_like_possible_missing_leading_digit(label: str, raw_line: str, amount
 def _statement_row_label_allowed(label: str) -> bool:
     normalized = _normalise_match_words(label)
     if not normalized:
+        return False
+    letters_only = re.sub(r"[^a-z]", "", label.lower())
+    if len(letters_only) < 3 or set(letters_only).issubset({"n", "m", "o"}):
         return False
     blocked_terms = (
         "financial statements",
@@ -4925,7 +4930,7 @@ def _check_possible_wrong_note_references(
                 best_heading_score = heading_score
         if referenced_match["wording"] and referenced_match["amount"]:
             continue
-        if referenced_match["amount"] and not best_ref:
+        if referenced_match["amount"]:
             continue
         if referenced_match["wording"] and not best_match["amount"] and not (best_ref and best_heading_score > referenced_heading_score + 0.12):
             continue
