@@ -50,7 +50,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         # Extract potential names in signature blocks or directors lists
         if any(kw in text.lower() for kw in ("director", "secretary", "chief executive", "officer", "auditor")):
             for match in NAME_RE.finditer(text):
-                name = re.sub(r"(?i)\b(?:chief|mr|mrs|dr|sir|board|director|directors|manager|officer|table|notes|executive|committee|chairman)\b", " ", match.group(0))
+                name = re.sub(r"(?i)\b(?:chief|mr|mrs|dr|sir|board|director|directors|manager|officer|table|notes|executive|committee|chairman|audit|services)\b", " ", match.group(0))
                 name = re.sub(r"\s+", " ", name).strip()
                 if len(name.split()) >= 4:
                     parts = name.split()

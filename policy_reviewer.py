@@ -106,6 +106,22 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
             
         mentioned_standards = list(dict.fromkeys(mentioned_standards))
         
+        if not mentioned_standards:
+            aligned = False
+            for policy in expected_policies:
+                if policy.lower() in para.lower():
+                    aligned = True
+                    break
+            export_rows.append({
+                "Paragraph reviewed": para[:200] + ("..." if len(para) > 200 else ""),
+                "Standard mentioned": "None specifically cited",
+                "Expected standard topic": "General / " + ", ".join(expected_policies),
+                "Industry alignment": "Appears relevant" if aligned else "Possible boilerplate",
+                "Comment": "No specific IFRS/IAS standard cited, reviewed for general expected topics.",
+                "Suggested correction if needed": ""
+            })
+            continue
+
         for std in mentioned_standards:
             expected_topics = STANDARD_TOPICS.get(std, [])
             if not expected_topics:

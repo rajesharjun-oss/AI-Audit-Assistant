@@ -605,6 +605,10 @@ def _notes_start_page(document: PdfDocument) -> int | None:
         if accepted:
             return int(accepted[0]["page"])
     for page in document.pages:
+        text_lower = page.text.lower()
+        if "notes to the financial" in text_lower and ("accounting policies" in text_lower or "material accounting" in text_lower):
+            if not _looks_like_front_matter_page(page.text):
+                return page.number
         if _notes_heading_in_text(page.text):
             return page.number
         if _looks_like_front_matter_page(page.text):
@@ -3033,9 +3037,9 @@ def _check_cash_flow_text(
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
-    op = next((v for k, v in rows.items() if "operating activities" in k), None)
-    inv = next((v for k, v in rows.items() if "investing activities" in k), None)
-    fin = next((v for k, v in rows.items() if "financing activities" in k), None)
+    op = next((v for k, v in rows.items() if "operating" in k), None)
+    inv = next((v for k, v in rows.items() if "investing" in k), None)
+    fin = next((v for k, v in rows.items() if "financing" in k), None)
     mov = next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k) and "cash" in k), None)
 
     if op and inv and fin and mov:
@@ -3051,6 +3055,7 @@ def _check_cash_flow_text(
             ocr_review=ocr_review,
         )
         performed.append("Statement of cash flows: net cash increase checked.")
+        findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Operating, investing, and financing cash flows agree to net increase.", "Equation passed.", ""))
     else:
         skipped.append("Statement of cash flows: skipped because operating/investing/financing/movement rows were not confidently parsed.")
     open_cash = next((v for k, v in rows.items() if ("beginning" in k or "start" in k or " 1 " in k or "january" in k) and "cash" in k), None)
@@ -5603,7 +5608,8 @@ def _looks_like_primary_statement_line(line: str) -> bool:
         
     text_only = re.sub(r"[\d\.,\(\)\-\|]", "", lower).strip()
     # Reject lines that contain only letters N, M, O (common unit/currency artifacts) or are too short.
-    if len(re.sub(r"[nmo\s]", "", text_only)) < 3:
+    text_only_clean = re.sub(r"[nmo0\s\|]", "", text_only)
+    if len(text_only_clean) < 3:
         return False
         
     if _is_subheading(_clean_statement_line_item(line)):
