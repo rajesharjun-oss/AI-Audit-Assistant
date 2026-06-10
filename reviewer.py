@@ -1316,6 +1316,10 @@ def _finding_matches_check(finding: Finding, check: str) -> bool:
             return "total assets" in issue_lower
         return True
     if "cash flow" in check_lower and "cash flow" in location_lower:
+        if finding.category != "Totals and rounding":
+            return False
+        if "calculation" in check_lower or "checked" in check_lower:
+            return "calculation" in issue_lower or "agree" in issue_lower or "equal" in issue_lower
         return True
     if "accumulated fund" in check_lower and "accumulated fund" in location_lower:
         return True
@@ -3239,7 +3243,6 @@ def _check_cash_flow_text(
             ocr_review=ocr_review,
         )
         performed.append("Statement of cash flows: net cash increase checked.")
-        findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Operating, investing, and financing cash flows agree to net increase.", "Equation passed.", ""))
     else:
         skipped.append("Statement of cash flows: skipped because operating/investing/financing/movement rows were not confidently parsed.")
         
@@ -3256,7 +3259,6 @@ def _check_cash_flow_text(
             ocr_review=ocr_review,
         )
         performed.append("Statement of cash flows: opening plus movement checked to closing.")
-        findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Opening cash plus total movement agrees to closing cash.", "Equation passed.", ""))
     else:
         skipped.append("Statement of cash flows: skipped because opening/movement/closing rows were not confidently parsed.")
         
@@ -4799,24 +4801,33 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
             if embedded:
                 number, title = embedded
                 if _valid_note_heading(number, title):
-                    candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
+                    if not _is_policy_subsection_suspect(title, number, page.number, table_count, notes_start_page):
+                        candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
                     continue
             match = NOTE_HEADING_RE.match(line)
             if match:
                 number, title = match.groups()
                 if _valid_note_heading(number, title):
-                    candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
+                    if not _is_policy_subsection_suspect(title, number, page.number, table_count, notes_start_page):
+                        candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
                     continue
             number_only = NOTE_NUMBER_ONLY_RE.match(line)
             if number_only and index + 1 < len(lines):
                 number = number_only.group(1)
                 title = lines[index + 1].strip()
                 if _valid_note_heading(number, title):
-                    candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
+                    if not _is_policy_subsection_suspect(title, number, page.number, table_count, notes_start_page):
+                        candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
+            # Also need to pass notes_start_page to _add_combined_note_heading_candidates or just filter its output.
+            # It's easier to just let it add, then filter candidates later, but we can also just filter after.
             _add_combined_note_heading_candidates(candidates, lines, index, line, page.number)
             
     headings: dict[str, tuple[str, int]] = {}
     for number, occurrences in candidates.items():
+        # Clean up any that got added by _add_combined_note_heading_candidates
+        occurrences = [occ for occ in occurrences if not _is_policy_subsection_suspect(occ[0], number, occ[1], occ[2], notes_start_page)]
+        if not occurrences:
+            continue
         valid_occs = [occ for occ in occurrences if "continued" not in occ[0].lower()]
         if not valid_occs:
             valid_occs = occurrences
@@ -5667,6 +5678,17 @@ def _is_notes_page(text: str) -> bool:
     return _notes_heading_in_text(text) or "notes to the financial statements" in lower or lower.count("accounting polic") >= 2
 
 
+def _is_policy_subsection_suspect(title: str, number: str, page_number: int, table_count: int, notes_start_page: int | None) -> bool:
+    if table_count > 0:
+        return False
+    if not number.isdigit() or int(number) < 3:
+        return False
+    if notes_start_page is not None and page_number - notes_start_page < 5:
+        policy_keywords = ["intangible", "tax", "property", "equipment", "revenue", "financial instrument", "basis", "receivable", "inventory", "ecl"]
+        if any(k in title.lower() for k in policy_keywords):
+            return True
+    return False
+
 def _valid_note_heading(number: str, title: str) -> bool:
     number = number.upper().strip()
     # Reject policy subsections starting with a number like "1.4" or ".4"
@@ -5935,7 +5957,7 @@ def _check_ocr_statement_of_cash_flows(document: PdfDocument, tolerance: Decimal
                     "Review the cash flow statement totals against the signed financial statements."
                 ))
             else:
-                findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Operating, investing, and financing cash flows agree to net increase.", "Equation passed.", ""))
+                pass
                 
         if "opening" in line_row_map and "movement" in line_row_map and "closing" in line_row_map:
             expected = line_row_map["opening"] + line_row_map["movement"] + line_row_map.get("exchange", Decimal(0))
@@ -5951,5 +5973,5 @@ def _check_ocr_statement_of_cash_flows(document: PdfDocument, tolerance: Decimal
                     "Review the cash flow statement totals against the signed financial statements."
                 ))
             else:
-                findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Closing cash agrees to opening cash plus net increase.", "Equation passed.", ""))
+                pass
     return findings

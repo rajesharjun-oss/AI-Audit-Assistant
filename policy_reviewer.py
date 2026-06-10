@@ -69,7 +69,11 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
     note_1 = note_sections.get("1", "")
     note_2 = note_sections.get("2", "")
     
-    combined_text = (note_1 + "\n\n" + note_2).strip()
+    # Also include any sub-notes like 1.1, 2.1, 2.2 etc.
+    subnotes_1 = [v for k, v in note_sections.items() if str(k).startswith("1.") or str(k).startswith("1A") or str(k).startswith("1B")]
+    subnotes_2 = [v for k, v in note_sections.items() if str(k).startswith("2.") or str(k).startswith("2A") or str(k).startswith("2B")]
+    
+    combined_text = (note_1 + "\n\n" + "\n\n".join(subnotes_1) + "\n\n" + note_2 + "\n\n" + "\n\n".join(subnotes_2)).strip()
     if not combined_text:
         return findings, export_rows
         
