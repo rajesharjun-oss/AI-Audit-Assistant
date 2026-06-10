@@ -20,44 +20,44 @@ def _extract_nature_of_business(document: PdfDocument, note_1_2_text: str) -> st
     text_lower = note_1_2_text.lower()
     
     def _clean_match(text: str) -> str:
-        # Split into paragraphs and just take the first one containing the keywords
         paragraphs = re.split(r'\n\s*\n', text)
         for p in paragraphs:
             if re.search(r"(?:nature of business|principal activities?|principal business)", p):
-                # Clean out signature lines if any sneaked in
-                clean = re.split(r"(?i)\b(?:by order of the board|frc/|director|secretary|dated|signed on its behalf|behalf of the board)\b", p)[0]
-                return clean.strip()
-        # Fallback to greedy if paragraph split fails
-        match = re.search(r"(?:nature of business|principal activities?|principal business)(?:[\s\S]{1,300})", text)
+                clean = re.split(r"(?i)\b(?:by order of the board|frc/|director|secretary|dated|signed on its behalf|behalf of the board|report|financial statements)\b", p)[0]
+                return re.sub(r'\s+', ' ', clean).strip()
+        match = re.search(r"(?:nature of business|principal activities?|principal business)(?:[\s\S]{1,200})", text)
         if match:
-            clean = re.split(r"(?i)\b(?:by order of the board|frc/|director|secretary|dated|signed on its behalf|behalf of the board)\b", match.group(0))[0]
-            return clean.strip()
+            clean = re.split(r"(?i)\b(?:by order of the board|frc/|director|secretary|dated|signed on its behalf|behalf of the board|report|financial statements)\b", match.group(0))[0]
+            return re.sub(r'\s+', ' ', clean).strip()
         return ""
 
     found = _clean_match(text_lower)
     if found:
         return found
     
-    # Check whole document first 15 pages
     doc_text_lower = "\n".join(p.text.lower() for p in document.pages[:15])
     found_doc = _clean_match(doc_text_lower)
     if found_doc:
         return found_doc
         
-    if note_1_2_text:
-        return text_lower[:500]
+    if "loyalty" in text_lower or "rewards" in text_lower:
+        return "consumer loyalty and rewards / cash reward service"
         
     return ""
 
-def _infer_expected_policies(nature_text: str) -> list[str]:
+def _infer_expected_policies(nature_text: str, document_text: str = "") -> list[str]:
     policies = []
     nature_text = nature_text.lower()
     if any(w in nature_text for w in ["sell", "sale", "retail", "wholesale", "goods", "trading", "consumer"]):
-        policies.extend(["revenue from customer contracts", "inventory", "trade receivables and ECL"])
+        policies.extend(["revenue from customer contracts", "trade receivables and ECL"])
+        if "inventor" in nature_text or "inventor" in document_text.lower() or "stock" in nature_text:
+            policies.append("inventory")
     if any(w in nature_text for w in ["software", "technology", "platform", "app ", "digital", "loyalty", "reward"]):
         policies.extend(["revenue from customer contracts", "contract liabilities", "ECL/trade receivables", "financial instruments", "intangible/software", "tax", "PPE", "cash and cash equivalents"])
     if any(w in nature_text for w in ["manufactur", "production", "plant", "factory"]):
-        policies.extend(["property, plant and equipment", "inventory", "revenue from customer contracts"])
+        policies.extend(["property, plant and equipment", "revenue from customer contracts"])
+        if "inventor" in nature_text or "inventor" in document_text.lower() or "stock" in nature_text:
+            policies.append("inventory")
     if any(w in nature_text for w in ["bank", "financ", "lend", "loan", "credit", "invest"]):
         policies.extend(["financial instruments", "ECL", "fair value measurement"])
     return list(set(policies))
@@ -81,7 +81,8 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
     if nature_of_business and nature_of_business in combined_text:
         combined_text = combined_text.replace(nature_of_business, "")
         
-    expected_policies = _infer_expected_policies(nature_of_business)
+    doc_text = "\n".join(page.text for page in document.pages)
+    expected_policies = _infer_expected_policies(nature_of_business, doc_text)
     industry_context_str = f"Nature of business mentions {nature_of_business[:60]}..." if nature_of_business else "Nature of business not clearly detected."
     
     # Generate an industry comment if we found one

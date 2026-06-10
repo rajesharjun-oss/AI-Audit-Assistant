@@ -2699,7 +2699,14 @@ def _check_depreciation_note(findings: list[Finding], ref: str, section: str, to
 
 
 def _find_statement_page(document: PdfDocument, statement_name: str) -> PdfPage | None:
-    return _classified_primary_statement_pages(document).get(statement_name)
+    canonical_map = {
+        "Statement of profit or loss": "Statement of income and expenditure",
+        "Statement of changes in equity": "Statement of changes in accumulated fund"
+    }
+    canonical_name = canonical_map.get(statement_name, statement_name)
+    page = _classified_primary_statement_pages(document).get(canonical_name)
+    if page:
+        return page
     target = statement_name.lower()
     for page in document.pages:
         for line in page.text.splitlines():
@@ -4735,11 +4742,11 @@ def _note_headings(text: str) -> dict[str, str]:
 
 
 def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
-    headings: dict[str, tuple[str, int]] = {}
+    candidates: dict[str, list[tuple[str, int, int]]] = {}
     notes_start_page = _notes_start_page(document)
     strict_notes_start = notes_start_page is not None
     if document.ocr_used and not strict_notes_start:
-        return headings
+        return {}
     in_notes = not strict_notes_start
     for page in document.pages:
         if notes_start_page is not None and page.number < notes_start_page:
@@ -4750,6 +4757,7 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
             in_notes = True
         if strict_notes_start and not in_notes:
             continue
+        table_count = len(page.tables)
         lines = page.text.splitlines()
         for index, raw_line in enumerate(lines):
             line = raw_line.strip()
@@ -4757,21 +4765,32 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
             if embedded:
                 number, title = embedded
                 if _valid_note_heading(number, title):
-                    headings.setdefault(number.upper(), (_clean_note_title(title), page.number))
+                    candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
                     continue
             match = NOTE_HEADING_RE.match(line)
             if match:
                 number, title = match.groups()
                 if _valid_note_heading(number, title):
-                    headings.setdefault(number.upper(), (_clean_note_title(title), page.number))
+                    candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
                     continue
             number_only = NOTE_NUMBER_ONLY_RE.match(line)
             if number_only and index + 1 < len(lines):
                 number = number_only.group(1)
                 title = lines[index + 1].strip()
                 if _valid_note_heading(number, title):
-                    headings.setdefault(number.upper(), (_clean_note_title(title), page.number))
-            _add_combined_note_heading_candidates(headings, lines, index, line, page.number)
+                    candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
+            _add_combined_note_heading_candidates(candidates, lines, index, line, page.number)
+            
+    headings: dict[str, tuple[str, int]] = {}
+    for number, occurrences in candidates.items():
+        valid_occs = [occ for occ in occurrences if "continued" not in occ[0].lower()]
+        if not valid_occs:
+            valid_occs = occurrences
+            
+        with_tables = [occ for occ in valid_occs if occ[2] > 0]
+        best = with_tables[-1] if with_tables else valid_occs[-1]
+        headings[number] = (best[0], best[1])
+        
     return headings
 
 
@@ -4805,7 +4824,7 @@ def _embedded_note_heading_after_notes_title(line: str) -> tuple[str, str] | Non
 
 
 def _add_combined_note_heading_candidates(
-    headings: dict[str, tuple[str, int]],
+    headings: dict[str, list[tuple[str, int, int]]],
     lines: list[str],
     index: int,
     line: str,
@@ -4818,8 +4837,8 @@ def _add_combined_note_heading_candidates(
         return
     nearby = " ".join(lines[index : index + 5]).lower()
     if "revenue heads" in nearby and "operating revenue" in nearby:
-        headings.setdefault("7", ("Operating Revenue", page_number))
-        headings.setdefault("8", ("Operating Expenditure", page_number))
+        headings.setdefault("7", []).append(("Operating Revenue", page_number, 0))
+        headings.setdefault("8", []).append(("Operating Expenditure", page_number, 0))
 
 
 def _augment_note_headings_from_statement_refs(headings: dict[str, tuple[str, int]], document: PdfDocument) -> None:
