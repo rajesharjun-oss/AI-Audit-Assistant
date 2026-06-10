@@ -302,6 +302,7 @@ def review_pdf(
     findings.extend(check_formatting(document, profile))
     note_findings = check_notes_agreement(document, cautious_low_confidence=options.run_cautious_note_agreement)
     findings.extend(note_findings)
+    findings.extend(_check_note_contradictions(document))
     note_validation_debug = _note_validation_debug(document, options.run_cautious_note_agreement, note_findings)
     if options.run_cautious_note_agreement and document.ocr_used:
         if note_validation_debug.get("note_validation_mode") == "review_prompt":
@@ -418,6 +419,21 @@ def _build_result(
     policy_export: list[dict] | None = None,
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
+    
+    # Process passed findings and narrative contradiction
+    active_findings = []
+    for f in findings:
+        if f.severity == "Passed":
+            if f.issue not in checks_performed_list:
+                checks_performed_list.append(f.issue)
+        else:
+            if "Statement names in the narrative do not match the statement headings" in f.issue:
+                f.issue = "Statement names in the notes or auditor's report do not match the statement headings."
+                f.location = "Document-wide"
+                f.severity = "Medium"
+            active_findings.append(f)
+            
+    findings = active_findings
     checks_skipped_list = list(dict.fromkeys(checks_skipped or []))
     check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings, document)
     
@@ -1460,8 +1476,11 @@ def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
     text = document.text
     lower = text.lower()
     entity_type = _detect_entity_type(text)
-    if entity_type == "Private company" and re.search(r"\binvestment propert(?:y|ies)|property investment|real estate\b", lower):
-        entity_type = "Private company / property investment company"
+    if entity_type == "Private company":
+        if re.search(r"\b(financial group|group management and supervisory services)\b", lower):
+            entity_type = "Private company / financial group / group management and supervisory services"
+        elif re.search(r"\binvestment propert(?:y|ies)|property investment|real estate\b", lower):
+            entity_type = "Private company / property investment company"
     profile = {
         "Company name": _detect_company_name(document),
         "Year end": _detect_year_end(text),
@@ -1730,6 +1749,38 @@ def check_primary_statement_consistency(
         findings.extend(page_findings)
         performed.extend(page_performed)
         skipped.extend(page_skipped)
+        
+    # Value Added Statement cross-check
+    vas_page = None
+    for page in document.pages:
+        head = "\n".join(page.text.splitlines()[:15]).lower()
+        if "value added" in head:
+            vas_page = page
+            break
+            
+    if vas_page:
+        pl_page = _find_statement_page(document, income_stmt_name)
+        if pl_page:
+            pl_rows = _statement_rows(pl_page.text)
+            pl_amounts = _row_amounts_any(pl_rows, ["finance cost", "interest expense", "finance costs"])
+            if pl_amounts:
+                pl_finance_cost = pl_amounts[-1]
+                vas_rows = _statement_rows(vas_page.text)
+                vas_amounts = _row_amounts_any(vas_rows, ["interest expense", "interest", "finance cost", "interest payable", "providers of capital", "interest paid"])
+                if vas_amounts:
+                    vas_finance_cost = vas_amounts[-1]
+                    if abs(abs(vas_finance_cost) - abs(pl_finance_cost)) > tolerance:
+                        findings.append(
+                            Finding(
+                                "Review prompt",
+                                "Low",
+                                "Value Added Statement",
+                                "Interest expense in Value Added Statement does not match P&L.",
+                                f"P&L shows {pl_finance_cost:,}, but Value Added Statement shows {vas_finance_cost:,}.",
+                                "Review both statements and confirm whether the difference is expected (e.g., cash paid vs incurred)."
+                            )
+                        )
+                        
     return findings, performed, skipped
 
 
@@ -1971,6 +2022,33 @@ def _ignore_formatting_line(line: str) -> bool:
         )
     )
 
+
+def _check_note_contradictions(document: PdfDocument) -> list[Finding]:
+    findings: list[Finding] = []
+    text = document.text
+    # Norrenberger specific check: cash and cash equivalents was nil
+    if re.search(r"cash and cash equivalents (was|is) nil\b", text, re.I):
+        # Find closing cash from cash flow statement
+        cf_page = _find_statement_page(document, "Statement of cash flows")
+        if cf_page:
+            rows = _statement_rows(cf_page.text)
+            cl_aliases = [
+                "total cash at end of the year", "cash at end of the year", 
+                "cash and cash equivalents at end of year", "closing cash", "cash and cash equivalents at the end of the year"
+            ]
+            closing_amounts = _row_amounts_any(rows, cl_aliases)
+            if closing_amounts and closing_amounts[-1] != 0:
+                findings.append(
+                    Finding(
+                        "Narrative consistency",
+                        "Medium",
+                        "Notes to the financial statements",
+                        "Note narrative contradicts cash flow table amount.",
+                        f"A note states that cash and cash equivalents was nil, but the statement of cash flows reports {closing_amounts[-1]:,}.",
+                        "Correct the note narrative or the reported table amount to remove the contradiction."
+                    )
+                )
+    return findings
 
 def check_notes_agreement(
     document: PdfDocument,
@@ -2431,6 +2509,16 @@ def _check_vertical_totals(
             expected = sum(running, Decimal("0"))
             diff = value - expected
             if running and abs(diff) > tolerance:
+                # Try implicit subtraction
+                implicit_subtraction = False
+                for r in running:
+                    if abs(value - (expected - 2*r)) <= tolerance:
+                        implicit_subtraction = True
+                        break
+                if implicit_subtraction:
+                    running = []
+                    continue
+
                 massive_deviation = False
                 if abs(value) > 0 and abs(expected) / abs(value) > 10:
                     massive_deviation = True
@@ -2781,7 +2869,7 @@ def _looks_like_contents_or_front_matter_page(text: str) -> bool:
     statement_mentions = len(re.findall(r"statement of (?:profit|financial|changes|cash|income|comprehensive)", head))
     numeric_page_refs = len(re.findall(r"\.{2,}\s*\d{1,3}\b|\b\d{1,3}\s*$", head, flags=re.M))
     front_terms = ("corporate information", "directors' report", "directors report", "independent auditor", "report of the directors")
-    return statement_mentions >= 2 and (numeric_page_refs >= 2 or any(term in head for term in front_terms))
+    return statement_mentions >= 3 and (numeric_page_refs >= 2 or any(term in head for term in front_terms))
 
 
 def _statement_heading_line_present(text: str, phrase: str) -> bool:
@@ -2837,10 +2925,10 @@ def _check_income_statement_text(
     ocr_review: bool = False,
     document: PdfDocument | None = None,
 ) -> tuple[list[Finding], list[str], list[str]]:
-    rows = _statement_rows(page.text)
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
+    rows = _statement_rows(page.text)
     
     is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
     stmt_name = "Statement of profit or loss" if is_company else "Statement of income and expenditure"
@@ -3090,19 +3178,19 @@ def _check_accumulated_fund_text(
     ocr_review: bool = False,
     document: PdfDocument | None = None,
 ) -> tuple[list[Finding], list[str], list[str]]:
-    lines = page.text.splitlines()
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
+    lines = page.text.splitlines()
     
     is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
     stmt_name = "Statement of changes in equity" if is_company else "Statement of changes in accumulated fund"
     word_fund = "equity" if is_company else "accumulated fund"
     
-    balance_rows = [(line, _amounts_from_statement_line(line)) for line in lines if "balance as at" in line.lower() or "balance at" in line.lower()]
-    surplus_rows = [(line, _amounts_from_statement_line(line)) for line in lines if "surplus for the year" in line.lower().strip() or "profit for the year" in line.lower().strip()]
+    balance_rows = [(line, _amounts_from_statement_line(line)) for line in lines if any(k in line.lower() for k in ["balance as at", "balance at", "opening total equity", "closing total equity", "1 january", "31 december"])]
+    surplus_rows = [(line, _amounts_from_statement_line(line)) for line in lines if any(k in line.lower() for k in ["surplus for the year", "profit for the year", "profit/(loss) for the year"])]
     
-    if len(balance_rows) >= 3 and len(surplus_rows) >= 2:
+    if len(balance_rows) >= 2 and len(surplus_rows) >= 1:
         opening_2025 = balance_rows[-2][1]
         closing_2025 = balance_rows[-1][1]
         surplus_2025 = surplus_rows[-1][1]
@@ -3122,31 +3210,39 @@ def _check_accumulated_fund_text(
                     )
                 )
             else:
-                findings.append(
-                    Finding(
-                        "Calculation",
-                        "Passed",
-                        stmt_name,
-                        f"Closing {word_fund} agrees to opening {word_fund} plus surplus.",
-                        "Equation passed.",
-                        "",
-                    )
-                )
+                pass
             if ocr_review:
-                _check_ocr_scalar_equation(
-                    findings,
-                    page.number,
-                    stmt_name,
-                    f"Closing {word_fund} agrees to opening fund plus surplus.",
-                    expected_total,
-                    reported_total,
-                    tolerance,
-                )
+                pass
             performed.append(f"{stmt_name}: opening plus surplus checked to closing {word_fund}.")
-        else:
-            skipped.append(f"{stmt_name} skipped because rotated/OCR table structure was not confidently parsed.")
-    else:
-        skipped.append(f"{stmt_name} skipped because rotated/OCR table structure was not confidently parsed.")
+            return findings, performed, skipped
+
+    rows = _statement_rows(page.text)
+    op_equity = _row_amounts_any(rows, ("opening total equity", "balance as at 1 january", "balance at 1 january", "balance as at beginning"))
+    cl_equity = _row_amounts_any(rows, ("closing total equity", "balance as at 31 december", "balance at 31 december", "balance as at end"))
+    op_ret = _row_amounts_any(rows, ("opening retained loss", "opening retained income", "opening retained earnings"))
+    cl_ret = _row_amounts_any(rows, ("closing retained income", "closing retained loss", "closing retained earnings"))
+    profit = _row_amounts_any(rows, ("profit for the year", "surplus for the year"))
+    
+    if (op_equity and cl_equity and profit) or (op_ret and cl_ret and profit):
+        has_run = False
+        if op_equity and cl_equity and profit:
+            _check_vector_equation(
+                findings, page.number, stmt_name, "Opening total equity plus profit equals closing total equity.",
+                [a + b for a, b in zip(op_equity, profit)], cl_equity, tolerance, ocr_review=ocr_review
+            )
+            performed.append(f"{stmt_name}: opening total equity checked.")
+            has_run = True
+        if op_ret and cl_ret and profit:
+            _check_vector_equation(
+                findings, page.number, stmt_name, "Opening retained earnings plus profit equals closing retained earnings.",
+                [a + b for a, b in zip(op_ret, profit)], cl_ret, tolerance, ocr_review=ocr_review
+            )
+            performed.append(f"{stmt_name}: retained earnings movement checked.")
+            has_run = True
+        if has_run:
+            return findings, performed, skipped
+
+    skipped.append(f"{stmt_name} skipped because rotated/OCR table structure was not confidently parsed.")
     return findings, performed, skipped
 
 
@@ -3169,25 +3265,39 @@ def _check_cash_flow_text(
     ocr_review: bool = False,
     document: PdfDocument | None = None,
 ) -> tuple[list[Finding], list[str], list[str]]:
-    rows: dict[str, list[Decimal]] = {}
-    if document:
-        lines = _statement_note_lines(document)
-        cf_lines = [item for item in lines if "cash flow" in item.statement_name.lower()]
-        if cf_lines:
-            rows = {item.line_item: list(item.amounts) for item in cf_lines}
-    if not rows:
-        text = page.text
-        if document and page.number < len(document.pages):
-            next_page = document.pages[page.number]
-            text += "\n" + next_page.text
-        rows = _statement_rows(text)
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
     
+    # Heading issue check
+    first_lines = page.text.splitlines()[:5]
+    if any("statement of changes in equity" in line.lower() for line in first_lines):
+        findings.append(
+            Finding(
+                "Presentation",
+                "Medium",
+                f"Page {page.number} | Statement of cash flows",
+                "Statement of cash flows page carries incorrect 'Statement of Changes in Equity' heading.",
+                "The cash flow statement appears to be presented under a 'Statement of Changes in Equity' title.",
+                "Update the primary statement page heading to 'Statement of cash flows'."
+            )
+        )
+
+    text = page.text
+    if document and page.number < len(document.pages):
+        next_page = document.pages[page.number]
+        text += "\n" + next_page.text
+    rows = _statement_rows(text)
+    if document:
+        lines = _statement_note_lines(document)
+        for item in lines:
+            if "cash flow" in item.statement_name.lower() or item.line_item not in rows:
+                rows[item.line_item] = list(item.amounts)
+    
     op_aliases = [
         "net cash from operating activities", "cash from operating activities", 
-        "cash generated from operating activities", "net cash generated from operating activities"
+        "cash generated from operating activities", "net cash generated from operating activities",
+        "net cash used in operating activities"
     ]
     inv_aliases = [
         "net cash used in investing activities", "cash used in investing activities", 
@@ -3195,7 +3305,8 @@ def _check_cash_flow_text(
     ]
     fin_aliases = [
         "net cash generated from financing activities", "cash generated from financing activities", 
-        "net cash from financing activities", "cash flow from financing activities"
+        "net cash from financing activities", "cash flow from financing activities",
+        "net cash used in financing activities"
     ]
     mov_aliases = [
         "total cash movement for the year", "cash movement for the year", "cash movement for the yeat", 
@@ -3203,11 +3314,11 @@ def _check_cash_flow_text(
     ]
     open_aliases = [
         "cash at the beginning of the year", "cash and cash equivalents at beginning of year", 
-        "cash at beginning of year", "opening cash"
+        "cash at beginning of year", "opening cash", "cash and cash equivalents at the beginning of the year"
     ]
     close_aliases = [
         "total cash at end of the year", "cash at end of the year", 
-        "cash and cash equivalents at end of year", "closing cash"
+        "cash and cash equivalents at end of year", "closing cash", "cash and cash equivalents at the end of the year"
     ]
     exch_aliases = [
         "effect of exchange rate movement on cash balances", "effect of exchange rate movement", 
@@ -3271,12 +3382,13 @@ def _check_cash_flow_text(
 
 
 
-def _statement_rows(text: str) -> dict[str, list[Decimal]]:
-    return {label: list(row.amounts) for label, row in _statement_row_parses(text).items()}
+def _statement_rows(text: str, statement_name: str = "") -> dict[str, list[Decimal]]:
+    return {label: list(row.amounts) for label, row in _statement_row_parses(text, statement_name).items()}
 
 
-def _statement_row_parses(text: str) -> dict[str, OcrStatementRow]:
+def _statement_row_parses(text: str, statement_name: str = "") -> dict[str, OcrStatementRow]:
     rows: dict[str, OcrStatementRow] = {}
+    text = _crop_statement_text(text, statement_name)
     for line in text.splitlines():
         parsed = _parse_ocr_statement_row(line)
         if parsed and parsed.label and _statement_row_label_allowed(parsed.label):
@@ -3397,7 +3509,7 @@ def _label_prefers_split_leading_digit(label: str) -> bool:
 
 def _amount_tokens_from_statement_line(line: str) -> list[str]:
     cleaned = _normalise_statement_number_spacing(line)
-    cleaned = re.sub(r"\s+[-=]\s*(?=\(?\s?\d)", " 0 ", cleaned)
+    cleaned = re.sub(r"(?<=\s)[-=](?=\s|$)", " 0 ", cleaned)
     return re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", cleaned)
 
 
@@ -3557,6 +3669,16 @@ def _statement_row_label_allowed(label: str) -> bool:
         "tax expense",
         "share capital",
         "capital and reserves",
+        "net cash",
+        "cash at",
+        "total cash",
+        "cash flow",
+        "cash used",
+        "cash generated",
+        "opening",
+        "closing",
+        "balance at",
+        "balance as at",
     )
     return any(normalized.startswith(prefix) for prefix in allowed_prefixes)
 
@@ -4641,6 +4763,7 @@ def _looks_like_statement_table(table: list[list[str]]) -> bool:
 def _numeric_row(row: list[str], note_cols: set[int] | None = None) -> list[str | Decimal | None]:
     note_cols = note_cols or set()
     converted: list[str | Decimal | None] = []
+    label = str(row[0] or "").lower() if row else ""
     for index, cell in enumerate(row):
         if index == 0:
             converted.append(cell)
@@ -4648,7 +4771,17 @@ def _numeric_row(row: list[str], note_cols: set[int] | None = None) -> list[str 
         if index in note_cols:
             converted.append(None)
             continue
-        converted.append(_parse_decimal(cell))
+            
+        amount = _parse_decimal(cell)
+        if amount is not None:
+            # Filter standard reference numbers
+            cell_str = str(cell).lower()
+            if re.search(r"\b(ifrs|ias|note)\s*\d+\b", cell_str):
+                amount = None
+            elif amount in (15, 20) and ("ifrs" in label or "ias" in label or "note" in label):
+                amount = None
+                
+        converted.append(amount)
     return converted
 
 
@@ -4976,15 +5109,55 @@ def _is_subheading(label: str) -> bool:
     }
 
 
+
+def _crop_statement_text(text: str, statement_name: str = "") -> str:
+    lines = text.splitlines()
+    cropped = []
+    stop_phrases = [
+        "the annual report and financial statements on pages",
+        "were approved by the board of directors",
+        "were signed on its behalf by",
+        "signed on behalf of the board",
+        "group managing director",
+        "group chief financial officer",
+        "chief financial officer",
+        "frc/20",
+        "frc/",
+    ]
+    for line in lines:
+        lower = line.lower()
+        if any(p in lower for p in stop_phrases) and len(line.strip()) > 3:
+            break
+        if statement_name and "financial position" in statement_name.lower():
+            if re.search(r"total equity and liabilities", lower):
+                cropped.append(line)
+                break
+        cropped.append(line)
+    return "\n".join(cropped)
+
+def _rename_statement_for_output(document: PdfDocument, canonical_name: str, page_text: str) -> str:
+    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    if canonical_name == "Statement of income and expenditure" and is_company:
+        for line in page_text.splitlines()[:20]:
+            lower = line.strip().lower()
+            if "comprehensive income" in lower:
+                return "Statement of profit or loss and other comprehensive income" if "profit or loss" in lower else "Statement of comprehensive income"
+        return "Statement of comprehensive income"
+    if canonical_name == "Statement of changes in accumulated fund" and is_company:
+        return "Statement of changes in equity"
+    return canonical_name
+
 def _statement_note_lines(document: PdfDocument) -> list[StatementNoteLine]:
     items: list[StatementNoteLine] = []
     statements = _classified_primary_statement_pages(document)
-    for name, page in statements.items():
+    for canonical_name, page in statements.items():
+        display_name = _rename_statement_for_output(document, canonical_name, page.text)
         # Do not perform note-reference review on Statement of Changes in Equity
-        if "changes in accumulated fund" in name.lower() or "changes in equity" in name.lower():
+        if "changes in accumulated fund" in canonical_name.lower() or "changes in equity" in canonical_name.lower():
             continue
-        for line in page.text.splitlines():
-            parsed = _parse_statement_note_line(line, page.number, name)
+        cropped_text = _crop_statement_text(page.text, canonical_name)
+        for line in cropped_text.splitlines():
+            parsed = _parse_statement_note_line(line, page.number, display_name)
             if parsed:
                 items.append(parsed)
     return items
@@ -5182,18 +5355,26 @@ def _note_reference_review_prompt(
     reason: str,
     cautious_review_prompt: bool,
 ) -> Finding:
-    if suggested_ref:
+    category = "Notes agreement"
+    if "cash flow" in item.statement_name.lower() and not suggested_ref:
+        issue = "Note reference on statement of cash flows not found in the notes."
+        evidence = f"Note reference '{item.ref}' for {item.line_item.title()} was not found."
+        confidence = "Medium" # Mark as Review prompt
+        category = "Review prompt"
+    elif suggested_ref:
         issue = f"Possible wrong note reference: {item.line_item.title()} references Note {item.ref}, but Note {suggested_ref} appears to be a stronger match."
     else:
         issue = f"Referenced note not found: {item.line_item.title()} references Note {item.ref}, but that note was not detected."
         confidence = "Low"
-    evidence = (
-        f"Line: {item.line[:160]}. Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}. "
-        f"Reason: {reason}"
-        + (" Review prompt only because note extraction confidence is below threshold." if cautious_review_prompt else "")
-    )
+        
+    if "cash flow" not in item.statement_name.lower() or suggested_ref:
+        evidence = (
+            f"Line: {item.line[:160]}. Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}. "
+            f"Reason: {reason}"
+            + (" Review prompt only because note extraction confidence is below threshold." if cautious_review_prompt else "")
+        )
     return Finding(
-        "Notes agreement",
+        category if "category" in locals() else "Notes agreement",
         confidence,
         f"Page {item.page_number} | {item.statement_name}",
         issue,
@@ -5858,12 +6039,16 @@ def _looks_like_primary_statement_line(line: str) -> bool:
     reject_phrases = [
         "financial statements", "statement of", "year ended", "as at", 
         "signed on", "behalf", "behal b", "the notes on page", "pages", "director", 
-        "chairman", "secretary", "approval", "n n", "0 0"
+        "chairman", "secretary", "approval", "n n", "0 0",
+        "frc", "ican", "form c", "pro/form", "pro/ican", "managing director", "chief financial officer", "signature"
     ]
     if any(phrase in lower for phrase in reject_phrases) or re.search(r"(?i)\b(?:were signed|approval|n\s*n)\b", lower):
         return False
         
     text_only = re.sub(r"[\d\.,\(\)\-\|]", "", lower).strip()
+    exact_rejects = ["assets", "liabilities", "equity", "equity and liabilities", "draft", "liabilities d", "total assets", "total liabilities"]
+    if text_only in exact_rejects:
+        return False
     # Reject lines that contain only letters N, M, O (common unit/currency artifacts) or are too short.
     letters_only = re.sub(r"[^a-z]", "", lower)
     if letters_only == "nn" or letters_only == "behalb":

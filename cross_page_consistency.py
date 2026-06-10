@@ -67,7 +67,9 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     "financial position", "changes in equity", "general information", "address", "registered office", 
                     "principal place", "business", "nature of", "for the year", "ended", "december", "january",
                     "street", "road", "cost", "accumulated", "carrying", "to pay", "employees", "government",
-                    "manager", "table", "notes", "board"
+                    "manager", "table", "notes", "board", "financial group", "group financial", "financial instrument",
+                    "five year", "financial summary", "financials summary", "appointed", "resigned", "monday",
+                    "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "group", "financial", "instruments", "years"
                 ]
                 if not any(stop in name.lower() for stop in stop_words):
                     name_candidates.append((name, page.number))
