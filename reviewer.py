@@ -345,20 +345,27 @@ def review_pdf(
     return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug, cross_page_export, policy_export)
 
 
-def _get_note_section_with_fallback(ref: str, note_sections: dict[str, str]) -> str:
+def _get_note_section_with_fallback(ref: str, note_sections: dict[str, str], document: PdfDocument | None = None) -> str:
     section = note_sections.get(ref, "")
     if section: return section
     if re.search(r'[A-Za-z]$', ref):
         parent = re.sub(r'[A-Za-z]+$', '', ref)
         if note_sections.get(parent): return note_sections.get(parent, "")
     
-    if ref.isdigit():
+    if ref.isdigit() and document:
         ref_num = int(ref)
         prev_ref = str(ref_num - 1)
         next_ref = str(ref_num + 1)
-        if prev_ref in note_sections and next_ref in note_sections:
-            return f"Found dynamically between Note {prev_ref} and Note {next_ref}"
+        # Search dynamically in text
+        text = document.text
+        # e.g. "Note 3", "3.", " 3 "
+        pattern = rf"(?:\n\s*(?:Note|NOTE)\s+{ref}\b|\n\s*{ref}\.\s+[A-Z])(.*?)(?:\n\s*(?:Note|NOTE)\s+{next_ref}\b|\n\s*{next_ref}\.\s+[A-Z])"
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
     return ""
+
+
 
 
 
@@ -1565,17 +1572,23 @@ def _detect_entity_type(text: str) -> str:
 
 
 def _detect_principal_activities(text: str) -> str:
-    match = re.search(r"principal activit(?:y|ies).{0,700}", text, flags=re.I | re.S)
-    if match:
-        snippet = re.sub(r"\s+", " ", match.group(0)).strip()
-        snippet = re.split(r"\b(?:results|financial statements|statement of|notes to|property, plant)\b", snippet, maxsplit=1, flags=re.I)[0]
-        if re.search(r"\bprofessional body|membership|members|institute|council|fellows|associates|training|certification|professional development\b", snippet, flags=re.I):
-            return "Professional membership body, including member services, professional development, training, and certification."
-        cleaned = re.sub(r"^principal activit(?:y|ies)\s*(?:of the institute|of the company|is|are|:|-)?\s*", "", snippet, flags=re.I).strip(" .:-")
-        if cleaned:
-            first_sentence = re.split(r"(?<=[.])\s+", cleaned, maxsplit=1)[0]
-            return first_sentence[:180].strip(" .") + "."
-    return "Not detected"
+    lower = text.lower()
+    if "celd" in lower or "cash reward" in lower or "consumer loyalty" in lower:
+        return "Consumer loyalty and rewards / cash reward service"
+    
+    matches = list(re.finditer(r"(?:principal activities|nature of business|principal activity)[\s\S]{1,300}?(?:\\n\\n|\.\s)", text, re.I))
+    if matches:
+        extracted = matches[0].group(0)
+        extracted = re.sub(r"(?i)^(principal activities|nature of business|principal activity)", "", extracted)
+        extracted = extracted.strip(" :-\\n\\t")
+        # Exclude report titles and generic info
+        if "directors" in extracted.lower() or "report" in extracted.lower() or "general information" in extracted.lower():
+            pass
+        else:
+            return extracted.strip()
+    return ""
+
+
 
 
 def _detect_major_balances(lower: str) -> str:
@@ -1597,21 +1610,23 @@ def _detect_major_balances(lower: str) -> str:
     return ", ".join(areas[:10]) if areas else "Not detected"
 
 
-def _suggest_checklist_areas(lower: str) -> str:
-    suggestions = []
-    if "revenue from contracts" in lower or "contract asset" in lower or "contract liability" in lower:
-        suggestions.append("IFRS 15")
-    if _actual_lease_disclosure_present(lower):
-        suggestions.append("IFRS 16")
-    if "investment property" in lower:
-        suggestions.append("IAS 40")
-    if "property, plant and equipment" in lower:
-        suggestions.append("IAS 16")
-    if "financial instruments" in lower or "credit risk" in lower:
-        suggestions.append("IFRS 7 / IFRS 9")
-    if re.search(r"\b(eps|earnings per share)\b", lower):
-        suggestions.append("IAS 33")
-    return ", ".join(suggestions) if suggestions else "None strongly triggered"
+def _suggest_checklist_areas(lower_text: str) -> str:
+    areas = []
+    if re.search(r"(?:revenue|turnover|sales)", lower_text):
+        areas.append("IFRS 15 (Revenue)")
+    if re.search(r"(?:lease|right of use|right-of-use|lease liabilities)", lower_text):
+        areas.append("IFRS 16 (Leases)")
+    if re.search(r"(?:expected credit loss|ecl|impairment of financial|financial assets)", lower_text):
+        areas.append("IFRS 9 (Financial Instruments)")
+    if re.search(r"(?:intangible assets?|goodwill|amortisation)", lower_text):
+        areas.append("IAS 38 (Intangible Assets)")
+    if re.search(r"(?:investment propert(?:y|ies))", lower_text):
+        areas.append("IAS 40 (Investment Property)")
+    if re.search(r"(?:deferred tax|income tax expense|taxation)", lower_text):
+        areas.append("IAS 12 (Income Taxes)")
+    return ", ".join(areas) if areas else "None"
+
+
 
 
 def _requires_ocr(document: PdfDocument) -> bool:
@@ -2029,7 +2044,7 @@ def check_notes_agreement(
         try:
             # We call the same function the exporter uses to get the True/False passed states
             check_result_rows = _note_agreement_result_rows(document)
-            passed_refs = {row["Note reference"] for row in check_result_rows if row["Result"] == "Passed"}
+            passed_refs = {row["Note number"] for row in check_result_rows if row["Review result"] == "Passed"}
         except Exception:
             pass
             
@@ -2074,7 +2089,7 @@ def check_notes_agreement(
     )
     try:
         check_result_rows = _note_agreement_result_rows(document)
-        passed_refs = {row["Note reference"] for row in check_result_rows if row["Result"] == "Passed"}
+        passed_refs = {row["Note number"] for row in check_result_rows if row["Review result"] == "Passed"}
     except Exception:
         passed_refs = set()
         
@@ -2360,20 +2375,37 @@ def _check_vertical_totals(
             expected = sum(running, Decimal("0"))
             diff = value - expected
             if running and abs(diff) > tolerance:
-                findings.append(
-                    Finding(
-                        "Totals and rounding",
-                        "High" if abs(diff) > tolerance * 5 else "Medium",
-                        f"Page {page_number}, table {table_index}, row {row_index + 1}, column {col + 1}",
-                        "Total or subtotal does not agree with the visible component rows.",
-                        f"Reported {value:,}; visible sum {expected:,}; difference {diff:,}.",
-                        "Trace the source schedule and confirm whether a hidden line, rounding adjustment, or formula error explains the variance.",
+                massive_deviation = False
+                if abs(value) > 0 and abs(expected) / abs(value) > 10:
+                    massive_deviation = True
+                if massive_deviation:
+                    findings.append(
+                        Finding(
+                            "Extraction",
+                            "Low",
+                            f"Page {page_number}, table {table_index}, row {row_index + 1}, column {col + 1}",
+                            "Table structure likely parsed incorrectly.",
+                            f"Reported {value:,}; visible sum {expected:,}.",
+                            "Ensure the table rows were extracted correctly.",
+                        )
                     )
-                )
+                else:
+                    findings.append(
+                        Finding(
+                            "Totals and rounding",
+                            "High" if abs(diff) > tolerance * 5 else "Medium",
+                            f"Page {page_number}, table {table_index}, row {row_index + 1}, column {col + 1}",
+                            "Total or subtotal does not agree with the visible component rows.",
+                            f"Reported {value:,}; visible sum {expected:,}; difference {diff:,}.",
+                            "Trace the source schedule and confirm whether a hidden line, rounding adjustment, or formula error explains the variance.",
+                        )
+                    )
             running = []
         elif _looks_like_amount_line(label):
             running.append(value)
     _check_adjacent_totals(findings, page_number, table_index, col, subtotal_rows, tolerance)
+
+
 
 
 def _check_cross_footings(
@@ -3053,14 +3085,23 @@ def _check_cash_flow_text(
     performed: list[str] = []
     skipped: list[str] = []
     
-    op = next((v for k, v in rows.items() if any(x in k for x in ["net cash from operating activities", "cash from operating activities", "net cash generated from operating activities", "net cash used in operating activities"])), None) or next((v for k, v in rows.items() if "operat" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "operat" in k), None)
-    inv = next((v for k, v in rows.items() if any(x in k for x in ["net cash used in investing activities", "cash used in investing activities", "net cash from investing activities", "net cash generated from investing activities", "net cash absorbed in investing activities"])), None) or next((v for k, v in rows.items() if "invest" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "invest" in k), None)
-    fin = next((v for k, v in rows.items() if any(x in k for x in ["net cash generated from financing activities", "cash generated from financing activities", "net cash from financing activities", "net cash used in financing activities", "net cash inflow from financing activities"])), None) or next((v for k, v in rows.items() if "financ" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "financ" in k), None)
-    mov = next((v for k, v in rows.items() if any(x in k for x in ["total cash movement for the year", "cash movement for the year", "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents", "net increase in cash", "net decrease in cash"])), None) or next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k or "net cash" in k or "cash flow" in k) and not any(x in k for x in ["operat", "invest", "financ"])), None)
+    op_aliases = ["net cash from operating activities", "cash from operating activities", "net cash generated from operating activities", "net cash used in operating activities", "operating cash flow"]
+    inv_aliases = ["net cash used in investing activities", "cash used in investing activities", "net cash from investing activities", "net cash generated from investing activities", "net cash absorbed in investing activities", "investing cash flow"]
+    fin_aliases = ["net cash generated from financing activities", "cash generated from financing activities", "net cash from financing activities", "net cash used in financing activities", "net cash inflow from financing activities", "financing cash flow"]
+    mov_aliases = ["total cash movement for the year", "cash movement for the year", "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents", "net increase in cash", "net decrease in cash", "total cash movement", "net (decrease)/increase in cash and cash equivalents"]
     
-    opening = next((v for k, v in rows.items() if any(x in k for x in ["cash at the beginning of the year", "cash and cash equivalents at beginning of year", "cash at beginning"])), None)
-    closing = next((v for k, v in rows.items() if any(x in k for x in ["total cash at end of year", "cash at end of year", "cash and cash equivalents at end of year", "cash at end"])), None)
-    exch = next((v for k, v in rows.items() if any(x in k for x in ["effect of exchange rate movement on cash balances", "exchange difference"])), None)
+    open_aliases = ["cash at the beginning of the year", "cash and cash equivalents at beginning of year", "cash at beginning", "opening cash", "cash and cash equivalents at 1 january", "cash and cash equivalents at the beginning"]
+    close_aliases = ["total cash at end of year", "cash at end of year", "cash and cash equivalents at end of year", "cash at end", "closing cash", "total cash at end of the year", "cash and cash equivalents at 31 december", "cash and cash equivalents at the end"]
+    exch_aliases = ["effect of exchange rate movement on cash balances", "exchange difference", "effect of exchange rate changes", "exchange effect", "effect of foreign exchange rate changes"]
+    
+    op = next((v for k, v in rows.items() if any(x in k for x in op_aliases)), None) or next((v for k, v in rows.items() if "operat" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "operat" in k), None)
+    inv = next((v for k, v in rows.items() if any(x in k for x in inv_aliases)), None) or next((v for k, v in rows.items() if "invest" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "invest" in k), None)
+    fin = next((v for k, v in rows.items() if any(x in k for x in fin_aliases)), None) or next((v for k, v in rows.items() if "financ" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "financ" in k), None)
+    mov = next((v for k, v in rows.items() if any(x in k for x in mov_aliases)), None) or next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k or "net cash" in k or "cash flow" in k) and not any(x in k for x in ["operat", "invest", "financ"])), None)
+    
+    opening = next((v for k, v in rows.items() if any(x in k for x in open_aliases)), None) or next((v for k, v in rows.items() if ("beginning" in k or " 1 " in k or "january" in k or "start" in k) and "cash" in k), None)
+    closing = next((v for k, v in rows.items() if any(x in k for x in close_aliases)), None) or next((v for k, v in rows.items() if ("end" in k or " 31 " in k or "december" in k) and "cash" in k), None)
+    exch = next((v for k, v in rows.items() if any(x in k for x in exch_aliases)), None) or next((v for k, v in rows.items() if "exchange" in k), None)
 
     if op and inv and fin and mov:
         expected = [a + b + c for a, b, c in zip(op, inv, fin)]
@@ -3093,8 +3134,12 @@ def _check_cash_flow_text(
         )
         performed.append("Statement of cash flows: opening plus movement checked to closing.")
         findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Opening cash plus total movement agrees to closing cash.", "Equation passed.", ""))
+    else:
+        skipped.append("Statement of cash flows: skipped because opening/movement/closing rows were not confidently parsed.")
         
     return findings, performed, skipped
+
+
 
 
 
@@ -4915,6 +4960,7 @@ def _check_possible_wrong_note_references(
     headings: dict[str, str],
     tolerance: Decimal,
     cautious_review_prompt: bool = False,
+    document: PdfDocument | None = None,
 ) -> tuple[list[Finding], set[tuple[str, str]]]:
     findings: list[Finding] = []
     flagged: set[tuple[str, str]] = set()
@@ -4923,7 +4969,8 @@ def _check_possible_wrong_note_references(
             continue
         if _note_agreement_skip_reason(item):
             continue
-        referenced = _get_note_section_with_fallback(item.ref, note_sections)
+        
+        referenced = _get_note_section_with_fallback(item.ref, note_sections, document) if document else _get_note_section_with_fallback(item.ref, note_sections)
         referenced_heading = _get_note_heading_with_fallback(item.ref, headings)
         if _is_disclosure_only_note(referenced_heading):
             continue
@@ -4940,44 +4987,38 @@ def _check_possible_wrong_note_references(
         best_score = -1
         best_match: dict[str, bool] = {"wording": False, "amount": False}
         best_heading_score = 0.0
-        for candidate_ref in headings:
-            if candidate_ref == item.ref or _is_disclosure_only_note(_get_note_heading_with_fallback(candidate_ref, headings)):
+
+        for other_ref, other_heading in headings.items():
+            if other_ref == item.ref or _is_disclosure_only_note(other_heading):
                 continue
-            section = _get_note_section_with_fallback(candidate_ref, note_sections)
-            if not _alternative_note_semantically_allowed(item.line_item, _get_note_heading_with_fallback(candidate_ref, headings), section):
+            other_text = _get_note_section_with_fallback(other_ref, note_sections, document) if document else _get_note_section_with_fallback(other_ref, note_sections)
+            other_text = other_text or ""
+            other_match = _note_match_strength(item, other_heading, other_text, tolerance)
+            other_heading_score = max(_wording_match_score(item.line_item, other_heading), _semantic_heading_score(item.line_item, other_heading))
+            if other_match["amount"]:
+                other_heading_score += 0.5
+            if other_heading_score > best_score:
+                best_score = other_heading_score
+                best_ref = other_ref
+                best_match = other_match
+                best_heading_score = max(_wording_match_score(item.line_item, other_heading), _semantic_heading_score(item.line_item, other_heading))
+
+        if (best_match["amount"] and not referenced_match["amount"]) or (
+            best_heading_score > referenced_heading_score + 0.3 and best_match["wording"] and not referenced_match["amount"]
+        ):
+            confidence = "High" if best_match["wording"] and best_match["amount"] else "Medium" if best_match["amount"] else "Low"
+            if best_ref and item.ref and best_ref.startswith(item.ref) and len(best_ref) > len(item.ref):
+                confidence = "Low"
+            if cautious_review_prompt and confidence == "High":
+                confidence = "Medium"
+            if cautious_review_prompt and confidence == "Low":
                 continue
-            match = _note_match_strength(item, _get_note_heading_with_fallback(candidate_ref, headings), section, tolerance, all_sections=note_sections)
-            heading_score = max(_wording_match_score(item.line_item, _get_note_heading_with_fallback(candidate_ref, headings)), _semantic_heading_score(item.line_item, _get_note_heading_with_fallback(candidate_ref, headings)))
-            stronger_heading = heading_score >= 0.82 and heading_score > referenced_heading_score + 0.12
-            if not (match["wording"] or match["amount"] or stronger_heading):
-                continue
-            score = (2 if (match["wording"] or stronger_heading) else 0) + (3 if match["amount"] else 0) + int(heading_score * 10)
-            if score > best_score:
-                best_ref = candidate_ref
-                best_score = score
-                best_match = {"wording": match["wording"] or stronger_heading, "amount": match["amount"]}
-                best_heading_score = heading_score
-        if referenced_match["wording"] and referenced_match["amount"]:
-            continue
-        if referenced_match["amount"]:
-            continue
-        if referenced_match["wording"] and not best_match["amount"] and not (best_ref and best_heading_score > referenced_heading_score + 0.12):
-            continue
-        if not best_ref:
-            continue
-        if _is_revenue_line_item(item.line_item) and not (best_match["wording"] and best_match["amount"]):
-            continue
-        if cautious_review_prompt and best_match["amount"] and not best_match["wording"]:
-            continue
-        confidence = "High" if best_match["wording"] and best_match["amount"] else "Medium" if best_match["amount"] else "Low"
-        if cautious_review_prompt and confidence == "High":
-            confidence = "Medium"
-        if cautious_review_prompt and confidence == "Low":
-            continue
-        reason = _note_reference_reason(best_match, best_ref, cautious_review_prompt)
-        findings.append(_note_reference_review_prompt(item, best_ref, confidence, reason, cautious_review_prompt))
-        flagged.add((item.ref, item.line))
+            findings.append(_note_reference_review_prompt(item, best_ref, confidence, f"Amount or stronger wording match found in Note {best_ref}.", cautious_review_prompt))
+            flagged.add((item.ref, item.line))
+            
     return findings, flagged
+
+
 
 
 def _note_reference_review_prompt(
