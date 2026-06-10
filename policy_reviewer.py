@@ -68,11 +68,8 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
     
     note_1 = note_sections.get("1", "")
     note_2 = note_sections.get("2", "")
-    note_3 = note_sections.get("3", "")
-    note_4 = note_sections.get("4", "")
-    note_5 = note_sections.get("5", "")
     
-    combined_text = (note_1 + "\n\n" + note_2 + "\n\n" + note_3 + "\n\n" + note_4 + "\n\n" + note_5).strip()
+    combined_text = (note_1 + "\n\n" + note_2).strip()
     if not combined_text:
         return findings, export_rows
         

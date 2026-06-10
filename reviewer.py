@@ -3142,7 +3142,11 @@ def _check_cash_flow_text(
     ocr_review: bool = False,
     document: PdfDocument | None = None,
 ) -> tuple[list[Finding], list[str], list[str]]:
-    rows = _statement_rows(page.text)
+    text = page.text
+    if document and page.number < len(document.pages):
+        next_page = document.pages[page.number]
+        text += "\n" + next_page.text
+    rows = _statement_rows(text)
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
@@ -4787,8 +4791,11 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
         if not valid_occs:
             valid_occs = occurrences
             
-        with_tables = [occ for occ in valid_occs if occ[2] > 0]
-        best = with_tables[-1] if with_tables else valid_occs[-1]
+        # The user wants to match face-statement Note 4 and Note 9 to actual note sections/tables
+        # after the real Notes section begins. The accounting policy subsections (1.4, etc.) 
+        # appear earlier. Always taking the LAST occurrence ensures we pick the actual note 
+        # body instead of the policy subsection, regardless of which page has tables.
+        best = valid_occs[-1]
         headings[number] = (best[0], best[1])
         
     return headings

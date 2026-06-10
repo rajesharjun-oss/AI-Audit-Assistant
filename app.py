@@ -78,7 +78,7 @@ def _finding_confidence(finding, result) -> str:
         return finding.severity
     if finding.category == "Totals and rounding":
         table_conf_val = result.metrics.get('table_arithmetic_confidence', '100%')
-        table_conf_str = "0% (Skipped)" if table_conf_val == "0%" or "Generic table arithmetic skipped" in str(result.metrics.get("checks_skipped", "")) else table_conf_val
+        table_conf_str = "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else table_conf_val
         return f"Table arithmetic {table_conf_str}"
     if finding.severity == "High":
         return "High"
