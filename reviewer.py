@@ -2745,7 +2745,7 @@ def _check_income_statement_text(
     performed: list[str] = []
     skipped: list[str] = []
     
-    is_private_company = document and document.profile.company_type == "Private Company"
+    is_private_company = document and _detect_entity_type(document.text).startswith("Private company")
     stmt_name = "Statement of profit or loss" if is_private_company else "Statement of income and expenditure"
     
     if is_private_company:
@@ -2998,7 +2998,7 @@ def _check_accumulated_fund_text(
     performed: list[str] = []
     skipped: list[str] = []
     
-    is_private_company = document and document.profile.company_type == "Private Company"
+    is_private_company = document and _detect_entity_type(document.text).startswith("Private company")
     stmt_name = "Statement of changes in equity" if is_private_company else "Statement of changes in accumulated fund"
     word_fund = "equity" if is_private_company else "accumulated fund"
     
