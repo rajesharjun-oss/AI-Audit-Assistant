@@ -57,8 +57,10 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         is_target_page = any(kw in page_lower for kw in target_page_keywords)
         
         if is_target_page:
-            for match in NAME_RE.finditer(text):
-                raw_name = match.group(0)
+            chunks = re.split(r'\n|\s{2,}', text)
+            for chunk in chunks:
+                for match in NAME_RE.finditer(chunk):
+                    raw_name = match.group(0)
                 
                 exclude_words = [
                     "financial", "financials", "group", "instruments", "instrument", "statement", "summary", "years", "year",
@@ -81,9 +83,11 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     
                 remove_titles = [
                     "group managing director", "chief financial officer", "managing director",
-                    "non-executive director", "executive director", "non-executive", "executive",
-                    "chairman", "director", "directors", "secretary", "chief", "officer",
-                    "managing", "manager", "committee", "board", "mr", "mrs", "dr", "sir", "non"
+                    "non-executive director", "executive director", "signing partner",
+                    "non-executive", "executive", "chairman", "director", "directors",
+                    "secretary", "chief", "officer", "managing", "manager", "committee",
+                    "board", "mr", "mrs", "dr", "sir", "non", "appointed", "resigned",
+                    "nigeria", "monday", "frc", "pro", "ican", "form"
                 ]
                 
                 clean_name = raw_name
@@ -93,6 +97,9 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                 clean_name = re.sub(r"\s+", " ", clean_name).strip()
                 
                 tokens = clean_name.split()
+                # Reject if more than 4 tokens (multi-person strings)
+                if len(tokens) > 4:
+                    continue
                 if 2 <= len(tokens) <= 4 and all(t[0].isupper() for t in tokens if t.isalpha()):
                     name_candidates.append((clean_name, page.number))
 
@@ -254,7 +261,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                         "Name variant 2": name2,
                         "Page 2": pages2,
                         "Suggested standard spelling": max(name1, name2, key=len),
-                        "Comment": "Names appear to refer to the same person but are spelt differently."
+                        "Reason": "Names appear to refer to the same person but are spelt differently.",
+                        "Confidence": "High"
                     })
                     findings.append(
                         Finding(
