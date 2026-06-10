@@ -419,7 +419,13 @@ def _build_result(
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     checks_skipped_list = list(dict.fromkeys(checks_skipped or []))
-    check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings)
+    check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings, document)
+    
+    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    if is_company:
+        ngo_terms = ["gross operating revenue", "total income", "total expenditure", "surplus", "statement of changes in accumulated fund", "statement of income and expenditure"]
+        checks_skipped_list = [c for c in checks_skipped_list if not any(t in c.lower() for t in ngo_terms)]
+        
     positive_assurance = _positive_assurance_text(findings, checks_performed_list)
     note_validation_debug = note_validation_debug or _note_validation_debug(document, False, [])
     metrics = {
@@ -1247,12 +1253,13 @@ def _check_result_rows(
     checks_performed: list[str],
     checks_skipped: list[str],
     findings: list[Finding],
+    document: PdfDocument | None = None,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for check in checks_performed:
         related = [finding for finding in findings if _finding_matches_check(finding, check)]
         if related:
-            result = "Failed" if any(finding.severity == "High" for finding in related) else "Review prompt"
+            result = "Failed / Review prompt"
             severity_rank = {"High": 0, "Medium": 1, "Low": 2}
             severity = ", ".join(sorted({finding.severity for finding in related}, key=lambda item: severity_rank.get(item, 9)))
             evidence = " | ".join(finding.issue for finding in related[:3])
@@ -1268,13 +1275,25 @@ def _check_result_rows(
                 "Evidence": evidence,
             }
         )
+    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    
     for check in checks_skipped:
+        result_status = "Skipped because extraction is not reliable"
+        evidence = "Check was not run because prerequisite extraction confidence or source evidence was not available."
+        
+        if is_company:
+            lower_check = check.lower()
+            ngo_terms = ["gross operating revenue", "total income", "total expenditure", "surplus", "statement of changes in accumulated fund", "statement of income and expenditure"]
+            if any(term in lower_check for term in ngo_terms):
+                result_status = "Not applicable"
+                evidence = "Check is not applicable for private companies."
+                
         rows.append(
             {
                 "Check": check,
-                "Result": "Skipped",
+                "Result": result_status,
                 "Severity": "",
-                "Evidence": "Check was not run because prerequisite extraction confidence or source evidence was not available.",
+                "Evidence": evidence,
             }
         )
     return rows
@@ -1688,10 +1707,14 @@ def check_primary_statement_consistency(
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
+    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    income_stmt_name = "Statement of profit or loss" if is_company else "Statement of income and expenditure"
+    changes_stmt_name = "Statement of changes in equity" if is_company else "Statement of changes in accumulated fund"
+    
     checks = (
-        ("Statement of income and expenditure", _check_income_statement_text),
+        (income_stmt_name, _check_income_statement_text),
         ("Statement of financial position", _check_sfp_text),
-        ("Statement of changes in accumulated fund", _check_accumulated_fund_text),
+        (changes_stmt_name, _check_accumulated_fund_text),
         ("Statement of cash flows", _check_cash_flow_text),
     )
     for statement_name, checker in checks:
@@ -1775,11 +1798,9 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                 continue
 
             for f in table_findings:
-                if f.severity == "High":
-                    f.severity = "Medium"
+                f.severity = "Low"
+                if "Downgraded severity" not in f.issue:
                     f.issue += " (Downgraded severity because table structure in notes may be complex)."
-                # Wait, I can't put this inside the loop easily without access to total skipped tables.
-                pass
             findings.extend(table_findings)
     if skipped_tables:
         details = "\n".join(skipped_tables)
@@ -1788,7 +1809,7 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                 "Extraction quality",
                 "Low",
                 "Table extraction",
-                f"{len(skipped_tables)} table(s) skipped due to low confidence or non-standard structure.",
+                "Generic table arithmetic skipped because table structure is low-confidence or non-standard.",
                 details,
                 "Review skipped table details only where the table is material. Primary statement line-based checks can still be relied on when listed as performed.",
             )
@@ -2032,14 +2053,6 @@ def check_notes_agreement(
             tolerance,
             cautious_review_prompt=True,
         )
-        # Filter contradictions
-        cautious_findings = _check_cautious_face_note_amount_agreement(
-            _statement_note_lines(document),
-            headings,
-            _note_section_page_ranges(document),
-            document,
-            tolerance,
-        )
         passed_refs = set()
         # By default, cautious findings only emits findings for FAILURES. If a note is NOT in cautious_findings, it might have passed!
         # Actually, let's just use the main rows builder.
@@ -2108,6 +2121,20 @@ def check_notes_agreement(
             continue
         note_amounts = _amounts_in_text(section)
         if note_amounts and not any(abs(note_amount - amount) <= tolerance for note_amount in note_amounts):
+            # If Note-linked review found the amount successfully (perhaps using stronger table logic), skip Exception
+            if ref.strip() in passed_refs:
+                continue
+            # Parent/subnote valid fallback: If parent referenced, but amount is in subnote (e.g., Note 6A for Note 6), it's safe.
+            parent_match_safe = False
+            for k, v in note_sections.items():
+                if k.startswith(ref) and k != ref and len(k) == len(ref) + 1 and k[-1].isalpha():
+                    sub_amounts = _amounts_in_text(v)
+                    if sub_amounts and any(abs(sa - amount) <= tolerance for sa in sub_amounts):
+                        parent_match_safe = True
+                        break
+            if parent_match_safe:
+                continue
+                
             findings.append(
                 Finding(
                     "Notes agreement",
@@ -2426,12 +2453,14 @@ def _check_cross_footings(
         reported = values[-1]
         diff = reported - expected
         if abs(diff) > tolerance:
+            massive_deviation = abs(reported) > 0 and abs(expected) / abs(reported) > 10
+            severity = "Low" if massive_deviation else "Medium"
             findings.append(
                 Finding(
-                    "Totals and rounding",
-                    "Medium",
+                    "Extraction quality" if massive_deviation else "Totals and rounding",
+                    severity,
                     f"Page {page_number}, table {table_index}, row {row_index + 1}",
-                    "Cross-footing across the row does not agree.",
+                    "Cross-footing across the row does not agree (likely parser error)." if massive_deviation else "Cross-footing across the row does not agree.",
                     f"Visible row sum {expected:,}; reported final column {reported:,}; difference {diff:,}.",
                     "Check whether the row total, segment total, or final column has been carried across correctly.",
                 )
@@ -2779,10 +2808,10 @@ def _check_income_statement_text(
     performed: list[str] = []
     skipped: list[str] = []
     
-    is_private_company = document and _detect_entity_type(document.text).startswith("Private company")
-    stmt_name = "Statement of profit or loss" if is_private_company else "Statement of income and expenditure"
+    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    stmt_name = "Statement of profit or loss" if is_company else "Statement of income and expenditure"
     
-    if is_private_company:
+    if is_company:
         revenue = _row_amounts_any(rows, ("revenue", "turnover", "sales"))
         direct_expenses = _row_amounts_any(rows, ("direct expenses", "cost of sales"))
         gross_profit = _row_amounts_any(rows, ("gross profit",))
@@ -3032,9 +3061,9 @@ def _check_accumulated_fund_text(
     performed: list[str] = []
     skipped: list[str] = []
     
-    is_private_company = document and _detect_entity_type(document.text).lower().startswith("private")
-    stmt_name = "Statement of changes in equity" if is_private_company else "Statement of changes in accumulated fund"
-    word_fund = "equity" if is_private_company else "accumulated fund"
+    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    stmt_name = "Statement of changes in equity" if is_company else "Statement of changes in accumulated fund"
+    word_fund = "equity" if is_company else "accumulated fund"
     
     balance_rows = [(line, _amounts_from_statement_line(line)) for line in lines if "balance as at" in line.lower() or "balance at" in line.lower()]
     surplus_rows = [(line, _amounts_from_statement_line(line)) for line in lines if "surplus for the year" in line.lower().strip() or "profit for the year" in line.lower().strip()]
@@ -3081,15 +3110,24 @@ def _check_accumulated_fund_text(
                 )
             performed.append(f"{stmt_name}: opening plus surplus checked to closing {word_fund}.")
         else:
-            skipped.append(f"{stmt_name}: skipped because rotated/OCR table structure was not confidently parsed.")
+            skipped.append(f"{stmt_name} skipped because rotated/OCR table structure was not confidently parsed.")
     else:
-        skipped.append(f"{stmt_name}: skipped because rotated/OCR table structure was not confidently parsed.")
+        skipped.append(f"{stmt_name} skipped because rotated/OCR table structure was not confidently parsed.")
     return findings, performed, skipped
 
 
 
 
 
+
+def _normalise_cash_flow_label(label: str) -> str:
+    import re
+    label = label.lower()
+    label = re.sub(r'[^\w\s]', '', label)
+    label = re.sub(r'\s+', ' ', label)
+    label = label.replace("yeat", "year")
+    label = re.sub(r'\btotal\s+', '', label)
+    return label.strip()
 
 def _check_cash_flow_text(
     page: PdfPage,
@@ -3102,23 +3140,50 @@ def _check_cash_flow_text(
     performed: list[str] = []
     skipped: list[str] = []
     
-    op_aliases = ["net cash from operating activities", "cash from operating activities", "cash generated from operating activities", "net cash generated from operating activities", "net cash used in operating activities", "operating cash flow"]
-    inv_aliases = ["net cash used in investing activities", "cash used in investing activities", "net cash from investing activities", "net cash generated from investing activities", "net cash absorbed in investing activities", "investing cash flow"]
-    fin_aliases = ["net cash generated from financing activities", "cash generated from financing activities", "net cash from financing activities", "net cash used in financing activities", "net cash inflow from financing activities", "financing cash flow"]
-    mov_aliases = ["total cash movement for the year", "cash movement for the year", "cash movement for the yeat", "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents", "net increase in cash", "net decrease in cash", "total cash movement", "net (decrease)/increase in cash and cash equivalents"]
+    op_aliases = [
+        "net cash from operating activities", "cash from operating activities", 
+        "cash generated from operating activities", "net cash generated from operating activities"
+    ]
+    inv_aliases = [
+        "net cash used in investing activities", "cash used in investing activities", 
+        "net cash from investing activities", "cash flow from investing activities"
+    ]
+    fin_aliases = [
+        "net cash generated from financing activities", "cash generated from financing activities", 
+        "net cash from financing activities", "cash flow from financing activities"
+    ]
+    mov_aliases = [
+        "total cash movement for the year", "cash movement for the year", "cash movement for the yeat", 
+        "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents", "net cash movement"
+    ]
+    open_aliases = [
+        "cash at the beginning of the year", "cash and cash equivalents at beginning of year", 
+        "cash at beginning of year", "opening cash"
+    ]
+    close_aliases = [
+        "total cash at end of the year", "cash at end of the year", 
+        "cash and cash equivalents at end of year", "closing cash"
+    ]
+    exch_aliases = [
+        "effect of exchange rate movement on cash balances", "effect of exchange rate movement", 
+        "exchange difference on cash and cash equivalents", "exchange effect"
+    ]
     
-    open_aliases = ["cash at the beginning of the year", "cash and cash equivalents at beginning of year", "cash at beginning", "opening cash", "cash and cash equivalents at 1 january", "cash and cash equivalents at the beginning"]
-    close_aliases = ["total cash at end of the year", "cash at end of the year", "total cash at end of year", "cash and cash equivalents at end of year", "cash at end", "closing cash", "cash and cash equivalents at 31 december", "cash and cash equivalents at the end"]
-    exch_aliases = ["effect of exchange rate movement on cash balances", "exchange difference on cash and cash equivalents", "exchange difference", "effect of exchange rate changes", "exchange effect", "effect of foreign exchange rate changes"]
+    def _match(row_key: str, aliases: list[str]) -> bool:
+        norm_key = _normalise_cash_flow_label(row_key)
+        for a in aliases:
+            if _normalise_cash_flow_label(a) in norm_key:
+                return True
+        return False
     
-    op = next((v for k, v in rows.items() if any(x in k for x in op_aliases)), None) or next((v for k, v in rows.items() if "operat" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "operat" in k), None)
-    inv = next((v for k, v in rows.items() if any(x in k for x in inv_aliases)), None) or next((v for k, v in rows.items() if "invest" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "invest" in k), None)
-    fin = next((v for k, v in rows.items() if any(x in k for x in fin_aliases)), None) or next((v for k, v in rows.items() if "financ" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "financ" in k), None)
-    mov = next((v for k, v in rows.items() if any(x in k for x in mov_aliases)), None) or next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k or "net cash" in k or "cash flow" in k) and not any(x in k for x in ["operat", "invest", "financ"])), None)
+    op = next((v for k, v in rows.items() if _match(k, op_aliases)), None) or next((v for k, v in rows.items() if "operat" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "operat" in k), None)
+    inv = next((v for k, v in rows.items() if _match(k, inv_aliases)), None) or next((v for k, v in rows.items() if "invest" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "invest" in k), None)
+    fin = next((v for k, v in rows.items() if _match(k, fin_aliases)), None) or next((v for k, v in rows.items() if "financ" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "financ" in k), None)
+    mov = next((v for k, v in rows.items() if _match(k, mov_aliases)), None) or next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k or "net cash" in k or "cash flow" in k) and not any(x in k for x in ["operat", "invest", "financ"])), None)
     
-    opening = next((v for k, v in rows.items() if any(x in k for x in open_aliases)), None) or next((v for k, v in rows.items() if ("beginning" in k or " 1 " in k or "january" in k or "start" in k) and "cash" in k), None)
-    closing = next((v for k, v in rows.items() if any(x in k for x in close_aliases)), None) or next((v for k, v in rows.items() if ("end" in k or " 31 " in k or "december" in k) and "cash" in k), None)
-    exch = next((v for k, v in rows.items() if any(x in k for x in exch_aliases)), None) or next((v for k, v in rows.items() if "exchange" in k), None)
+    opening = next((v for k, v in rows.items() if _match(k, open_aliases)), None) or next((v for k, v in rows.items() if ("beginning" in k or " 1 " in k or "january" in k or "start" in k) and "cash" in k), None)
+    closing = next((v for k, v in rows.items() if _match(k, close_aliases)), None) or next((v for k, v in rows.items() if ("end" in k or " 31 " in k or "december" in k) and "cash" in k), None)
+    exch = next((v for k, v in rows.items() if _match(k, exch_aliases)), None) or next((v for k, v in rows.items() if "exchange" in k), None)
 
     if op and inv and fin and mov:
         expected = [a + b + c for a, b, c in zip(op, inv, fin)]

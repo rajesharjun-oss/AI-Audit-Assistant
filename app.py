@@ -76,6 +76,8 @@ def _finding_confidence(finding, result) -> str:
                 f"Table arithmetic {result.metrics.get('table_arithmetic_confidence', '0%')}"
             )
         return finding.severity
+    if finding.category == "Totals and rounding":
+        return f"Table arithmetic {result.metrics.get('table_arithmetic_confidence', '100%')}"
     if finding.severity == "High":
         return "High"
     if finding.severity == "Medium":
@@ -209,7 +211,7 @@ def _build_excel_export(result) -> bytes:
         {"Metric": "OCR table candidates", "Value": result.metrics.get("ocr_tables", 0)},
         {"Metric": "Statement structure confidence", "Value": result.metrics.get("statement_structure_confidence", "0%")},
         {"Metric": "Note structure confidence", "Value": result.metrics.get("note_structure_confidence", "0%")},
-        {"Metric": "Table arithmetic confidence", "Value": "0% (Skipped)" if len([f for f in result.findings if "table(s) skipped" in f.issue]) > 0 else result.metrics.get("table_arithmetic_confidence", "0%")},
+        {"Metric": "Table arithmetic confidence", "Value": "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else result.metrics.get("table_arithmetic_confidence", "0%")},
         {"Metric": "notes_section_start_page", "Value": result.metrics.get("notes_section_start_page", "Not detected")},
         {"Metric": "notes_heading_snippet", "Value": result.metrics.get("notes_heading_snippet", "No reliable notes heading detected.")},
         {"Metric": "cautious_note_validation_enabled", "Value": result.metrics.get("cautious_note_validation_enabled", False)},
@@ -441,7 +443,7 @@ def _build_word_memo_export(result) -> bytes:
                     ["OCR text coverage", result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%"))],
                     ["Statement structure confidence", result.metrics.get("statement_structure_confidence", "0%")],
                     ["Note structure confidence", result.metrics.get("note_structure_confidence", "0%")],
-                    ["Table arithmetic confidence", "0% (Skipped)" if len([f for f in result.findings if "table(s) skipped" in f.issue]) > 0 else result.metrics.get("table_arithmetic_confidence", "0%")],
+                    ["Table arithmetic confidence", "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else result.metrics.get("table_arithmetic_confidence", "0%")],
                 ]
             ),
             _docx_paragraph("Checks Performed", "Heading1"),
@@ -890,7 +892,7 @@ risk_cols[3].metric("Pages", result.metrics["pages"])
 risk_cols[4].metric("OCR table candidates", result.metrics.get("ocr_tables", 0))
 risk_cols[5].metric("Statement structure", result.metrics.get("statement_structure_confidence", "0%"))
 risk_cols[6].metric("Note structure", result.metrics.get("note_structure_confidence", "0%"))
-risk_cols[7].metric("Table arithmetic", "0% (Skipped)" if len([f for f in result.findings if "table(s) skipped" in f.issue]) > 0 else result.metrics.get("table_arithmetic_confidence", "0%"))
+risk_cols[7].metric("Table arithmetic", "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else result.metrics.get("table_arithmetic_confidence", "0%"))
 
 detected_profile = result.metrics.get("detected_profile", {})
 if isinstance(detected_profile, dict):
