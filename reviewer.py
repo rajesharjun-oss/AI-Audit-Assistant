@@ -358,8 +358,7 @@ def _get_note_section_with_fallback(ref: str, note_sections: dict[str, str], doc
         next_ref = str(ref_num + 1)
         # Search dynamically in text
         text = document.text
-        # e.g. "Note 3", "3.", " 3 ", "4
-Intangible assets"
+        # e.g. "Note 3", "3.", " 3 ", "4\\nIntangible assets"
         pattern = rf"(?:\n\s*(?:Note|NOTE)\s+{ref}\b|\n\s*{ref}\.?\s+[A-Z]|\n\s*{ref}\n\s*[A-Z])(.*?)(?:\n\s*(?:Note|NOTE)\s+{next_ref}\b|\n\s*{next_ref}\.?\s+[A-Z]|\n\s*{next_ref}\n\s*[A-Z])"
         match = re.search(pattern, text, re.DOTALL)
         if match:
