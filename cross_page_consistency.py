@@ -48,31 +48,50 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                 date_occurrences[match.group(0)].append(page.number)
             
         # Extract potential names in signature blocks or directors lists
-        if any(kw in text.lower() for kw in ("director", "secretary", "chief executive", "officer", "auditor")):
+        page_lower = text.lower()
+        target_page_keywords = [
+            "corporate information", "general information", "directors' report", "directors report",
+            "directors' responsibility", "directors responsibility", "management certification",
+            "independent auditor", "shareholding", "directors' interest", "directors interest"
+        ]
+        is_target_page = any(kw in page_lower for kw in target_page_keywords)
+        
+        if is_target_page:
             for match in NAME_RE.finditer(text):
-                name = re.sub(r"(?i)\b(?:chief|mr|mrs|dr|sir|board|director|directors|manager|officer|table|notes|executive|committee|chairman|audit|services)\b", " ", match.group(0))
-                name = re.sub(r"\s+", " ", name).strip()
-                if len(name.split()) >= 4:
-                    parts = name.split()
-                    name_candidates.append((" ".join(parts[:2]), page.number))
-                    name_candidates.append((" ".join(parts[2:]), page.number))
-                    continue
-                stop_words = [
-                    "annual report", "financial statement", "statement of", "notes to", "cash flow", "value added", 
-                    "the company", "limited", "bank", "plc", "kpmg", "pwc", "deloitte", "ernst", "kreston", "pedabo", 
-                    "audit", "services", "ifrs", "ias", "board of", "directors", "report of", "committee", "chairman", 
-                    "secretary", "executive", "officer", "accounting", "policy", "policies", "standards", "international", 
-                    "reporting", "corporate", "governance", "independent", "opinion", "basis for", "key audit", "matters", 
-                    "other information", "responsibilities of", "consolidated", "separate", "comprehensive income", 
-                    "financial position", "changes in equity", "general information", "address", "registered office", 
-                    "principal place", "business", "nature of", "for the year", "ended", "december", "january",
-                    "street", "road", "cost", "accumulated", "carrying", "to pay", "employees", "government",
-                    "manager", "table", "notes", "board", "financial group", "group financial", "financial instrument",
-                    "five year", "financial summary", "financials summary", "appointed", "resigned", "monday",
-                    "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "group", "financial", "instruments", "years"
+                raw_name = match.group(0)
+                
+                exclude_words = [
+                    "financial", "financials", "group", "instruments", "instrument", "statement", "summary", "years", "year",
+                    "nigeria", "appointed", "resigned", "monday", "company", "limited", "plc",
+                    "bank", "administrator", "administrators", "admistrator", "standard", "sacks", "sack", "property",
+                    "revenue", "income", "expense", "equity", "assets", "liabilities", "note", "pension", "fund",
+                    "tax", "ifrs", "ias", "frc", "audit", "services", "report", "accounting",
+                    "policy", "policies", "standards", "international", "reporting", "corporate",
+                    "governance", "independent", "opinion", "basis", "key", "matters", "other",
+                    "consolidated", "separate", "comprehensive", "position", "changes", "december",
+                    "january", "street", "road", "cost", "accumulated", "carrying", "pay",
+                    "employees", "government", "tuesday", "wednesday", "thursday", "friday",
+                    "saturday", "sunday"
                 ]
-                if not any(stop in name.lower() for stop in stop_words):
-                    name_candidates.append((name, page.number))
+                if any(re.search(fr"\b{ex}\b", raw_name, re.I) for ex in exclude_words):
+                    continue
+                    
+                remove_titles = [
+                    "group managing director", "chief financial officer", "managing director",
+                    "non-executive director", "executive director", "non-executive", "executive",
+                    "chairman", "director", "directors", "secretary", "chief", "officer",
+                    "manager", "committee", "board", "mr", "mrs", "dr", "sir", "non"
+                ]
+                
+                clean_name = raw_name
+                for title in remove_titles:
+                    clean_name = re.sub(fr"(?i)\b{title}\b", " ", clean_name)
+                    
+                clean_name = re.sub(r"\s+", " ", clean_name).strip()
+                
+                tokens = clean_name.split()
+                if 2 <= len(tokens) <= 4 and all(t[0].isupper() for t in tokens if t.isalpha()):
+                    name_candidates.append((clean_name, page.number))
 
         for line in text.splitlines():
             line = line.strip()
