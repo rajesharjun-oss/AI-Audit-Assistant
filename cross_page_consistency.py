@@ -222,14 +222,24 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         for j in range(i + 1, len(names_list)):
             name2 = names_list[j]
             # Must be similar but not exact, and share at least one word
-            # Check ratio
-            ratio = difflib.SequenceMatcher(None, name1, name2).ratio()
-            # Also check if it's the same words reversed e.g. "Taiwo Olasore" vs "Olasore Taiwo"
             set1 = set(name1.split())
             set2 = set(name2.split())
-            common_words = set1.intersection(set2)
             
-            if (ratio > 0.85 or (len(common_words) >= 2 and len(set1) == len(set2))) and name1 != name2:
+            is_match = False
+            if set1.issubset(set2) or set2.issubset(set1):
+                if len(set1) >= 2 or len(set2) >= 2:
+                    is_match = True
+            elif len(set1) == len(set2) and len(set1) >= 2:
+                diff1 = list(set1 - set2)
+                diff2 = list(set2 - set1)
+                if len(diff1) == 1 and len(diff2) == 1:
+                    if difflib.SequenceMatcher(None, diff1[0], diff2[0]).ratio() > 0.85:
+                        is_match = True
+            
+            if not is_match and set1 == set2 and len(set1) >= 2:
+                is_match = True
+                
+            if is_match and name1 != name2:
                 pair_key = tuple(sorted([name1, name2]))
                 if pair_key not in flagged_pairs:
                     flagged_pairs.add(pair_key)
