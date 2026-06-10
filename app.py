@@ -70,10 +70,12 @@ def _finding_confidence(finding, result) -> str:
         return f"Review prompt / {finding.metadata['match_confidence']}"
     if finding.category == "Extraction quality":
         if finding.location in {"PDF extraction", "Table extraction", "Notes agreement"}:
+            table_conf_val = result.metrics.get('table_arithmetic_confidence', '0%')
+            table_conf_str = "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else table_conf_val
             return (
                 f"OCR text {result.metrics.get('ocr_text_coverage', result.metrics.get('extraction_coverage', '0%'))} / "
                 f"Statement {result.metrics.get('statement_structure_confidence', '0%')} / "
-                f"Table arithmetic {result.metrics.get('table_arithmetic_confidence', '0%')}"
+                f"Table arithmetic {table_conf_str}"
             )
         return finding.severity
     if finding.category == "Totals and rounding":

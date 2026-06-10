@@ -93,78 +93,74 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
             "Suggested correction if needed": ""
         })
 
-    # Split into rough paragraphs
+    # Map the 10 specific policy topics!
+    REQUIRED_TOPICS = {
+        "Basis of preparation": ["basis of preparation", "statement of compliance", "going concern", "historical cost", "accounting convention"],
+        "Significant judgements and estimates": ["judgement", "judgment", "estimate", "assumption", "uncertaint"],
+        "PPE": ["property, plant", "ppe", "depreciation", "useful li", "residual value"],
+        "Intangible assets": ["intangible", "amortisation", "software", "development cost", "goodwill"],
+        "Financial instruments": ["financial instrument", "financial asset", "financial liabilit", "amortised cost", "fvtpl", "fvoci"],
+        "Receivables / ECL": ["receivable", "expected credit loss", "ecl", "impairment", "credit risk", "provision matrix", "loss allowance"],
+        "Tax": ["taxation", "income tax", "deferred tax", "current tax", "tax expense"],
+        "Revenue": ["revenue", "performance obligation", "contract with customer", "sale of goods", "rendering of services"],
+        "Contract liabilities": ["contract liabilit", "deferred revenue", "advance", "unearned"],
+        "Cash and cash equivalents": ["cash and cash", "cash equivalent", "bank balance", "short-term deposit"]
+    }
+    
+    # Check paragraphs against topics
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', combined_text) if p.strip()]
+    found_topics = set()
     
     for para in paragraphs:
         if len(para) < 30:
             continue
             
+        para_lower = para.lower()
+        matched_topics = []
+        for topic_name, keywords in REQUIRED_TOPICS.items():
+            if any(k in para_lower for k in keywords):
+                matched_topics.append(topic_name)
+                found_topics.add(topic_name)
+                
         mentioned_standards = []
         matches = re.finditer(r"\b(IFRS|IAS)\s+(\d+[A-Z]?)\b", para, flags=re.I)
         for m in matches:
             mentioned_standards.append(m.group(0).upper())
             
         mentioned_standards = list(dict.fromkeys(mentioned_standards))
+        standards_str = ", ".join(mentioned_standards) if mentioned_standards else "None specifically cited"
         
-        aligned = False
-        extended_topics = expected_policies + ["basis of preparation", "judgement", "judgment", "going concern", "cash and cash equivalents", "tax", "receivables", "ecl", "property, plant and equipment", "intangible", "revenue", "contract liabilit", "financial instruments", "cash", "ppe"]
-        for policy in extended_topics:
-            if policy.lower() in para.lower():
-                aligned = True
-                break
-                
-        if not mentioned_standards:
+        if not matched_topics:
             export_rows.append({
                 "Paragraph reviewed": para[:200] + ("..." if len(para) > 200 else ""),
-                "Standard mentioned": "None specifically cited",
-                "Expected standard topic": "General / " + ", ".join(expected_policies[:3]) + "...",
-                "Industry alignment": "Appears relevant" if aligned else "Possible boilerplate",
-                "Comment": "No specific IFRS/IAS standard cited, reviewed for general expected topics.",
+                "Standard mentioned": standards_str,
+                "Expected standard topic": "N/A",
+                "Industry alignment": "Possible boilerplate / other topic",
+                "Comment": "Reviewed but did not map strongly to the core 10 policy areas.",
                 "Suggested correction if needed": ""
             })
             continue
-
-        for std in mentioned_standards:
-            expected_topics = STANDARD_TOPICS.get(std, [])
-            if not expected_topics:
-                # Standard mentioned but we don't have expected topics mapped
-                export_rows.append({
-                    "Paragraph reviewed": para[:200] + ("..." if len(para) > 200 else ""),
-                    "Standard mentioned": std,
-                    "Expected standard topic": "N/A",
-                    "Industry alignment": "N/A",
-                    "Comment": f"{std} mentioned, no strict topic alignment enforced.",
-                    "Suggested correction if needed": ""
-                })
-                continue
-                
-            para_lower = para.lower()
-            aligned = any(topic in para_lower for topic in expected_topics)
             
-            if aligned:
-                comment = f"Paragraph aligns with {std} expected topics."
-                correction = ""
-            else:
-                comment = f"Paragraph mentions {std} but does not discuss expected topics like {expected_topics[0]}."
-                correction = f"Align the policy wording with {std} by discussing {', '.join(expected_topics[:3])}."
-                
-                findings.append(Finding(
-                    "Accounting policies",
-                    "Medium",
-                    f"Note 1/2 Policy: {std}",
-                    f"Policy mentions {std} but lacks expected specific topics.",
-                    para[:150] + "...",
-                    correction
-                ))
-                
+        for topic in matched_topics:
             export_rows.append({
                 "Paragraph reviewed": para[:200] + ("..." if len(para) > 200 else ""),
-                "Standard mentioned": std,
-                "Expected standard topic": ", ".join(expected_topics),
-                "Industry alignment": "Appears relevant" if aligned else "Possible boilerplate",
-                "Comment": comment,
-                "Suggested correction if needed": correction
+                "Standard mentioned": standards_str,
+                "Expected standard topic": topic,
+                "Industry alignment": "Appears relevant",
+                "Comment": f"Paragraph addresses {topic}.",
+                "Suggested correction if needed": ""
+            })
+
+    # Output missing core topics
+    for topic in REQUIRED_TOPICS:
+        if topic not in found_topics:
+            export_rows.append({
+                "Paragraph reviewed": "[MISSING POLICY]",
+                "Standard mentioned": "N/A",
+                "Expected standard topic": topic,
+                "Industry alignment": "Missing core policy",
+                "Comment": f"The core policy '{topic}' was not clearly detected in Note 1 or 2.",
+                "Suggested correction if needed": f"Consider adding a policy paragraph for {topic} if applicable."
             })
             
     return findings, export_rows

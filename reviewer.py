@@ -2134,6 +2134,29 @@ def check_notes_agreement(
                         break
             if parent_match_safe:
                 continue
+            
+            # Subnote to parent fallback: If subnote referenced (e.g. 5A), check parent note (5), AND any notes referenced within the parent.
+            if re.search(r'[A-Za-z]$', ref):
+                parent_ref = re.sub(r'[A-Za-z]+$', '', ref)
+                parent_section = note_sections.get(parent_ref, "")
+                if parent_section:
+                    p_amounts = _amounts_in_text(parent_section)
+                    if p_amounts and any(abs(pa - amount) <= tolerance for pa in p_amounts):
+                        continue
+                    # Also check any related notes referenced inside the parent note (e.g. related ECL movement note)
+                    related_refs = []
+                    for rm in re.finditer(r"\bnote\s+(\d+[A-Z]?)", parent_section, re.I):
+                        related_refs.append(rm.group(1).upper())
+                    found_in_related = False
+                    for r_ref in related_refs:
+                        r_sec = note_sections.get(r_ref, "")
+                        if r_sec:
+                            r_amounts = _amounts_in_text(r_sec)
+                            if r_amounts and any(abs(ra - amount) <= tolerance for ra in r_amounts):
+                                found_in_related = True
+                                break
+                    if found_in_related:
+                        continue
                 
             findings.append(
                 Finding(
@@ -3142,11 +3165,18 @@ def _check_cash_flow_text(
     ocr_review: bool = False,
     document: PdfDocument | None = None,
 ) -> tuple[list[Finding], list[str], list[str]]:
-    text = page.text
-    if document and page.number < len(document.pages):
-        next_page = document.pages[page.number]
-        text += "\n" + next_page.text
-    rows = _statement_rows(text)
+    rows: dict[str, list[Decimal]] = {}
+    if document:
+        lines = _statement_note_lines(document)
+        cf_lines = [item for item in lines if "cash flow" in item.statement_name.lower()]
+        if cf_lines:
+            rows = {item.line_item: list(item.amounts) for item in cf_lines}
+    if not rows:
+        text = page.text
+        if document and page.number < len(document.pages):
+            next_page = document.pages[page.number]
+            text += "\n" + next_page.text
+        rows = _statement_rows(text)
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
