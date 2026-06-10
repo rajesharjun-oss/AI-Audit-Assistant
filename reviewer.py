@@ -359,6 +359,9 @@ def _get_note_section_with_fallback(ref: str, note_sections: dict[str, str]) -> 
         if prev_ref in note_sections and next_ref in note_sections:
             return f"Found dynamically between Note {prev_ref} and Note {next_ref}"
     return ""
+
+
+
 def _get_note_heading_with_fallback(ref: str, headings: dict[str, str]) -> str:
     heading = headings.get(ref, "")
     if heading: return heading
@@ -1174,7 +1177,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                 _yes_no(current_found),
                 _yes_no(prior_found) if prior_amount is not None else "N/A",
                 alternative_ref,
-                _amount_match_confidence(current_found, prior_found, alternative_ref, cautious_review_prompt=low_confidence, item_ref=item.ref),
+                _amount_match_confidence(current_found, prior_found, alternative_ref, cautious_review_prompt=low_confidence),
                 "Review prompt" if low_confidence else "Review prompt",
                 f"Amount appears in another note: Note {alternative_ref}." if alternative_ref else "Amount not located in referenced note.",
                 matched_snippet,
@@ -2071,7 +2074,7 @@ def check_notes_agreement(
     )
     try:
         check_result_rows = _note_agreement_result_rows(document)
-        passed_refs = {row["Note number"] for row in check_result_rows if row["Review result"] == "Passed"}
+        passed_refs = {row["Note reference"] for row in check_result_rows if row["Result"] == "Passed"}
     except Exception:
         passed_refs = set()
         
@@ -2812,140 +2815,8 @@ def _check_income_statement_text(
     else:
         skipped.append("Statement of income and expenditure: skipped because income/expenditure rows were not confidently parsed.")
     return findings, performed, skipped
-) -> tuple[list[Finding], list[str], list[str]]:
-    rows = _statement_rows(page.text)
-    performed: list[str] = []
-    skipped: list[str] = []
-    findings: list[Finding] = []
-    gross_operating = ("subscriptions", "registrations", "operating revenue")
-    total_income = ("gross revenue", "other revenue", "finance income")
-    expenditure = ("office accommodation costs", "personnel costs", "administrative costs", "finance expenses")
-    if all(label in rows for label in ("revenue", "profit before tax", "taxation", "profit after tax")):
-        raw_lines = _statement_row_raw_lines(page.text)
-        before_tax_amounts = _row_amounts(rows, "profit before tax")
-        taxation_amounts = _row_amounts(rows, "taxation")
-        after_tax_amounts = _row_amounts(rows, "profit after tax")
-        if ocr_review and len(before_tax_amounts) >= 2 and len(taxation_amounts) >= 2 and len(after_tax_amounts) < 2:
-            skip_message = "Skipped / OCR conflict - current-year after-tax value not confidently extracted."
-            corroboration = _ocr_income_corroboration_assessment(
-                document,
-                taxation_amounts[0],
-                after_tax_amounts[0] if after_tax_amounts else None,
-                tolerance,
-            )
-            if corroboration.get("casts"):
-                skip_message = (
-                    "Skipped / OCR conflict - current-year after-tax value not confidently extracted. "
-                    f"Corroborating lines indicate {_format_accounting_amount(corroboration.get('after_tax_value'))}. "
-                    "Manual confirmation required."
-                )
-            skipped.append(skip_message)
-        elif _check_profit_tax_equation(
-            findings,
-            page.number,
-            "Income statement",
-            before_tax_amounts,
-            taxation_amounts,
-            after_tax_amounts,
-            tolerance,
-            ocr_review=ocr_review,
-            raw_lines=raw_lines,
-            document=document,
-        ):
-            performed.append("Income statement: revenue, tax, and profit/loss after tax checked from line-extracted rows.")
-        else:
-            skipped.append("Income statement: profit/loss after tax skipped because OCR tax rows did not contain comparable current/prior amounts.")
-    elif any(label in rows for label in ("revenue", "profit before tax", "taxation", "profit after tax")):
-        skipped.append("Income statement: profit/loss after tax skipped because revenue, tax, or profit rows were not confidently parsed.")
-    if _has_rows(rows, (*gross_operating, "gross operating revenue")):
-        _check_sum_rows(
-            findings,
-            page.number,
-            "Income statement",
-            "Gross operating revenue",
-            rows,
-            gross_operating,
-            "gross operating revenue",
-            tolerance,
-            ocr_review=ocr_review,
-        )
-        performed.append("Income statement: gross operating revenue checked from line-extracted rows.")
-    else:
-        skipped.append("Income statement: gross operating revenue skipped because component rows were not confidently parsed.")
-    if _has_rows(rows, ("gross operating revenue", "operating expenditure", "gross revenue")):
-        _check_vector_equation(
-            findings,
-            page.number,
-            "Income statement",
-            "Gross revenue equals gross operating revenue less operating expenditure.",
-            [a + b for a, b in zip(_row_amounts(rows, "gross operating revenue"), _row_amounts(rows, "operating expenditure"))],
-            _row_amounts(rows, "gross revenue"),
-            tolerance,
-            ocr_review=ocr_review,
-        )
-        performed.append("Income statement: gross revenue checked against operating revenue less operating expenditure.")
-    else:
-        skipped.append("Income statement: gross revenue skipped because required rows were not confidently parsed.")
-    if _has_rows(rows, (*total_income, "total income")):
-        _check_sum_rows(
-            findings,
-            page.number,
-            "Income statement",
-            "Total income",
-            rows,
-            total_income,
-            "total income",
-            tolerance,
-            ocr_review=ocr_review,
-        )
-        performed.append("Income statement: total income checked from line-extracted rows.")
-    else:
-        skipped.append("Income statement: total income skipped because component rows were not confidently parsed.")
-    if _has_rows(rows, (*expenditure, "total expenditure")):
-        _check_sum_rows(
-            findings,
-            page.number,
-            "Income statement",
-            "Total expenditure",
-            rows,
-            expenditure,
-            "total expenditure",
-            tolerance,
-            ocr_review=ocr_review,
-        )
-        performed.append("Income statement: total expenditure checked from line-extracted rows.")
-    else:
-        skipped.append("Income statement: total expenditure skipped because component rows were not confidently parsed.")
-    if _has_rows(rows, ("total income", "total expenditure", "surplus of income over expenditure")):
-        expected = _row_amounts(rows, "total income")
-        expenditure_amounts = _row_amounts(rows, "total expenditure")
-        reported = _row_amounts(rows, "surplus of income over expenditure")
-        _check_vector_equation(
-            findings,
-            page.number,
-            "Income statement",
-            "Surplus equals total income less total expenditure.",
-            [a - b for a, b in zip(expected, expenditure_amounts)],
-            reported,
-            tolerance,
-            ocr_review=ocr_review,
-        )
-        performed.append("Income statement: surplus checked against income less expenditure.")
-    else:
-        skipped.append("Income statement: surplus check skipped because required rows were not confidently parsed.")
-    if _has_rows(rows, ("surplus of income over expenditure", "total comprehensive income")):
-        _check_vector_equation(
-            findings,
-            page.number,
-            "Income statement",
-            "Total comprehensive income agrees to surplus where OCI is nil.",
-            _row_amounts(rows, "surplus of income over expenditure"),
-            _row_amounts(rows, "total comprehensive income"),
-            tolerance,
-            ocr_review=ocr_review,
-        )
-        performed.append("Income statement: total comprehensive income checked.")
-    return findings, performed, skipped
+
+
 
 
 def _check_sfp_text(
@@ -3167,46 +3038,8 @@ def _check_accumulated_fund_text(
     else:
         skipped.append(f"{stmt_name}: skipped because rotated/OCR table structure was not confidently parsed.")
     return findings, performed, skipped
-) -> tuple[list[Finding], list[str], list[str]]:
-    lines = page.text.splitlines()
-    findings: list[Finding] = []
-    performed: list[str] = []
-    skipped: list[str] = []
-    balance_rows = [(line, _amounts_from_statement_line(line)) for line in lines if "balance as at" in line.lower()]
-    surplus_rows = [(line, _amounts_from_statement_line(line)) for line in lines if line.lower().strip().startswith("surplus for the year")]
-    if len(balance_rows) >= 3 and len(surplus_rows) >= 2:
-        opening_2025 = balance_rows[-2][1]
-        closing_2025 = balance_rows[-1][1]
-        surplus_2025 = surplus_rows[-1][1]
-        if len(opening_2025) >= 4 and len(closing_2025) >= 4 and surplus_2025:
-            expected_total = opening_2025[-1] + surplus_2025[-1]
-            reported_total = closing_2025[-1]
-            if ocr_review:
-                _check_ocr_scalar_equation(
-                    findings,
-                    page.number,
-                    "Statement of changes in accumulated fund",
-                    "Closing accumulated fund agrees to opening fund plus surplus.",
-                    expected_total,
-                    reported_total,
-                    tolerance,
-                )
-            else:
-                _check_scalar_equation(
-                    findings,
-                    page.number,
-                    "Statement of changes in accumulated fund",
-                    "Closing accumulated fund agrees to opening fund plus surplus.",
-                    expected_total,
-                    reported_total,
-                    tolerance,
-                )
-            performed.append("Statement of changes in accumulated fund: opening plus surplus checked to closing fund.")
-        else:
-            skipped.append("Statement of changes in accumulated fund: skipped because fund columns were not confidently parsed.")
-    else:
-        skipped.append("Statement of changes in accumulated fund: skipped because movement rows were not confidently parsed.")
-    return findings, performed, skipped
+
+
 
 
 def _check_cash_flow_text(
@@ -3262,55 +3095,8 @@ def _check_cash_flow_text(
         findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Opening cash plus total movement agrees to closing cash.", "Equation passed.", ""))
         
     return findings, performed, skipped
-) -> tuple[list[Finding], list[str], list[str]]:
-    rows = _statement_rows(page.text)
-    findings: list[Finding] = []
-    performed: list[str] = []
-    skipped: list[str] = []
-    op = next((v for k, v in rows.items() if "operat" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "operat" in k), None)
-    inv = next((v for k, v in rows.items() if "invest" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "invest" in k), None)
-    fin = next((v for k, v in rows.items() if "financ" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "financ" in k), None)
-    mov = next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k or "net cash" in k or "cash flow" in k) and not any(x in k for x in ["operat", "invest", "financ"])), None)
 
-    if op and inv and fin and mov:
-        expected = [a + b + c for a, b, c in zip(op, inv, fin)]
-        _check_vector_equation(
-            findings,
-            page.number,
-            "Statement of cash flows",
-            "Operating, investing, and financing cash flows agree to net increase in cash.",
-            expected,
-            mov,
-            tolerance,
-            ocr_review=ocr_review,
-        )
-        performed.append("Statement of cash flows: net cash increase checked.")
-        findings.append(Finding("Calculation", "Passed", "Statement of cash flows", "Operating, investing, and financing cash flows agree to net increase.", "Equation passed.", ""))
-    else:
-        skipped.append("Statement of cash flows: skipped because operating/investing/financing/movement rows were not confidently parsed.")
-    open_cash = next((v for k, v in rows.items() if ("beginning" in k or "start" in k or " 1 " in k or "january" in k or "brought forward" in k) and ("cash" in k or "balance" in k or "1 " in k or "jan" in k)), None)
-    close_cash = next((v for k, v in rows.items() if ("end" in k or " 31 " in k or "december" in k or "carried forward" in k) and ("cash" in k or "balance" in k or "31 " in k or "dec" in k)), None)
-    exc = next((v for k, v in rows.items() if "exchange" in k), None)
 
-    if open_cash and close_cash and mov:
-        if exc:
-            expected = [a + b + c for a, b, c in zip(open_cash, mov, exc)]
-        else:
-            expected = [a + b for a, b in zip(open_cash, mov)]
-        _check_vector_equation(
-            findings,
-            page.number,
-            "Statement of cash flows",
-            "Closing cash agrees to opening cash plus net increase.",
-            expected,
-            close_cash,
-            tolerance,
-            ocr_review=ocr_review,
-        )
-        performed.append("Statement of cash flows: closing cash movement checked.")
-    else:
-        skipped.append("Statement of cash flows: skipped because opening/closing cash rows were not confidently parsed.")
-    return findings, performed, skipped
 
 
 def _statement_rows(text: str) -> dict[str, list[Decimal]]:
@@ -5270,7 +5056,7 @@ def _check_cautious_face_note_amount_agreement(
             if alternative_ref
             else f"Amount not located in referenced note: {item.line_item.title()} references Note {item.ref}."
         )
-        confidence = _amount_match_confidence(current_found, prior_found, alternative_ref, cautious_review_prompt, item.ref)
+        confidence = _amount_match_confidence(current_found, prior_found, alternative_ref, cautious_review_prompt)
         if confidence == "Low":
             continue
         findings.append(
@@ -5487,6 +5273,10 @@ def _amount_match_confidence(current_found: bool, prior_found: bool, alternative
     if alternative_ref:
         return "Medium"
     return "Low"
+
+
+
+
 def _yes_no(value: bool) -> str:
     return "Yes" if value else "No"
 
