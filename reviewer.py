@@ -358,12 +358,15 @@ def _get_note_section_with_fallback(ref: str, note_sections: dict[str, str], doc
         next_ref = str(ref_num + 1)
         # Search dynamically in text
         text = document.text
-        # e.g. "Note 3", "3.", " 3 "
-        pattern = rf"(?:\n\s*(?:Note|NOTE)\s+{ref}\b|\n\s*{ref}\.\s+[A-Z])(.*?)(?:\n\s*(?:Note|NOTE)\s+{next_ref}\b|\n\s*{next_ref}\.\s+[A-Z])"
+        # e.g. "Note 3", "3.", " 3 ", "4
+Intangible assets"
+        pattern = rf"(?:\n\s*(?:Note|NOTE)\s+{ref}\b|\n\s*{ref}\.?\s+[A-Z]|\n\s*{ref}\n\s*[A-Z])(.*?)(?:\n\s*(?:Note|NOTE)\s+{next_ref}\b|\n\s*{next_ref}\.?\s+[A-Z]|\n\s*{next_ref}\n\s*[A-Z])"
         match = re.search(pattern, text, re.DOTALL)
         if match:
             return match.group(1).strip()
     return ""
+
+
 
 
 
@@ -2044,13 +2047,13 @@ def check_notes_agreement(
         try:
             # We call the same function the exporter uses to get the True/False passed states
             check_result_rows = _note_agreement_result_rows(document)
-            passed_refs = {row["Note number"] for row in check_result_rows if row["Review result"] == "Passed"}
+            passed_refs = {str(row["Note number"]).strip() for row in check_result_rows if row["Review result"] == "Passed"}
         except Exception:
             pass
             
         for f in misref_findings:
             ref_match = re.search(r"Note (\d+[A-Z]?)", f.evidence)
-            if ref_match and ref_match.group(1) in passed_refs:
+            if ref_match and ref_match.group(1).strip() in passed_refs:
                 continue
             findings.append(f)
         cautious_findings = _check_cautious_face_note_amount_agreement(
@@ -2062,7 +2065,7 @@ def check_notes_agreement(
         )
         for f in cautious_findings:
             ref_match = re.search(r"Note (\d+[A-Z]?)", f.issue)
-            if ref_match and ref_match.group(1) in passed_refs:
+            if ref_match and ref_match.group(1).strip() in passed_refs:
                 continue
             findings.append(f)
         return findings
@@ -2089,13 +2092,13 @@ def check_notes_agreement(
     )
     try:
         check_result_rows = _note_agreement_result_rows(document)
-        passed_refs = {row["Note number"] for row in check_result_rows if row["Review result"] == "Passed"}
+        passed_refs = {str(row["Note number"]).strip() for row in check_result_rows if row["Review result"] == "Passed"}
     except Exception:
         passed_refs = set()
         
     for f in misref_findings:
         ref_match = re.search(r"Note (\d+[A-Z]?)", f.evidence)
-        if ref_match and ref_match.group(1) in passed_refs:
+        if ref_match and ref_match.group(1).strip() in passed_refs:
             continue
         findings.append(f)
     for ref, line, amount in _statement_lines_with_note_refs(document):
@@ -2133,7 +2136,7 @@ def check_notes_agreement(
     for f in findings:
         if f.category == "Notes agreement" and "not found" in f.issue.lower():
             ref_match = re.search(r"Note (\d+[A-Z]?)", f.issue)
-            if ref_match and ref_match.group(1) in passed_refs:
+            if ref_match and ref_match.group(1).strip() in passed_refs:
                 continue
         filtered_findings.append(f)
     findings = filtered_findings
@@ -3030,7 +3033,7 @@ def _check_accumulated_fund_text(
     performed: list[str] = []
     skipped: list[str] = []
     
-    is_private_company = document and _detect_entity_type(document.text).startswith("Private company")
+    is_private_company = document and _detect_entity_type(document.text).lower().startswith("private")
     stmt_name = "Statement of changes in equity" if is_private_company else "Statement of changes in accumulated fund"
     word_fund = "equity" if is_private_company else "accumulated fund"
     
@@ -3044,18 +3047,31 @@ def _check_accumulated_fund_text(
         if len(opening_2025) >= 4 and len(closing_2025) >= 4 and surplus_2025:
             expected_total = opening_2025[-1] + surplus_2025[-1]
             reported_total = closing_2025[-1]
-            if ocr_review:
-                _check_ocr_scalar_equation(
-                    findings,
-                    page.number,
-                    stmt_name,
-                    f"Closing {word_fund} agrees to opening fund plus surplus.",
-                    expected_total,
-                    reported_total,
-                    tolerance,
+            diff = expected_total - reported_total
+            if abs(diff) > tolerance:
+                findings.append(
+                    Finding(
+                        "Calculation",
+                        "High" if abs(diff) > tolerance * 5 else "Medium",
+                        stmt_name,
+                        f"Closing {word_fund} does not agree to opening {word_fund} plus surplus.",
+                        f"Reported closing {reported_total:,}; expected {expected_total:,} (opening {opening_2025[-1]:,} + surplus {surplus_2025[-1]:,}). Difference: {diff:,}.",
+                        f"Check if there are prior year adjustments, dividends, or other comprehensive income lines modifying {word_fund}.",
+                    )
                 )
             else:
-                _check_scalar_equation(
+                findings.append(
+                    Finding(
+                        "Calculation",
+                        "Passed",
+                        stmt_name,
+                        f"Closing {word_fund} agrees to opening {word_fund} plus surplus.",
+                        "Equation passed.",
+                        "",
+                    )
+                )
+            if ocr_review:
+                _check_ocr_scalar_equation(
                     findings,
                     page.number,
                     stmt_name,
@@ -3074,6 +3090,8 @@ def _check_accumulated_fund_text(
 
 
 
+
+
 def _check_cash_flow_text(
     page: PdfPage,
     tolerance: Decimal,
@@ -3085,14 +3103,14 @@ def _check_cash_flow_text(
     performed: list[str] = []
     skipped: list[str] = []
     
-    op_aliases = ["net cash from operating activities", "cash from operating activities", "net cash generated from operating activities", "net cash used in operating activities", "operating cash flow"]
+    op_aliases = ["net cash from operating activities", "cash from operating activities", "cash generated from operating activities", "net cash generated from operating activities", "net cash used in operating activities", "operating cash flow"]
     inv_aliases = ["net cash used in investing activities", "cash used in investing activities", "net cash from investing activities", "net cash generated from investing activities", "net cash absorbed in investing activities", "investing cash flow"]
     fin_aliases = ["net cash generated from financing activities", "cash generated from financing activities", "net cash from financing activities", "net cash used in financing activities", "net cash inflow from financing activities", "financing cash flow"]
-    mov_aliases = ["total cash movement for the year", "cash movement for the year", "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents", "net increase in cash", "net decrease in cash", "total cash movement", "net (decrease)/increase in cash and cash equivalents"]
+    mov_aliases = ["total cash movement for the year", "cash movement for the year", "cash movement for the yeat", "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents", "net increase in cash", "net decrease in cash", "total cash movement", "net (decrease)/increase in cash and cash equivalents"]
     
     open_aliases = ["cash at the beginning of the year", "cash and cash equivalents at beginning of year", "cash at beginning", "opening cash", "cash and cash equivalents at 1 january", "cash and cash equivalents at the beginning"]
-    close_aliases = ["total cash at end of year", "cash at end of year", "cash and cash equivalents at end of year", "cash at end", "closing cash", "total cash at end of the year", "cash and cash equivalents at 31 december", "cash and cash equivalents at the end"]
-    exch_aliases = ["effect of exchange rate movement on cash balances", "exchange difference", "effect of exchange rate changes", "exchange effect", "effect of foreign exchange rate changes"]
+    close_aliases = ["total cash at end of the year", "cash at end of the year", "total cash at end of year", "cash and cash equivalents at end of year", "cash at end", "closing cash", "cash and cash equivalents at 31 december", "cash and cash equivalents at the end"]
+    exch_aliases = ["effect of exchange rate movement on cash balances", "exchange difference on cash and cash equivalents", "exchange difference", "effect of exchange rate changes", "exchange effect", "effect of foreign exchange rate changes"]
     
     op = next((v for k, v in rows.items() if any(x in k for x in op_aliases)), None) or next((v for k, v in rows.items() if "operat" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "operat" in k), None)
     inv = next((v for k, v in rows.items() if any(x in k for x in inv_aliases)), None) or next((v for k, v in rows.items() if "invest" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "invest" in k), None)
@@ -3138,6 +3156,8 @@ def _check_cash_flow_text(
         skipped.append("Statement of cash flows: skipped because opening/movement/closing rows were not confidently parsed.")
         
     return findings, performed, skipped
+
+
 
 
 
@@ -3945,19 +3965,22 @@ def _check_industry_policy_fit(findings: list[Finding], document: PdfDocument, p
 
 def _accounting_policy_text(document: PdfDocument) -> str:
     text = document.text
-    matches = list(re.finditer(r"summary of significant accounting policies|significant accounting policies|accounting policies", text, flags=re.I))
+    matches = list(re.finditer(r"summary of significant accounting policies|significant accounting policies|accounting policies|basis of preparation|general information", text, flags=re.I))
     if not matches:
         return text
-    start_match = next((match for match in matches if "summary" in match.group(0).lower()), matches[-1])
+    start_match = matches[0] # Grab from the very first match (often Note 1 General info / Basis)
     tail = text[start_match.start():]
+    # Capture up to Note 4, Note 5, or Note 6 to include Judgements and Estimates
     end_match = re.search(
-        r"\n\s*5\s+Critical accounting estimates|\n\s*5\.\s*Critical accounting estimates|\n\s*Critical accounting estimates",
-        tail[1200:],
+        r"\n\s*4\s+[A-Z]|\n\s*5\s+[A-Z]|\n\s*6\s+[A-Z]|\n\s*(?:Note|NOTE)\s+4\b|\n\s*4\.\s+[A-Z]",
+        tail[2000:],
         flags=re.I,
     )
     if end_match:
-        return tail[: 1200 + end_match.start()]
+        return tail[: 2000 + end_match.start()]
     return tail[:18000]
+
+
 
 
 def _accounting_policy_map(document: PdfDocument) -> dict[str, bool]:
