@@ -71,7 +71,10 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     "consolidated", "separate", "comprehensive", "position", "changes", "december",
                     "january", "street", "road", "cost", "accumulated", "carrying", "pay",
                     "employees", "government", "tuesday", "wednesday", "thursday", "friday",
-                    "saturday", "sunday"
+                    "saturday", "sunday",
+                    "opening", "additions", "depreciation", "total", "value", "distributed",
+                    "balance", "at", "as", "for", "the", "ended", "loss", "profit",
+                    "net", "gross", "operating", "cash", "flows", "financing", "investing", "activities"
                 ]
                 if any(re.search(fr"\b{ex}\b", raw_name, re.I) for ex in exclude_words):
                     continue
@@ -80,7 +83,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     "group managing director", "chief financial officer", "managing director",
                     "non-executive director", "executive director", "non-executive", "executive",
                     "chairman", "director", "directors", "secretary", "chief", "officer",
-                    "manager", "committee", "board", "mr", "mrs", "dr", "sir", "non"
+                    "managing", "manager", "committee", "board", "mr", "mrs", "dr", "sir", "non"
                 ]
                 
                 clean_name = raw_name
