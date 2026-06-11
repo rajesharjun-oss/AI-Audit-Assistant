@@ -2756,6 +2756,13 @@ def _check_eps_note(findings: list[Finding], ref: str, section: str) -> None:
 def _skip_note_subtotal_checks(title: str, section: str) -> bool:
     lower = f"{title}\n{section}".lower()
     skip_terms = (
+        "new standards",
+        "new standard",
+        "standards and interpretations",
+        "new and amended standards",
+        "amendments to",
+        "effective and adopted",
+        "not yet effective",
         "financial instruments - risk",
         "financial risk",
         "risk management",
@@ -2763,6 +2770,9 @@ def _skip_note_subtotal_checks(title: str, section: str) -> bool:
         "liquidity risk",
         "credit risk",
         "expected credit loss",
+        "loss allowance",
+        "movement in loss allowance",
+        "impairment losses and reversals",
         " ecl",
         "ageing",
         "aging",
@@ -2775,7 +2785,33 @@ def _skip_note_subtotal_checks(title: str, section: str) -> bool:
         "subsequent events",
         "related party",
     )
-    return any(term in lower for term in skip_terms)
+    if any(term in lower for term in skip_terms):
+        return True
+    if _note_section_looks_like_complex_movement_table(title, section):
+        return True
+    return False
+
+
+def _note_section_looks_like_complex_movement_table(title: str, section: str) -> bool:
+    lower = f"{title}\n{section}".lower()
+    movement_terms = (
+        "opening balance",
+        "additions",
+        "disposals",
+        "depreciation",
+        "amortisation",
+        "amortization",
+        "charge for the year",
+        "closing balance",
+        "at 1 january",
+        "at 31 december",
+    )
+    if sum(1 for term in movement_terms if term in lower) >= 2:
+        return True
+    lines = [line.strip() for line in section.splitlines() if line.strip()]
+    amount_lines = [line for line in lines if _looks_like_amount_line(line.lower()) and _last_amount(line) is not None]
+    year_header_lines = [line for line in lines if len(YEAR_RE.findall(line)) >= 2]
+    return len(amount_lines) > 12 and bool(year_header_lines)
 
 
 def _check_tax_note(findings: list[Finding], ref: str, section: str, tolerance: Decimal) -> None:
@@ -4826,7 +4862,11 @@ def _looks_like_total(label: str) -> bool:
 
 def _looks_like_amount_line(label: str) -> bool:
     excluded = ("note", "year", "date", "audited", "restated")
-    return bool(label.strip()) and not any(word in label for word in excluded)
+    if not label.strip() or any(word in label for word in excluded):
+        return False
+    if not re.search(r"[a-z]{3,}", label):
+        return False
+    return True
 
 
 def _is_table_boundary_row(row: list[str | Decimal | None]) -> bool:

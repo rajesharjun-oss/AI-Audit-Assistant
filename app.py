@@ -273,6 +273,13 @@ def _build_excel_export(result) -> bytes:
         pd.DataFrame(primary_rows).to_excel(writer, sheet_name="Primary statement line items", index=False)
         pd.DataFrame(no_notes_rows).to_excel(writer, sheet_name="Items without notes summary", index=False)
         pd.DataFrame(linked_rows).to_excel(writer, sheet_name="Note-linked review", index=False)
+
+        notes_detected_rows = _note_heading_rows(result) or [{"Note": "None found"}]
+        notes_heading_candidate_rows = _notes_heading_candidate_rows(result)
+        ocr_statement_rows = _ocr_statement_row_rows(result)
+        pd.DataFrame(notes_detected_rows).to_excel(writer, sheet_name="Notes detected", index=False)
+        pd.DataFrame(notes_heading_candidate_rows).to_excel(writer, sheet_name="Notes heading candidates", index=False)
+        pd.DataFrame(ocr_statement_rows).to_excel(writer, sheet_name="OCR statement rows", index=False)
         
         policy_rows = result.metrics.get("policy_export", []) or [{"Paragraph reviewed": "None found"}]
         pd.DataFrame(policy_rows).to_excel(writer, sheet_name="Notes 1 and 2 policy review", index=False)
@@ -306,6 +313,9 @@ def _build_excel_export(result) -> bytes:
         _format_excel_table_sheet(writer.book["Primary statement line items"], "PrimaryLineItems")
         _format_excel_table_sheet(writer.book["Items without notes summary"], "NoNotesSummary")
         _format_excel_table_sheet(writer.book["Note-linked review"], "NoteLinkedReview")
+        _format_excel_table_sheet(writer.book["Notes detected"], "NotesDetected")
+        _format_excel_table_sheet(writer.book["Notes heading candidates"], "NotesHeadingCandidates")
+        _format_excel_table_sheet(writer.book["OCR statement rows"], "OCRStatementRows")
         _format_excel_table_sheet(writer.book["Notes 1 and 2 policy review"], "PolicyReview")
         _format_excel_table_sheet(writer.book["Unreferenced notes"], "UnreferencedNotes")
         _format_excel_table_sheet(writer.book["Key amount consistency"], "AmountConsistency")

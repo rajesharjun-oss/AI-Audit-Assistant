@@ -236,8 +236,14 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             set2 = set(name2.split())
             
             is_match = False
-            if set1.issubset(set2) or set2.issubset(set1):
-                if len(set1) >= 2 or len(set2) >= 2:
+            subset_only = set1.issubset(set2) or set2.issubset(set1)
+            if subset_only:
+                # A shorter name can be a legitimate abbreviated presentation of a longer
+                # name. Treat it as a spelling issue only when the two strings are almost
+                # identical, not when extra middle/last names are present.
+                length_gap = abs(len(set1) - len(set2))
+                ratio = difflib.SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
+                if length_gap == 0 or (length_gap == 1 and ratio > 0.9):
                     is_match = True
             elif len(set1) == len(set2) and len(set1) >= 2:
                 diff1 = list(set1 - set2)
