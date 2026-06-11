@@ -231,29 +231,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
     for i, name1 in enumerate(names_list):
         for j in range(i + 1, len(names_list)):
             name2 = names_list[j]
-            # Must be similar but not exact, and share at least one word
-            set1 = set(name1.split())
-            set2 = set(name2.split())
-            
-            is_match = False
-            subset_only = set1.issubset(set2) or set2.issubset(set1)
-            if subset_only:
-                # A shorter name can be a legitimate abbreviated presentation of a longer
-                # name. Treat it as a spelling issue only when the two strings are almost
-                # identical, not when extra middle/last names are present.
-                length_gap = abs(len(set1) - len(set2))
-                ratio = difflib.SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
-                if length_gap == 0 or (length_gap == 1 and ratio > 0.9):
-                    is_match = True
-            elif len(set1) == len(set2) and len(set1) >= 2:
-                diff1 = list(set1 - set2)
-                diff2 = list(set2 - set1)
-                if len(diff1) == 1 and len(diff2) == 1:
-                    if difflib.SequenceMatcher(None, diff1[0], diff2[0]).ratio() > 0.85:
-                        is_match = True
-            
-            if not is_match and set1 == set2 and len(set1) >= 2:
-                is_match = True
+            is_match = _names_look_like_spelling_variants(name1, name2)
                 
             if is_match and name1 != name2:
                 pair_key = tuple(sorted([name1, name2]))
@@ -282,3 +260,30 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     )
 
     return findings, export_data
+
+
+def _names_look_like_spelling_variants(name1: str, name2: str) -> bool:
+    tokens1 = _normalise_name_tokens(name1)
+    tokens2 = _normalise_name_tokens(name2)
+    if len(tokens1) != len(tokens2) or len(tokens1) < 2:
+        return False
+    if tokens1 == tokens2:
+        return False
+    if set(tokens1) == set(tokens2):
+        return False
+
+    exact = 0
+    fuzzy = 0
+    for left, right in zip(tokens1, tokens2):
+        if left == right:
+            exact += 1
+            continue
+        if left[:1] == right[:1] and difflib.SequenceMatcher(None, left, right).ratio() >= 0.84:
+            fuzzy += 1
+            continue
+        return False
+    return exact >= 1 and fuzzy == 1
+
+
+def _normalise_name_tokens(name: str) -> list[str]:
+    return [token.lower() for token in re.findall(r"[A-Za-z]+", name)]

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import extraction
 import reviewer
+from cross_page_consistency import _names_look_like_spelling_variants
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
@@ -21,6 +22,16 @@ from reviewer import (
     normalize_reporting_currency,
     review_pdf,
 )
+
+
+def test_name_consistency_only_flags_typo_like_variants_not_joined_names():
+    assert _names_look_like_spelling_variants("Mzer Michael Terungwa", "Mzer Micheal Terungwa")
+    assert _names_look_like_spelling_variants("Lai Labode", "Lait Labode")
+
+    assert not _names_look_like_spelling_variants("Aliyu Ibrahim Bala", "Aliyu Ibrahim Bala Edeh")
+    assert not _names_look_like_spelling_variants("Edeh Anthony Uzodinma", "Anthony Uzodinma")
+    assert not _names_look_like_spelling_variants("Adeoye Simileoluwa", "Simileoluwa Adeoye")
+    assert not _names_look_like_spelling_variants("Lai Labode", "Lai Labode Stanley Emurotu")
 
 
 def test_rounding_check_flags_bad_visible_total():
