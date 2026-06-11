@@ -79,6 +79,44 @@ def test_rounding_check_flags_bad_visible_total():
     assert findings[0].category == "Totals and rounding"
 
 
+def test_rounding_scale_ignores_narrative_million_amounts_when_presentation_is_thousands():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Presentation currency N'000\nA deferred tax liability of N2 million arose during the year.",
+                [],
+            )
+        ]
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert not any("Mixed rounding or scaling" in finding.issue for finding in findings)
+
+
+def test_column_consistency_ignores_narrative_directors_report_tables():
+    document = PdfDocument(
+        [
+            PdfPage(
+                4,
+                "Directors' report",
+                [
+                    [
+                        ["Financial statements for the year ended 31 December 2025"],
+                        ["Revenue", "2025", "2024"],
+                        ["Profit", "100", "90"],
+                    ]
+                ],
+            )
+        ]
+    )
+
+    findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
+
+    assert not any("only one comparative period" in finding.issue.lower() for finding in findings)
+
+
 def test_review_memo_zero_high_uses_extraction_quality_next_step():
     from models import Finding, ReviewResult
 
@@ -1295,6 +1333,70 @@ def test_note_heading_detection_rejects_narrative_suffix_heading():
     assert headings["10A"] == "Advances from tenants"
     assert "10B" not in headings
     assert headings["11"] == "Trade and other payables"
+
+
+def test_note_heading_detection_accepts_clear_continued_heading_when_original_split():
+    document = PdfDocument(
+        [
+            PdfPage(32, "Notes to the financial statements\nIntangible assets\nCost 100 90", []),
+            PdfPage(33, "4. Intangible assets (continued)\nAccumulated amortisation 20 10", []),
+        ]
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["4"] == ("Intangible assets", 33)
+
+
+def test_missing_statement_note_reference_includes_statement_page(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                14,
+                "Statement of financial position\nDeferred tax Note 9 100 90\nTotal assets 100 90\nTotal equity and liabilities 100 90\n"
+                + ("Primary statement context.\n" * 70),
+                [],
+            ),
+            PdfPage(35, "Notes to the financial statements\n10 Deferred tax\nDeferred tax 100 90\n" + ("Note context.\n" * 70), []),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+
+    findings = check_notes_agreement(document)
+
+    missing = next(finding for finding in findings if "Statement references note 9" in finding.issue)
+    assert missing.location == "Page 14"
+    assert "Page 14" in missing.evidence
+
+
+def test_note_internal_total_skips_complex_movement_schedule_noise(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                20,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "6 Trade and other receivables",
+                        "Movement in loss allowance",
+                        "Opening balance 100",
+                        "Charge for the year 20",
+                        "Utilised during the year (10)",
+                        "Closing balance 130",
+                        "Total 999",
+                    ]
+                )
+                + "\n"
+                + ("Note context.\n" * 70),
+                [],
+            )
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+
+    findings = check_notes_agreement(document)
+
+    assert not any("subtotal or total does not agree" in finding.issue.lower() for finding in findings)
 
 
 def test_note_heading_detection_starts_after_notes_heading_when_present():

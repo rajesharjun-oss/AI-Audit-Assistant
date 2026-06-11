@@ -1864,10 +1864,16 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
     skipped_tables: list[str] = []
     primary_statements = _classified_primary_statement_pages(document)
     primary_pages = {p.number for p in primary_statements.values()}
+    notes_start_page = _notes_start_page(document)
     
     for page in document.pages:
         for table_index, table in enumerate(page.tables, start=1):
             if len(table) < 3:
+                continue
+            if notes_start_page is not None and page.number >= notes_start_page and page.number not in primary_pages:
+                skipped_tables.append(
+                    f"Page {page.number}, table {table_index}: skipped because generic arithmetic is not reliable for notes tables; use note-reference and amount-agreement checks instead."
+                )
                 continue
             table_quality = _classify_table_for_arithmetic(table, page.text)
             if not table_quality["can_run_arithmetic"]:
@@ -2092,6 +2098,7 @@ def check_notes_agreement(
     headings_with_pages = _note_headings_by_page(document)
     headings = {ref: title for ref, (title, _page_number) in headings_with_pages.items()}
     statement_refs = _statement_note_references(document)
+    statement_ref_pages = _statement_reference_pages(document)
     if document.ocr_used:
         if not _notes_start_page(document):
             findings.append(
@@ -2126,13 +2133,14 @@ def check_notes_agreement(
             continue
         if not detailed_note_checks_allowed and cautious_low_confidence:
             continue
+        page_reference = statement_ref_pages.get(ref, "Statement pages")
         findings.append(
             Finding(
                 "Extraction quality",
                 "Low",
-                "Notes agreement",
+                page_reference,
                 f"Statement references note {ref}, but a matching note heading was not confidently detected or parsed; review prompt only.",
-                f"Detected statement reference: Note {ref}.",
+                f"Detected statement reference: Note {ref} on {page_reference}.",
                 "Confirm if the note exists manually. (Downgraded to Low to avoid false positives from OCR/heading extraction misses).",
             )
         )
@@ -2292,7 +2300,7 @@ def check_notes_agreement(
             _check_eps_note(findings, ref, section)
         if any(keyword in title or keyword in section.lower() for keyword in ("tax", "income tax", "deferred tax")):
             _check_tax_note(findings, ref, section, tolerance)
-        if any(keyword in title or keyword in section.lower() for keyword in ("depreciation", "property, plant", "ppe")):
+        if any(keyword in title for keyword in ("depreciation", "property, plant", "ppe")):
             _check_depreciation_note(findings, ref, section, tolerance)
 
     filtered_findings = []
@@ -2622,6 +2630,8 @@ def _check_column_consistency(
 ) -> None:
     if not table:
         return
+    if not _table_has_financial_amount_header(table):
+        return
     header = " ".join(table[0]).lower()
     years = set(YEAR_RE.findall(header))
     if len(years) == 1 and any(YEAR_RE.search(" ".join(row)) for row in table[1:]):
@@ -2647,6 +2657,35 @@ def _check_column_consistency(
                 "Standardise decimals according to the report's rounding basis.",
             )
         )
+
+
+def _table_has_financial_amount_header(table: list[list[str]]) -> bool:
+    header_text = " ".join(
+        str(cell or "") for row in table[:3] for cell in row
+    ).lower()
+    if not header_text.strip():
+        return False
+    narrative_markers = (
+        "directors' report",
+        "directors report",
+        "corporate information",
+        "registered office",
+        "registration",
+        "certificate",
+        "signature",
+        "website",
+        "email",
+        "phone",
+        "contents",
+    )
+    if any(marker in header_text for marker in narrative_markers):
+        return False
+    has_currency_marker = bool(
+        re.search(r"\b(?:ngn|n\s*['’`]\s*000|n000|₦|usd|eur|gbp|\$|amounts?)\b", header_text, flags=re.I)
+    )
+    year_count = len(set(YEAR_RE.findall(header_text)))
+    note_or_amount_column = bool(re.search(r"\b(note|notes|amount|assets|liabilities|equity|revenue|income|expense|cost)\b", header_text))
+    return has_currency_marker or (year_count >= 2 and note_or_amount_column)
 
 
 def _check_comparatives(findings: list[Finding], document: PdfDocument) -> None:
@@ -2692,6 +2731,8 @@ def _check_required_statement_names(findings: list[Finding], document: PdfDocume
 
 def _check_note_internal_total(findings: list[Finding], ref: str, title: str, section: str, tolerance: Decimal) -> None:
     if _skip_note_subtotal_checks(title, section):
+        return
+    if not _simple_note_total_check_allowed(title, section):
         return
     lines = [line for line in section.splitlines() if line.strip()]
     running: list[Decimal] = []
@@ -2837,12 +2878,74 @@ def _skip_note_subtotal_checks(title: str, section: str) -> bool:
         "capital commitments",
         "subsequent events",
         "related party",
+        "movement",
+        "reconciliation",
+        "opening balance",
+        "balance at",
+        "at beginning",
+        "at the beginning",
+        "as at",
+        "utilised",
+        "utilized",
+        "charged",
+        "fair value",
+        "share capital",
+        "share premium",
+        "deferred tax",
+        "current tax liabilities",
+        "contract liabilities",
+        "direct expenses",
+        "other operating losses",
+        "performance obligation",
+        "transaction price",
+        "recognises revenue",
+        "recognizes revenue",
     )
     if any(term in lower for term in skip_terms):
         return True
     if _note_section_looks_like_complex_movement_table(title, section):
         return True
     return False
+
+
+def _simple_note_total_check_allowed(title: str, section: str) -> bool:
+    lines = [line.strip() for line in section.splitlines() if line.strip()]
+    amount_lines = [line for line in lines if _looks_like_amount_line(line.lower()) and _last_amount(line) is not None]
+    total_lines = [line for line in amount_lines if _looks_like_total(line.lower())]
+    if not total_lines:
+        return False
+    if len(amount_lines) > 8:
+        return False
+    if sum(1 for line in lines if len(YEAR_RE.findall(line)) >= 2) > 1:
+        return False
+    if any(len(_amounts_in_text(line)) > 2 for line in amount_lines):
+        return False
+    heading_like = sum(1 for line in lines if NOTE_HEADING_RE.match(line))
+    if heading_like > 1:
+        return False
+    lower = f"{title}\n{section}".lower()
+    complex_markers = (
+        "reclassified",
+        "remeasurement",
+        "exchange",
+        "foreign",
+        "cash flow",
+        "provision",
+        "allowance",
+        "impairment",
+        "addition",
+        "disposal",
+        "depreciation",
+        "amortisation",
+        "amortization",
+        "tax charge",
+        "tax credit",
+        "advance payment",
+        "guaranteed",
+    )
+    if any(marker in lower for marker in complex_markers):
+        return False
+    return True
 
 
 def _note_section_looks_like_complex_movement_table(title: str, section: str) -> bool:
@@ -4763,9 +4866,9 @@ def _detect_rounding_scale(text: str) -> tuple[str, Decimal]:
     labels = set()
     if re.search(r"\$?0{3}s|000s|thousand|in thousands", lower):
         labels.add("thousands")
-    if re.search(r"million|in millions", lower):
+    if re.search(r"\b(?:in|nearest|rounded to|presented in|amounts are rounded to)\s+millions?\b|\bmillions?\s+of\b", lower):
         labels.add("millions")
-    if re.search(r"nearest dollar|actual amount|in units", lower):
+    if re.search(r"\bnearest dollar\b|\bin units\b|\bpresented in units\b|\bactual naira\b|\bactual amounts? are presented\b", lower):
         labels.add("units")
     if len(labels) > 1:
         return "mixed", Decimal("1")
@@ -5222,6 +5325,19 @@ def _statement_note_references(document: PdfDocument) -> set[str]:
         if item.ref:
             refs.add(item.ref.upper())
     return refs
+
+
+def _statement_reference_pages(document: PdfDocument) -> dict[str, str]:
+    pages_by_ref: dict[str, set[int]] = defaultdict(set)
+    for item in _statement_note_lines(document):
+        if item.ref and item.page_number:
+            pages_by_ref[item.ref.upper()].add(item.page_number)
+    formatted: dict[str, str] = {}
+    for ref, pages in pages_by_ref.items():
+        ordered = sorted(pages)
+        label = "Page" if len(ordered) == 1 else "Pages"
+        formatted[ref] = f"{label} {', '.join(str(page) for page in ordered)}"
+    return formatted
 
 
 def _is_subheading(label: str) -> bool:
@@ -6172,6 +6288,7 @@ def _valid_note_number(value: str) -> bool:
 
 def _clean_note_title(title: str) -> str:
     title = re.sub(r"^[^\w(]+", "", title.strip())
+    title = re.sub(r"\s*\(?continued\)?\s*$", "", title, flags=re.I)
     title = re.sub(r"(?:\s+20\d{2}){1,3}\s*$", "", title)
     title = re.sub(r"\s+(?:N['’]?\s?000|\$?000s?)(?:\s+(?:N['’]?\s?000|\$?000s?))*$", "", title, flags=re.I)
     return title.strip()
