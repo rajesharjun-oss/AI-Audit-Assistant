@@ -48,6 +48,13 @@ def test_page_reference_extracts_page_lists_from_inconsistency_evidence():
     assert name_finding.location == "Pages 5, 41"
 
 
+def test_excel_export_page_reference_uses_detected_note_pages():
+    app_source = Path("app.py").read_text(encoding="utf-8")
+
+    assert "_page_reference_for_finding" in app_source
+    assert "_note_page_reference_map" in app_source
+
+
 def test_rounding_check_flags_bad_visible_total():
     document = PdfDocument(
         [

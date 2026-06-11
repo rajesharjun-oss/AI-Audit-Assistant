@@ -40,7 +40,7 @@ def _finding_rows(result) -> list[dict[str, str]]:
             "Category": finding.category,
             "Check type": finding.category,
             "Confidence": _finding_confidence(finding, result),
-            "Page reference": _page_reference(finding.location, finding.evidence),
+            "Page reference": _page_reference_for_finding(finding, result),
             "Statement": metadata.get("statement", ""),
             "Line item": metadata.get("line_item", ""),
             "Referenced note": metadata.get("referenced_note", ""),
@@ -105,6 +105,32 @@ def _page_reference(location: str, evidence: str = "") -> str:
     if len(pages) == 1:
         return f"Page {pages[0]}"
     return "Pages " + ", ".join(str(page) for page in pages)
+
+
+def _page_reference_for_finding(finding, result) -> str:
+    direct = _page_reference(finding.location, finding.evidence)
+    if direct:
+        return direct
+    note_match = re.search(r"\bNote\s+(\d+[A-Z]?)\b", f"{finding.location}\n{finding.issue}\n{finding.evidence}", flags=re.I)
+    if note_match:
+        note_pages = _note_page_reference_map(result)
+        note_ref = note_match.group(1).upper()
+        if note_ref in note_pages:
+            return note_pages[note_ref]
+    location = str(finding.location or "").strip()
+    if location:
+        return location
+    return "Document-wide"
+
+
+def _note_page_reference_map(result) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for row in _note_heading_rows(result):
+        note = str(row.get("Note", "")).upper().strip()
+        page_range = str(row.get("Page range", "") or row.get("Page", "")).strip()
+        if note and page_range:
+            mapping[note] = page_range
+    return mapping
 
 
 def _export_file_stem(result) -> str:
