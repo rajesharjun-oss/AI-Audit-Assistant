@@ -155,15 +155,15 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             desc = []
             issue_pages = set()
             for val, locs in val_map.items():
-                pages = [str(p) for p, l in locs]
+                pages = [str(p) for p, _line in locs]
                 issue_pages.update(p for p, _line in locs)
-                desc.append(f"Amount {val} found on pages: {', '.join(pages)}")
+                desc.append(f"Amount {val:,.0f} found on pages: {', '.join(sorted(set(pages), key=int))}")
                 for p, l in locs:
                     export_data["key_amounts"].append({
                         "Metric": metric_name,
-                        "Amount": str(val),
+                        "Amount": f"{val:,.0f}",
                         "Page": str(p),
-                        "Context": l,
+                        "Context": _short_context(l),
                         "Issue": "Discrepancy"
                     })
             
@@ -180,14 +180,14 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         else:
             # Consistent
             val, locs = list(val_map.items())[0]
-            for p, l in locs:
-                export_data["key_amounts"].append({
-                    "Metric": metric_name,
-                    "Amount": str(val),
-                    "Page": str(p),
-                    "Context": l,
-                    "Issue": "Consistent"
-                })
+            pages = sorted({p for p, _line in locs})
+            export_data["key_amounts"].append({
+                "Metric": metric_name,
+                "Amount": f"{val:,.0f}",
+                "Pages checked": _format_page_location(pages),
+                "Context": "Consistent across detected occurrences.",
+                "Issue": "Consistent"
+            })
 
     # Process dates
     expected_format = "31 December 2025 (DD Month YYYY)"
@@ -238,15 +238,20 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             if is_match and name1 != name2:
                 pair_key = tuple(sorted([name1, name2]))
                 if pair_key not in flagged_pairs:
+                    pages1_set = set(unique_names[name1])
+                    pages2_set = set(unique_names[name2])
+                    if _likely_ocr_name_artifact(name1, pages1_set, name2, pages2_set):
+                        continue
                     flagged_pairs.add(pair_key)
-                    pages1 = ", ".join(map(str, set(unique_names[name1])))
-                    pages2 = ", ".join(map(str, set(unique_names[name2])))
+                    pages1 = ", ".join(map(str, sorted(pages1_set)))
+                    pages2 = ", ".join(map(str, sorted(pages2_set)))
+                    standard = _suggest_standard_name(name1, pages1_set, name2, pages2_set)
                     export_data["names"].append({
                         "Name variant 1": name1,
                         "Page 1": pages1,
                         "Name variant 2": name2,
                         "Page 2": pages2,
-                        "Suggested standard spelling": max(name1, name2, key=len),
+                        "Suggested standard spelling": standard,
                         "Reason": "Names appear to refer to the same person but are spelt differently.",
                         "Confidence": "High"
                     })
@@ -262,6 +267,37 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     )
 
     return findings, export_data
+
+
+def _short_context(line: str, limit: int = 220) -> str:
+    cleaned = re.sub(r"\s+", " ", str(line or "")).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3].rstrip() + "..."
+
+
+def _likely_ocr_name_artifact(name1: str, pages1: set[int], name2: str, pages2: set[int]) -> bool:
+    if pages1 == pages2 and len(pages1) == 1:
+        return True
+    count1 = len(pages1)
+    count2 = len(pages2)
+    if count1 == count2:
+        return False
+    common_pages = pages1 & pages2
+    if not common_pages:
+        return False
+    rare_name, rare_pages, common_name, common_pages_set = (
+        (name1, pages1, name2, pages2) if count1 < count2 else (name2, pages2, name1, pages1)
+    )
+    if len(rare_pages) > 1 or len(common_pages_set) < 2:
+        return False
+    return _names_look_like_spelling_variants(rare_name, common_name)
+
+
+def _suggest_standard_name(name1: str, pages1: set[int], name2: str, pages2: set[int]) -> str:
+    if len(pages1) != len(pages2):
+        return name1 if len(pages1) > len(pages2) else name2
+    return min((name1, name2), key=lambda name: (len(name), name))
 
 
 def _names_look_like_spelling_variants(name1: str, name2: str) -> bool:

@@ -34,6 +34,52 @@ def test_name_consistency_only_flags_typo_like_variants_not_joined_names():
     assert not _names_look_like_spelling_variants("Lai Labode", "Lai Labode Stanley Emurotu")
 
 
+def test_name_consistency_suppresses_single_page_ocr_artifact_when_canonical_exists_same_page():
+    document = PdfDocument(
+        [
+            PdfPage(2, "Directors Lai Labode", []),
+            PdfPage(5, "Directors\nLait Labode Chief Executive Officer\nShareholding\nLai Labode 1,027,442", []),
+            PdfPage(41, "Related parties\nLai Labode, a major shareholder and director", []),
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not any("Lait Labode" in finding.issue for finding in findings)
+    assert not any("Lait Labode" in str(row) for row in export["names"])
+
+
+def test_key_amount_consistency_summarizes_consistent_rows_without_long_context():
+    document = PdfDocument(
+        [
+            PdfPage(4, "Revenue 8,398,634 7,336,635", []),
+            PdfPage(15, "Revenue 13 8,398,634 7,336,635", []),
+            PdfPage(44, "Revenue 8,398,634 7,336,635", []),
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert findings == []
+    assert export["key_amounts"] == [
+        {
+            "Metric": "Revenue",
+            "Amount": "8,398,634",
+            "Pages checked": "Pages 4, 15, 44",
+            "Context": "Consistent across detected occurrences.",
+            "Issue": "Consistent",
+        }
+    ]
+
+
+def test_amount_match_snippet_returns_complete_extracted_row():
+    text = "7 Operating Revenue\nSubscriptions 2 ,783,064\nPrior year 2\n,029,846"
+    start = text.index("2 ,783,064")
+    snippet = reviewer._amount_snippet_around(text, start, start + len("2 ,783,064"))
+
+    assert snippet == "Subscriptions 2 ,783,064"
+
+
 def test_page_reference_extracts_page_lists_from_inconsistency_evidence():
     document = PdfDocument(
         [

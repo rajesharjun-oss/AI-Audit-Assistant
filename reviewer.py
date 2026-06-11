@@ -5852,8 +5852,24 @@ def _normalize_amount_token(value: str) -> str:
 
 
 def _amount_snippet_around(text: str, start: int, end: int, window: int = 70) -> str:
-    snippet = text[max(0, start - window) : min(len(text), end + window)]
-    return re.sub(r"\s+", " ", snippet).strip()
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    line = re.sub(r"\s+", " ", text[line_start:line_end]).strip()
+    if line and len(line) <= 260:
+        return line
+
+    sentence_start = max(text.rfind(".", 0, start), text.rfind(";", 0, start), text.rfind(":", 0, start), text.rfind("\n", 0, start))
+    sentence_end_candidates = [pos for pos in (text.find(".", end), text.find(";", end), text.find("\n", end)) if pos != -1]
+    sentence_end = min(sentence_end_candidates) + 1 if sentence_end_candidates else min(len(text), end + window)
+    snippet = re.sub(r"\s+", " ", text[max(0, sentence_start + 1):sentence_end]).strip()
+    if len(snippet) <= 260:
+        return snippet
+    compact = re.sub(r"\s+", " ", text[max(0, start - window): min(len(text), end + window)]).strip()
+    compact = re.sub(r"^\S*\s+", "", compact)
+    compact = re.sub(r"\s+\S*$", "", compact)
+    return f"... {compact[:240].rstrip()} ..."
 
 
 def _alternative_note_for_missing_amounts(
