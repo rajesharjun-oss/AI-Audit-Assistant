@@ -958,6 +958,18 @@ def _notes_candidate_diagnostic_only(line: str, snippet: str) -> bool:
     diagnostic_terms = ("extract", "excerpt", "reference", "narrative", "summary")
     if any(term in normalized for term in diagnostic_terms) and not _candidate_followed_by_numbered_policy(snippet.splitlines() or [snippet], 0):
         return True
+    contents_terms = (
+        "statement financial position",
+        "statement comprehensive income",
+        "statement cash flows",
+        "statement changes equity",
+        "statement changes accumulated fund",
+        "value added statement",
+        "five year financial summary",
+        "five year financial review",
+    )
+    if sum(1 for term in contents_terms if term in normalized) >= 2 and "accounting polic" not in normalized:
+        return True
     return False
 
 
@@ -4968,6 +4980,10 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
             continue
         table_count = len(page.tables)
         lines = page.text.splitlines()
+        if page.number == notes_start_page:
+            implicit_note_1 = _implicit_policy_note_heading(lines)
+            if implicit_note_1:
+                candidates.setdefault("1", []).append((implicit_note_1, page.number, table_count))
         for index, raw_line in enumerate(lines):
             line = raw_line.strip()
             embedded = _embedded_note_heading_after_notes_title(line)
@@ -5033,6 +5049,16 @@ def _is_post_notes_supplement_page(text: str) -> bool:
         "financial review",
     )
     return any(marker in head for marker in supplement_markers)
+
+
+def _implicit_policy_note_heading(lines: list[str]) -> str | None:
+    head = "\n".join(line.strip() for line in lines[:35] if line.strip())
+    normalized = _normalise_match_words(head)
+    if "material accounting polic" in normalized:
+        return "Material accounting policies"
+    if "significant accounting polic" in normalized:
+        return "Significant accounting policies"
+    return None
 
 
 def _embedded_note_heading_after_notes_title(line: str) -> tuple[str, str] | None:

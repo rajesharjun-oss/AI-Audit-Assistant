@@ -1615,6 +1615,61 @@ def test_ocr_notes_heading_accepts_repeating_report_header_with_numbered_policy(
     assert _note_headings_by_page(document)["1"] == ("Significant accounting policies", 14)
 
 
+def test_ocr_notes_start_infers_note_1_from_material_accounting_policies():
+    document = PdfDocument(
+        [
+            PdfPage(3, "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90", []),
+            PdfPage(
+                14,
+                "Financial statements for the year ended 31 December 2025\n"
+                "Notes to the Financial Statements\n"
+                "Material accounting policies\n"
+                "The material accounting policies applied in preparing these financial statements are set out below.\n"
+                "1.1 Basis of preparation\n"
+                "2 New Standards and Interpretations",
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+
+    headings = _note_headings_by_page(document)
+
+    assert headings["1"] == ("Material accounting policies", 14)
+
+
+def test_ocr_notes_heading_candidates_reject_contents_page():
+    document = PdfDocument(
+        [
+            PdfPage(
+                2,
+                "Statement of financial position 12\n"
+                "Statement of comprehensive income 13\n"
+                "Statement of cash flows 14\n"
+                "Notes to the Financial Statements 15\n"
+                "Value Added Statement 39\n"
+                "Five Year Financial Summary 40",
+                [],
+            ),
+            PdfPage(
+                16,
+                "Notes to the Financial Statements\n"
+                "1. Material accounting policies\n"
+                "2 New Standards and Interpretations",
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+
+    candidates = reviewer._notes_heading_candidate_rows(document)
+
+    contents_row = next(row for row in candidates if row["Page"] == "2")
+    assert contents_row["Accepted"] == "No"
+
+
 def test_ocr_notes_start_page_searches_raw_page_text_with_broken_lines(monkeypatch):
     document = PdfDocument(
         [
