@@ -1273,16 +1273,24 @@ def _skipped_table_summary_rows(document: PdfDocument) -> list[dict[str, str]]:
         if "generic arithmetic is not reliable for notes tables" in classification.lower():
             group = "Notes tables - generic arithmetic skipped"
             reviewer_action = "Use note-reference and amount-agreement sheets; inspect individual note tables manually where prompted."
+            can_fix = "Partially"
+            why_review = "The PDF table can be visible to a reviewer, but extracted rows/columns may merge note numbers, years, narrative text, and amounts. Generic subtotal casting is withheld to avoid false exceptions."
         elif "low-confidence" in classification.lower() or "numeric row shapes" in reason.lower():
             group = "Low-confidence table extraction"
             reviewer_action = "Review the source page before relying on automated table arithmetic."
+            can_fix = "Possibly"
+            why_review = "The extracted numeric row pattern is inconsistent, so the tool cannot confirm which figures belong to the same table columns without reviewer inspection."
         elif "not a recognised statement/note total table" in reason.lower() or "other table" in classification.lower():
             group = "Non-standard or non-financial table"
             reviewer_action = "No generic casting performed; review only if the table is financially relevant."
+            can_fix = "Not applicable"
+            why_review = "The table does not look like a standard amount table for automated casting, or it may be narrative/front-matter information."
         else:
             group = classification
             reviewer_action = "Review the table manually if it is material to the financial statements."
-        key = (group, reason, reviewer_action)
+            can_fix = "Unknown"
+            why_review = "The extraction did not provide enough reliable structure to support an automated conclusion."
+        key = (group, reason, reviewer_action, can_fix, why_review)
         bucket = groups.setdefault(key, {"pages": set(), "tables": 0})
         bucket["tables"] = int(bucket["tables"]) + 1
         page = str(row.get("Page", "")).strip()
@@ -1291,7 +1299,7 @@ def _skipped_table_summary_rows(document: PdfDocument) -> list[dict[str, str]]:
             if isinstance(cast_pages, set):
                 cast_pages.add(int(page))
     summary_rows: list[dict[str, str]] = []
-    for (group, reason, reviewer_action), bucket in groups.items():
+    for (group, reason, reviewer_action, can_fix, why_review), bucket in groups.items():
         pages = bucket.get("pages", set())
         page_reference = _format_page_set(pages if isinstance(pages, set) else set())
         summary_rows.append(
@@ -1300,6 +1308,8 @@ def _skipped_table_summary_rows(document: PdfDocument) -> list[dict[str, str]]:
                 "Pages affected": page_reference or "Not page-specific",
                 "Tables affected": str(bucket.get("tables", 0)),
                 "Reason skipped": reason,
+                "Can automated check be fixed?": can_fix,
+                "Why reviewer should review": why_review,
                 "Reviewer action": reviewer_action,
             }
         )

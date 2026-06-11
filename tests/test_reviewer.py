@@ -1421,6 +1421,8 @@ def test_skipped_table_summary_groups_notes_arithmetic_skips(monkeypatch):
     notes_group = next(row for row in summary if row["Skipped check group"] == "Notes tables - generic arithmetic skipped")
     assert notes_group["Pages affected"] == "Pages 10-11"
     assert notes_group["Tables affected"] == "2"
+    assert notes_group["Can automated check be fixed?"] == "Partially"
+    assert "may merge" in notes_group["Why reviewer should review"].lower()
 
 
 def test_note_heading_detection_starts_after_notes_heading_when_present():
