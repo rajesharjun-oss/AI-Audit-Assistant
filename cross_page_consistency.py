@@ -153,8 +153,10 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         val_keys = [k for k in val_map.keys() if k not in all_prior_amts]
         if len(val_keys) > 1:
             desc = []
+            issue_pages = set()
             for val, locs in val_map.items():
                 pages = [str(p) for p, l in locs]
+                issue_pages.update(p for p, _line in locs)
                 desc.append(f"Amount {val} found on pages: {', '.join(pages)}")
                 for p, l in locs:
                     export_data["key_amounts"].append({
@@ -169,7 +171,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                 Finding(
                     "Consistency",
                     "Medium",
-                    f"Inconsistent {metric_name}",
+                    _format_page_location(issue_pages),
                     f"The amount for {metric_name} varies across pages.",
                     " | ".join(desc),
                     "Verify the correct amount across the directors' report, primary statements, and notes."
@@ -206,7 +208,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     Finding(
                         "Formatting",
                         "Low",
-                        "Inconsistent Date Format",
+                        _format_page_location(pages),
                         f"Date '{date_str}' does not match the preferred format.",
                         f"Found on pages: {', '.join(map(str, set(pages)))}",
                         f"Update to match the predominant format ({expected_format})."
@@ -252,7 +254,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                         Finding(
                             "Consistency",
                             "Low",
-                            "Inconsistent Name Spelling",
+                            _format_page_location(set(unique_names[name1]) | set(unique_names[name2])),
                             f"Name spelt differently across pages: '{name1}' vs '{name2}'",
                             f"Variant 1 on pages {pages1}, Variant 2 on pages {pages2}",
                             "Standardize the spelling of the name across all reports and signatures."
@@ -287,3 +289,12 @@ def _names_look_like_spelling_variants(name1: str, name2: str) -> bool:
 
 def _normalise_name_tokens(name: str) -> list[str]:
     return [token.lower() for token in re.findall(r"[A-Za-z]+", name)]
+
+
+def _format_page_location(pages) -> str:
+    clean_pages = sorted({int(page) for page in pages if str(page).isdigit() or isinstance(page, int)})
+    if not clean_pages:
+        return "Document-wide"
+    if len(clean_pages) == 1:
+        return f"Page {clean_pages[0]}"
+    return "Pages " + ", ".join(str(page) for page in clean_pages)

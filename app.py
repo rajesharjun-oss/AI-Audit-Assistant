@@ -94,7 +94,12 @@ def _table_arithmetic_display(result) -> str:
 
 def _page_reference(location: str, evidence: str = "") -> str:
     text = f"{location}\n{evidence}"
-    pages = sorted({int(match) for match in re.findall(r"\bPage\s+(\d+)\b", text, flags=re.I)})
+    pages = set()
+    for match in re.finditer(r"\bpages?\s*:?\s+([0-9,\sand]+)", text, flags=re.I):
+        for number in re.findall(r"\d+", match.group(1)):
+            pages.add(int(number))
+    pages.update(int(match) for match in re.findall(r"\bPage\s+(\d+)\b", text, flags=re.I))
+    pages = sorted(pages)
     if not pages:
         return ""
     if len(pages) == 1:

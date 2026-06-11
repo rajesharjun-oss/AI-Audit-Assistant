@@ -3,7 +3,7 @@ from pathlib import Path
 
 import extraction
 import reviewer
-from cross_page_consistency import _names_look_like_spelling_variants
+from cross_page_consistency import _names_look_like_spelling_variants, check_cross_page_consistency
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
@@ -32,6 +32,20 @@ def test_name_consistency_only_flags_typo_like_variants_not_joined_names():
     assert not _names_look_like_spelling_variants("Edeh Anthony Uzodinma", "Anthony Uzodinma")
     assert not _names_look_like_spelling_variants("Adeoye Simileoluwa", "Simileoluwa Adeoye")
     assert not _names_look_like_spelling_variants("Lai Labode", "Lai Labode Stanley Emurotu")
+
+
+def test_page_reference_extracts_page_lists_from_inconsistency_evidence():
+    document = PdfDocument(
+        [
+            PdfPage(5, "Directors' report\nMzer Michael Terungwa", []),
+            PdfPage(41, "Directors' report\nMzer Micheal Terungwa", []),
+        ]
+    )
+
+    findings, _export = check_cross_page_consistency(document)
+    name_finding = next(finding for finding in findings if "Name spelt differently" in finding.issue)
+
+    assert name_finding.location == "Pages 5, 41"
 
 
 def test_rounding_check_flags_bad_visible_total():
