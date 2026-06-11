@@ -49,6 +49,32 @@ def test_name_consistency_suppresses_single_page_ocr_artifact_when_canonical_exi
     assert not any("Lait Labode" in str(row) for row in export["names"])
 
 
+def test_excel_name_export_guard_suppresses_one_page_ocr_artifact():
+    from export_utils import clean_name_consistency_rows
+
+    rows = [
+        {
+            "Name variant 1": "Lai Labode",
+            "Page 1": "41, 2, 5, 6",
+            "Name variant 2": "Lait Labode",
+            "Page 2": "5",
+            "Suggested standard spelling": "Lait Labode",
+        },
+        {
+            "Name variant 1": "Mzer Michael Terungwa",
+            "Page 1": "5",
+            "Name variant 2": "Mzer Micheal Terungwa",
+            "Page 2": "41",
+            "Suggested standard spelling": "Mzer Michael Terungwa",
+        },
+    ]
+
+    cleaned = clean_name_consistency_rows(rows)
+
+    assert len(cleaned) == 1
+    assert cleaned[0]["Name variant 1"] == "Mzer Michael Terungwa"
+
+
 def test_key_amount_consistency_summarizes_consistent_rows_without_long_context():
     document = PdfDocument(
         [

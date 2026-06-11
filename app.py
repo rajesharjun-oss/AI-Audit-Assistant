@@ -15,6 +15,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.styles import Alignment, Font, PatternFill
 
+from export_utils import clean_name_consistency_rows
 from models import CompanyProfile, ReviewOptions
 from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
 
@@ -323,7 +324,7 @@ def _build_excel_export(result) -> bytes:
         
         cross_export = result.metrics.get("cross_page_export", {})
         amount_rows = cross_export.get("key_amounts", []) or [{"Metric": "None found"}]
-        name_rows = cross_export.get("names", []) or [{"Name variant 1": "None found"}]
+        name_rows = clean_name_consistency_rows(cross_export.get("names", [])) or [{"Name variant 1": "None found"}]
         date_rows = cross_export.get("dates", []) or [{"Date found": "None found"}]
         
         pd.DataFrame(amount_rows).to_excel(writer, sheet_name="Key amount consistency", index=False)
