@@ -331,8 +331,8 @@ def review_pdf(
     note_sections = _note_sections(document)
     policy_findings, policy_export = review_notes_1_and_2(document, profile, note_sections)
     findings.extend(policy_findings)
-    if totals_findings:
-        checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables where indicated in extraction findings.")
+    if getattr(document, "skipped_table_details", None):
+        checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables; details are listed in Skipped table details.")
     
     checks_performed.extend(["Accounting policies relevance check", "IFRS/IAS standards alignment check"])
     cross_page_findings, cross_page_export = check_cross_page_consistency(document)
@@ -474,6 +474,7 @@ def _build_result(
         "primary_statement_pages": _format_primary_statement_debug(document),
         "ocr_statement_rows": _format_ocr_statement_rows_debug(document),
         "note_agreement_results": _note_agreement_result_rows(document),
+        "skipped_table_details": _skipped_table_detail_rows(document),
         "detected_profile": infer_detected_profile(document),
         "checks_performed": "\n".join(checks_performed_list) or "No deterministic checks completed.",
         "checks_skipped": "\n".join(checks_skipped_list) or "No major checks skipped.",
@@ -1231,6 +1232,35 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     return rows
 
 
+def _skipped_table_detail_rows(document: PdfDocument) -> list[dict[str, str]]:
+    details = getattr(document, "skipped_table_details", []) or []
+    rows: list[dict[str, str]] = []
+    for detail in details:
+        match = re.match(r"Page\s+(\d+),\s+table\s+(\d+):\s+(.+?)(?:\s+\((.+)\))?$", detail)
+        if match:
+            page, table, table_type, reason = match.groups()
+            rows.append(
+                {
+                    "Page": page,
+                    "Table": table,
+                    "Classification": table_type,
+                    "Reason skipped": reason or "",
+                    "Result": "Skipped - not reliable for generic arithmetic",
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "Page": "",
+                    "Table": "",
+                    "Classification": "",
+                    "Reason skipped": detail,
+                    "Result": "Skipped - not reliable for generic arithmetic",
+                }
+            )
+    return rows
+
+
 def _note_agreement_result_row(
     item: StatementNoteLine,
     current_amount: Decimal | None,
@@ -1870,17 +1900,7 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                     f.issue += " (Downgraded severity because table structure in notes may be complex)."
             findings.extend(table_findings)
     if skipped_tables:
-        details = "\n".join(skipped_tables)
-        findings.append(
-            Finding(
-                "Extraction quality",
-                "Low",
-                "Table extraction",
-                "Generic table arithmetic skipped because table structure is low-confidence or non-standard.",
-                details,
-                "Review skipped table details only where the table is material. Primary statement line-based checks can still be relied on when listed as performed.",
-            )
-        )
+        document.skipped_table_details = list(dict.fromkeys(skipped_tables))
     return findings
 
 
@@ -2683,6 +2703,9 @@ def _check_note_internal_total(findings: list[Finding], ref: str, title: str, se
         if _looks_like_total(lower):
             expected = sum(running, Decimal("0"))
             diff = amount - expected
+            if _note_total_difference_is_parser_noise(amount, expected, diff, tolerance):
+                running = []
+                continue
             if running and abs(diff) > tolerance:
                 severity = "Medium"
                 issue = "A note subtotal or total does not agree to visible note line items."
@@ -2705,6 +2728,24 @@ def _check_note_internal_total(findings: list[Finding], ref: str, title: str, se
             running = []
         elif _looks_like_amount_line(lower):
             running.append(amount)
+
+
+def _note_total_difference_is_parser_noise(
+    reported: Decimal,
+    expected: Decimal,
+    diff: Decimal,
+    tolerance: Decimal,
+) -> bool:
+    if not expected:
+        return False
+    if reported == Decimal("2024") or reported == Decimal("2025"):
+        return True
+    parser_noise_tolerance = max(tolerance, Decimal("20"))
+    if abs(abs(reported) - abs(expected)) <= parser_noise_tolerance:
+        return True
+    if abs(reported) < Decimal("10000") and abs(diff) <= Decimal("50"):
+        return True
+    return False
 
 
 def _check_segment_note(findings: list[Finding], ref: str, section: str, tolerance: Decimal) -> None:
@@ -4718,7 +4759,7 @@ def _check_sfp_equations(page_number: int, table_index: int, rows: dict[str, Dec
 
 
 def _detect_rounding_scale(text: str) -> tuple[str, Decimal]:
-    lower = text.lower()
+    lower = _presentation_scale_context(text)
     labels = set()
     if re.search(r"\$?0{3}s|000s|thousand|in thousands", lower):
         labels.add("thousands")
@@ -4733,6 +4774,35 @@ def _detect_rounding_scale(text: str) -> tuple[str, Decimal]:
     if "thousands" in labels:
         return "thousands", Decimal("1")
     return "units", Decimal("1")
+
+
+def _presentation_scale_context(text: str) -> str:
+    relevant_lines: list[str] = []
+    presentation_terms = (
+        "n'000",
+        "n '000",
+        "ngn'000",
+        "ngn '000",
+        "₦'000",
+        "₦ '000",
+        "in thousands",
+        "nearest thousand",
+        "in millions",
+        "nearest million",
+        "presented in",
+        "presentation currency",
+        "functional currency",
+        "amounts are rounded",
+        "rounded to",
+    )
+    for line in text.splitlines():
+        lower = line.lower()
+        if any(term in lower for term in presentation_terms):
+            relevant_lines.append(lower)
+            continue
+        if re.search(r"\b20\d{2}\b", lower) and re.search(r"n\s*['’`]\s*000|ngn|₦", lower):
+            relevant_lines.append(lower)
+    return "\n".join(relevant_lines) if relevant_lines else text.lower()
 
 
 def _note_columns(table: list[list[str]]) -> set[int]:

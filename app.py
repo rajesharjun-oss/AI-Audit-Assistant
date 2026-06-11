@@ -70,23 +70,26 @@ def _finding_confidence(finding, result) -> str:
         return f"Review prompt / {finding.metadata['match_confidence']}"
     if finding.category == "Extraction quality":
         if finding.location in {"PDF extraction", "Table extraction", "Notes agreement"}:
-            table_conf_val = result.metrics.get('table_arithmetic_confidence', '0%')
-            table_conf_str = "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else table_conf_val
             return (
                 f"OCR text {result.metrics.get('ocr_text_coverage', result.metrics.get('extraction_coverage', '0%'))} / "
                 f"Statement {result.metrics.get('statement_structure_confidence', '0%')} / "
-                f"Table arithmetic {table_conf_str}"
+                f"Table arithmetic {_table_arithmetic_display(result)}"
             )
         return finding.severity
     if finding.category == "Totals and rounding":
-        table_conf_val = result.metrics.get('table_arithmetic_confidence', '100%')
-        table_conf_str = "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else table_conf_val
-        return f"Table arithmetic {table_conf_str}"
+        return f"Table arithmetic {_table_arithmetic_display(result)}"
     if finding.severity == "High":
         return "High"
     if finding.severity == "Medium":
         return "Medium"
     return "Low"
+
+
+def _table_arithmetic_display(result) -> str:
+    skipped_details = result.metrics.get("skipped_table_details", [])
+    if isinstance(skipped_details, list) and skipped_details:
+        return "0% (Skipped)"
+    return result.metrics.get("table_arithmetic_confidence", "0%")
 
 
 def _page_reference(location: str, evidence: str = "") -> str:
@@ -215,7 +218,7 @@ def _build_excel_export(result) -> bytes:
         {"Metric": "OCR table candidates", "Value": result.metrics.get("ocr_tables", 0)},
         {"Metric": "Statement structure confidence", "Value": result.metrics.get("statement_structure_confidence", "0%")},
         {"Metric": "Note structure confidence", "Value": result.metrics.get("note_structure_confidence", "0%")},
-        {"Metric": "Table arithmetic confidence", "Value": "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else result.metrics.get("table_arithmetic_confidence", "0%")},
+        {"Metric": "Table arithmetic confidence", "Value": _table_arithmetic_display(result)},
         {"Metric": "notes_section_start_page", "Value": result.metrics.get("notes_section_start_page", "Not detected")},
         {"Metric": "notes_heading_snippet", "Value": result.metrics.get("notes_heading_snippet", "No reliable notes heading detected.")},
         {"Metric": "cautious_note_validation_enabled", "Value": result.metrics.get("cautious_note_validation_enabled", False)},
@@ -299,6 +302,8 @@ def _build_excel_export(result) -> bytes:
         pd.DataFrame(check_results).to_excel(writer, sheet_name="Checks results", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
+        skipped_table_rows = result.metrics.get("skipped_table_details", []) or [{"Page": "None", "Reason skipped": "No table-specific skips recorded."}]
+        pd.DataFrame(skipped_table_rows).to_excel(writer, sheet_name="Skipped table details", index=False)
         pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
@@ -322,6 +327,7 @@ def _build_excel_export(result) -> bytes:
         _format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
         _format_excel_table_sheet(writer.book["Date consistency"], "DateConsistency")
         _format_excel_table_sheet(writer.book["Checks results"], "ChecksResults")
+        _format_excel_table_sheet(writer.book["Skipped table details"], "SkippedTableDetails")
     return output.getvalue()
 
 
@@ -457,7 +463,7 @@ def _build_word_memo_export(result) -> bytes:
                     ["OCR text coverage", result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%"))],
                     ["Statement structure confidence", result.metrics.get("statement_structure_confidence", "0%")],
                     ["Note structure confidence", result.metrics.get("note_structure_confidence", "0%")],
-                    ["Table arithmetic confidence", "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else result.metrics.get("table_arithmetic_confidence", "0%")],
+                    ["Table arithmetic confidence", _table_arithmetic_display(result)],
                 ]
             ),
             _docx_paragraph("Checks Performed", "Heading1"),
@@ -906,7 +912,7 @@ risk_cols[3].metric("Pages", result.metrics["pages"])
 risk_cols[4].metric("OCR table candidates", result.metrics.get("ocr_tables", 0))
 risk_cols[5].metric("Statement structure", result.metrics.get("statement_structure_confidence", "0%"))
 risk_cols[6].metric("Note structure", result.metrics.get("note_structure_confidence", "0%"))
-risk_cols[7].metric("Table arithmetic", "0% (Skipped)" if len([f for f in result.findings if "Generic table arithmetic skipped" in f.issue]) > 0 else result.metrics.get("table_arithmetic_confidence", "0%"))
+risk_cols[7].metric("Table arithmetic", _table_arithmetic_display(result))
 
 detected_profile = result.metrics.get("detected_profile", {})
 if isinstance(detected_profile, dict):
