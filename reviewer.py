@@ -5865,7 +5865,17 @@ def _is_policy_subsection_suspect(title: str, number: str, page_number: int, tab
     if not number.isdigit() or int(number) < 3:
         return False
     if notes_start_page is not None and page_number - notes_start_page < 5:
-        policy_keywords = ["intangible", "tax", "property", "equipment", "revenue", "financial instrument", "basis", "receivable", "inventory", "ecl"]
+        policy_keywords = [
+            "basis",
+            "recognition",
+            "measurement",
+            "depreciation",
+            "amortisation",
+            "amortization",
+            "impairment",
+            "expected credit loss",
+            "ecl methodology",
+        ]
         if any(k in title.lower() for k in policy_keywords):
             return True
     return False
