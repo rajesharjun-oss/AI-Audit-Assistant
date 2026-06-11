@@ -1399,6 +1399,30 @@ def test_note_internal_total_skips_complex_movement_schedule_noise(monkeypatch):
     assert not any("subtotal or total does not agree" in finding.issue.lower() for finding in findings)
 
 
+def test_skipped_table_summary_groups_notes_arithmetic_skips(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90\n"
+                + ("Primary context.\n" * 70),
+                [],
+            ),
+            PdfPage(10, "Notes to the financial statements\n3 Revenue\nRevenue 100 90", [[["Revenue", "2025", "2024"], ["Fees", "100", "90"], ["Total", "100", "90"]]]),
+            PdfPage(11, "4 Expenses\nExpenses 60 50", [[["Expenses", "2025", "2024"], ["Admin", "60", "50"], ["Total", "60", "50"]]]),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions())
+    summary = result.metrics["skipped_table_summary"]
+
+    notes_group = next(row for row in summary if row["Skipped check group"] == "Notes tables - generic arithmetic skipped")
+    assert notes_group["Pages affected"] == "Pages 10-11"
+    assert notes_group["Tables affected"] == "2"
+
+
 def test_note_heading_detection_starts_after_notes_heading_when_present():
     document = PdfDocument(
         [

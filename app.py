@@ -333,6 +333,8 @@ def _build_excel_export(result) -> bytes:
         pd.DataFrame(check_results).to_excel(writer, sheet_name="Checks results", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
+        skipped_summary_rows = result.metrics.get("skipped_table_summary", []) or [{"Skipped check group": "None", "Reason skipped": "No table-specific skips recorded."}]
+        pd.DataFrame(skipped_summary_rows).to_excel(writer, sheet_name="Skipped checks summary", index=False)
         skipped_table_rows = result.metrics.get("skipped_table_details", []) or [{"Page": "None", "Reason skipped": "No table-specific skips recorded."}]
         pd.DataFrame(skipped_table_rows).to_excel(writer, sheet_name="Skipped table details", index=False)
         pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
@@ -358,6 +360,7 @@ def _build_excel_export(result) -> bytes:
         _format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
         _format_excel_table_sheet(writer.book["Date consistency"], "DateConsistency")
         _format_excel_table_sheet(writer.book["Checks results"], "ChecksResults")
+        _format_excel_table_sheet(writer.book["Skipped checks summary"], "SkippedChecksSummary")
         _format_excel_table_sheet(writer.book["Skipped table details"], "SkippedTableDetails")
     return output.getvalue()
 

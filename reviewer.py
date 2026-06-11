@@ -475,6 +475,7 @@ def _build_result(
         "ocr_statement_rows": _format_ocr_statement_rows_debug(document),
         "note_agreement_results": _note_agreement_result_rows(document),
         "skipped_table_details": _skipped_table_detail_rows(document),
+        "skipped_table_summary": _skipped_table_summary_rows(document),
         "detected_profile": infer_detected_profile(document),
         "checks_performed": "\n".join(checks_performed_list) or "No deterministic checks completed.",
         "checks_skipped": "\n".join(checks_skipped_list) or "No major checks skipped.",
@@ -1259,6 +1260,67 @@ def _skipped_table_detail_rows(document: PdfDocument) -> list[dict[str, str]]:
                 }
             )
     return rows
+
+
+def _skipped_table_summary_rows(document: PdfDocument) -> list[dict[str, str]]:
+    details = _skipped_table_detail_rows(document)
+    if not details:
+        return []
+    groups: dict[tuple[str, str, str], dict[str, object]] = {}
+    for row in details:
+        classification = row.get("Classification", "") or "Table-specific skip"
+        reason = row.get("Reason skipped", "") or classification
+        if "generic arithmetic is not reliable for notes tables" in classification.lower():
+            group = "Notes tables - generic arithmetic skipped"
+            reviewer_action = "Use note-reference and amount-agreement sheets; inspect individual note tables manually where prompted."
+        elif "low-confidence" in classification.lower() or "numeric row shapes" in reason.lower():
+            group = "Low-confidence table extraction"
+            reviewer_action = "Review the source page before relying on automated table arithmetic."
+        elif "not a recognised statement/note total table" in reason.lower() or "other table" in classification.lower():
+            group = "Non-standard or non-financial table"
+            reviewer_action = "No generic casting performed; review only if the table is financially relevant."
+        else:
+            group = classification
+            reviewer_action = "Review the table manually if it is material to the financial statements."
+        key = (group, reason, reviewer_action)
+        bucket = groups.setdefault(key, {"pages": set(), "tables": 0})
+        bucket["tables"] = int(bucket["tables"]) + 1
+        page = str(row.get("Page", "")).strip()
+        if page.isdigit():
+            cast_pages = bucket["pages"]
+            if isinstance(cast_pages, set):
+                cast_pages.add(int(page))
+    summary_rows: list[dict[str, str]] = []
+    for (group, reason, reviewer_action), bucket in groups.items():
+        pages = bucket.get("pages", set())
+        page_reference = _format_page_set(pages if isinstance(pages, set) else set())
+        summary_rows.append(
+            {
+                "Skipped check group": group,
+                "Pages affected": page_reference or "Not page-specific",
+                "Tables affected": str(bucket.get("tables", 0)),
+                "Reason skipped": reason,
+                "Reviewer action": reviewer_action,
+            }
+        )
+    return sorted(summary_rows, key=lambda row: row["Skipped check group"])
+
+
+def _format_page_set(pages: set[int]) -> str:
+    if not pages:
+        return ""
+    ordered = sorted(pages)
+    ranges: list[str] = []
+    start = previous = ordered[0]
+    for page in ordered[1:]:
+        if page == previous + 1:
+            previous = page
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = page
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    label = "Page" if len(ordered) == 1 else "Pages"
+    return f"{label} {', '.join(ranges)}"
 
 
 def _note_agreement_result_row(
