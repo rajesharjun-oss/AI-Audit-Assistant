@@ -27,6 +27,64 @@ def _metric_lines(value: object, empty: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
+def _checks_skipped_rows(result) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for item in _metric_lines(result.metrics.get("checks_skipped"), "No major checks skipped."):
+        rows.append(_parse_skipped_check(item))
+    return rows
+
+
+def _parse_skipped_check(item: str) -> dict[str, str]:
+    check_area = item
+    page_reference = ""
+    reason = item
+    can_fix = "Partially"
+    reviewer_action = "Review the referenced page or supporting detail sheet, then rerun after improving extraction if needed."
+
+    statement_match = re.match(r"(.+?):\s+Page\s+(\d+)\s+skipped because\s+(.+)", item, flags=re.I)
+    if statement_match:
+        check_area = statement_match.group(1).strip()
+        page_reference = f"Page {statement_match.group(2)}"
+        reason = statement_match.group(3).rstrip(".")
+        can_fix = "Partially"
+        reviewer_action = "Open the page and inspect the statement manually; automated casting is withheld because extraction did not produce reliable rows/columns."
+    elif item.lower().startswith("generic table arithmetic skipped"):
+        check_area = "Generic table arithmetic"
+        page_reference = "See Skipped table details"
+        reason = "Low-confidence or non-standard tables are listed separately."
+        can_fix = "Partially"
+        reviewer_action = "Use Skipped checks summary and Skipped table details to inspect the affected note tables manually."
+    elif "notes section start was not detected" in item.lower():
+        check_area = "OCR note-reference validation"
+        reason = "Notes section start was not detected reliably."
+        can_fix = "Yes, if OCR/notes heading extraction improves"
+        reviewer_action = "Review Notes heading candidates and confirm the page where notes begin."
+    elif "table extraction confidence is below threshold" in item.lower():
+        check_area = "Detailed note agreement"
+        reason = "Table extraction confidence is below the safe threshold."
+        can_fix = "Partially"
+        reviewer_action = "Use Note-linked review and Note agreement results for cautious review prompts; rerun detailed agreement when table extraction improves."
+    elif "limited-scope statement extract" in item.lower():
+        check_area = "Full AFS completeness and note agreement"
+        reason = "The upload appears to be a limited-scope statement extract."
+        can_fix = "Yes, with complete AFS upload"
+        reviewer_action = "Upload the complete financial statements to run full checklist, policy, and note-agreement checks."
+    elif "pdf extraction is unreliable" in item.lower():
+        check_area = "Primary statement checks"
+        reason = "PDF extraction is unreliable."
+        can_fix = "Partially"
+        reviewer_action = "Review extraction confidence, OCR statement rows, and source pages before relying on automated checks."
+
+    return {
+        "Check area": check_area,
+        "Page reference": page_reference,
+        "Reason skipped": reason,
+        "Can automated check be fixed?": can_fix,
+        "Reviewer action": reviewer_action,
+        "Original message": item,
+    }
+
+
 def _finding_rows(result) -> list[dict[str, str]]:
     rows = []
     for index, finding in enumerate(result.findings, start=1):
@@ -260,7 +318,7 @@ def _build_excel_export(result) -> bytes:
         {"Metric": "note_reference_findings", "Value": result.metrics.get("note_reference_findings", 0)},
     ]
     checks_performed = [{"Check performed": item} for item in _metric_lines(result.metrics.get("checks_performed"), "No deterministic checks completed.")]
-    checks_skipped = [{"Check skipped": item} for item in _metric_lines(result.metrics.get("checks_skipped"), "No major checks skipped.")]
+    checks_skipped = _checks_skipped_rows(result) or [{"Check area": "None", "Reason skipped": "No major checks skipped."}]
     check_results = result.metrics.get("check_results", [])
     if not isinstance(check_results, list) or not check_results:
         check_results = [{"Check": "No deterministic checks completed.", "Result": "Skipped", "Severity": "", "Evidence": ""}]
