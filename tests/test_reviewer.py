@@ -1490,11 +1490,76 @@ def test_skipped_table_summary_groups_notes_arithmetic_skips(monkeypatch):
     result = review_pdf("unused.pdf", options=ReviewOptions())
     summary = result.metrics["skipped_table_summary"]
 
-    notes_group = next(row for row in summary if row["Skipped check group"] == "Notes tables - generic arithmetic skipped")
+    notes_group = next(row for row in summary if row["Skipped check group"] == "Notes tables - manual review recommended")
     assert notes_group["Pages affected"] == "Pages 10-11"
     assert notes_group["Tables affected"] == "2"
     assert notes_group["Can automated check be fixed?"] == "Partially"
     assert "may merge" in notes_group["Why reviewer should review"].lower()
+
+
+def test_front_matter_tables_are_not_reported_as_skipped_audit_checks(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                2,
+                "General Information\nDirectors Lai Labode\nCompany registration number RC 12345",
+                [[["Financial Statements for the year ended", "31", "2025"], ["FRC/", "2022", "861283"], ["Director", "Lai", "Labode"]]],
+            ),
+            PdfPage(
+                13,
+                "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90\n"
+                + ("Primary context.\n" * 70),
+                [],
+            ),
+            PdfPage(
+                30,
+                "Notes to the financial statements\n3 Revenue\nRevenue 100 90",
+                [[["Revenue", "2025", "2024"], ["Fees", "100", "90"], ["Total", "100", "90"]]],
+            ),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions())
+    details = result.metrics["skipped_table_details"]
+
+    assert not any(row.get("Page") == "2" for row in details)
+    assert any(row.get("Page") == "30" for row in details)
+
+
+def test_changes_statement_page_is_inferred_from_contents_when_rotated():
+    document = PdfDocument(
+        [
+            PdfPage(
+                3,
+                "Contents\nStatement of Financial Position 13\nStatement of Profit or Loss 14\n"
+                "Statement of Changes in Equity 15\nStatement of Cash Flows 16",
+                [],
+            ),
+            PdfPage(
+                14,
+                "Statement of Financial Position\nAssets\nTotal assets 100 90\nTotal equity and liabilities 100 90",
+                [],
+            ),
+            PdfPage(
+                15,
+                "Statement of Profit or Loss\nRevenue 100 90\nProfit before tax 10 9\nTaxation (1) (1)\nProfit after tax 9 8",
+                [],
+            ),
+            PdfPage(16, "(€8z‘6€L) = (p16‘E0rT) TTHPEE= i z pT8IZ7‘E6OLrTT", []),
+            PdfPage(
+                17,
+                "Statement of Cash Flows\nCash flows from operating activities\nCash and cash equivalents at end of year 20 10",
+                [],
+            ),
+        ]
+    )
+
+    page = reviewer._find_statement_page(document, "Statement of changes in equity")
+
+    assert page is not None
+    assert page.number == 16
 
 
 def test_note_heading_detection_starts_after_notes_heading_when_present():

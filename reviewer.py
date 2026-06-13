@@ -1240,6 +1240,9 @@ def _skipped_table_detail_rows(document: PdfDocument) -> list[dict[str, str]]:
         match = re.match(r"Page\s+(\d+),\s+table\s+(\d+):\s+(.+?)(?:\s+\((.+)\))?$", detail)
         if match:
             page, table, table_type, reason = match.groups()
+            if table_type.lower().startswith("skipped because"):
+                reason = reason or table_type
+                table_type = "Notes table"
             rows.append(
                 {
                     "Page": page,
@@ -1270,8 +1273,9 @@ def _skipped_table_summary_rows(document: PdfDocument) -> list[dict[str, str]]:
     for row in details:
         classification = row.get("Classification", "") or "Table-specific skip"
         reason = row.get("Reason skipped", "") or classification
-        if "generic arithmetic is not reliable for notes tables" in classification.lower():
-            group = "Notes tables - generic arithmetic skipped"
+        skip_context = f"{classification} {reason}".lower()
+        if "generic arithmetic is not reliable for notes tables" in skip_context:
+            group = "Notes tables - manual review recommended"
             reviewer_action = "Use note-reference and amount-agreement sheets; inspect individual note tables manually where prompted."
             can_fix = "Partially"
             why_review = "The PDF table can be visible to a reviewer, but extracted rows/columns may merge note numbers, years, narrative text, and amounts. Generic subtotal casting is withheld to avoid false exceptions."
@@ -1942,12 +1946,14 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
         for table_index, table in enumerate(page.tables, start=1):
             if len(table) < 3:
                 continue
+            table_quality = _classify_table_for_arithmetic(table, page.text)
+            if _skip_table_is_not_review_relevant(page, table_quality, primary_pages, notes_start_page):
+                continue
             if notes_start_page is not None and page.number >= notes_start_page and page.number not in primary_pages:
                 skipped_tables.append(
                     f"Page {page.number}, table {table_index}: skipped because generic arithmetic is not reliable for notes tables; use note-reference and amount-agreement checks instead."
                 )
                 continue
-            table_quality = _classify_table_for_arithmetic(table, page.text)
             if not table_quality["can_run_arithmetic"]:
                 skipped_tables.append(
                     f"Page {page.number}, table {table_index}: {table_quality['type']} ({table_quality['reason']})"
@@ -1980,6 +1986,118 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
     if skipped_tables:
         document.skipped_table_details = list(dict.fromkeys(skipped_tables))
     return findings
+
+
+def _skip_table_is_not_review_relevant(
+    page: PdfPage,
+    table_quality: dict[str, object],
+    primary_pages: set[int],
+    notes_start_page: int | None,
+) -> bool:
+    if page.number in primary_pages:
+        return False
+    table_type = str(table_quality.get("type", "")).lower()
+    if table_type in {"value-added statement", "multi-year summary"}:
+        return True
+    if notes_start_page is not None and page.number >= notes_start_page:
+        return not _notes_table_skip_needs_reviewer_attention(page.text)
+    if table_type == "other table" and _looks_like_rotated_or_unreadable_statement_page(page.text):
+        return True
+    return _front_matter_table_skip_is_noise(page.text)
+
+
+def _front_matter_table_skip_is_noise(text: str) -> bool:
+    lower = _normalise_match_words(text[:2500])
+    front_matter_markers = (
+        "general information",
+        "directors report",
+        "directors responsibilities",
+        "directors responsibility",
+        "independent auditor report",
+        "report on audit financial statements",
+        "corporate information",
+        "registered office",
+        "company registration",
+        "shareholding",
+        "directors interests",
+        "going concern",
+        "charitable donation",
+        "auditors",
+    )
+    return any(marker in lower for marker in front_matter_markers)
+
+
+def _notes_table_skip_needs_reviewer_attention(text: str) -> bool:
+    lower = _normalise_match_words(text[:3000])
+    if _is_post_notes_supplement_page(text):
+        return False
+    non_cast_notes = (
+        "new standards and interpretations",
+        "standards and interpretations",
+        "new standards",
+        "related parties",
+        "related party",
+        "subsequent events",
+        "going concern",
+        "contingent liabilities",
+        "capital commitments",
+        "financial instruments and risk management",
+    )
+    if any(marker in lower for marker in non_cast_notes):
+        return False
+    amount_note_markers = (
+        "property plant and equipment",
+        "intangible assets",
+        "financial assets",
+        "trade and other receivables",
+        "cash and cash equivalents",
+        "share capital",
+        "share premium",
+        "deferred tax",
+        "trade and other payables",
+        "current tax liabilities",
+        "contract liabilities",
+        "revenue",
+        "direct expenses",
+        "other income",
+        "operating expenses",
+        "expenses",
+        "expense",
+        "employee costs",
+        "investment income",
+    )
+    return any(marker in lower for marker in amount_note_markers)
+
+
+def _looks_like_rotated_or_unreadable_statement_page(text: str) -> bool:
+    sample = text[:2500]
+    if not sample.strip():
+        return False
+    normalised = _normalise_match_words(sample)
+    if "statement of changes" in normalised or "changes in equity" in normalised:
+        return True
+    tokens = re.findall(r"[A-Za-z]{3,}", sample)
+    recognisable = sum(
+        1
+        for token in tokens
+        if token.lower()
+        in {
+            "statement",
+            "changes",
+            "equity",
+            "balance",
+            "share",
+            "capital",
+            "premium",
+            "income",
+            "loss",
+            "profit",
+            "total",
+            "financial",
+        }
+    )
+    gibberish_markers = len(re.findall(r"[€¢£¥]|[A-Za-z]{1,2}[‘’][A-Za-z]{1,3}|000,,|,,N|2ouryeg|Asenuef", sample))
+    return gibberish_markers >= 3 and recognisable <= 5
 
 
 def check_formatting(document: PdfDocument, profile: CompanyProfile) -> list[Finding]:
@@ -3088,12 +3206,17 @@ def _find_statement_page(document: PdfDocument, statement_name: str) -> PdfPage 
         return page
     target = statement_name.lower()
     for page in document.pages:
+        if _looks_like_contents_or_front_matter_page(page.text):
+            continue
         for line in page.text.splitlines():
             lower = line.strip().lower()
             if "..." in lower or "…" in lower:
                 continue
             if lower.startswith(target):
                 return page
+    inferred_page = _infer_statement_page_from_contents(document, canonical_name)
+    if inferred_page:
+        return inferred_page
     return None
 
 
@@ -3124,6 +3247,63 @@ def _classified_primary_statement_pages(document: PdfDocument) -> dict[str, PdfP
             if any(_statement_heading_line_present(page_head, candidate) for candidate in candidates) and _page_has_statement_rows_for(canonical, page.text):
                 classified[canonical] = page
     return classified
+
+
+def _infer_statement_page_from_contents(document: PdfDocument, canonical_name: str) -> PdfPage | None:
+    contents_refs = _contents_statement_page_refs(document)
+    if not contents_refs or canonical_name not in contents_refs:
+        return None
+    classified = _classified_primary_statement_pages(document)
+    offsets: list[int] = []
+    for known_name, page in classified.items():
+        ref = contents_refs.get(known_name)
+        if ref:
+            offsets.append(page.number - ref)
+    if not offsets:
+        return None
+    offsets.sort()
+    inferred_number = contents_refs[canonical_name] + offsets[len(offsets) // 2]
+    for page in document.pages:
+        if page.number == inferred_number and not _looks_like_contents_or_front_matter_page(page.text):
+            return page
+    return None
+
+
+def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
+    aliases = {
+        "Statement of income and expenditure": (
+            "statement of profit or loss and other comprehensive income",
+            "statement of comprehensive income",
+            "statement of profit or loss",
+            "statement of income and expenditure",
+        ),
+        "Statement of financial position": ("statement of financial position", "balance sheet"),
+        "Statement of changes in accumulated fund": (
+            "statement of changes in accumulated fund",
+            "statement of changes in equity",
+        ),
+        "Statement of cash flows": ("statement of cash flows", "cash flow statement"),
+    }
+    refs: dict[str, int] = {}
+    for page in document.pages:
+        if not _looks_like_contents_or_front_matter_page(page.text):
+            continue
+        for raw_line in page.text.splitlines()[:80]:
+            line = re.sub(r"\s+", " ", raw_line.strip())
+            if not line:
+                continue
+            number_match = re.search(r"(\d{1,3})\s*$", line)
+            if not number_match:
+                continue
+            normalised = _normalise_match_words(line)
+            page_ref = int(number_match.group(1))
+            for canonical, candidates in aliases.items():
+                if canonical in refs:
+                    continue
+                if any(_normalise_match_words(candidate) in normalised for candidate in candidates):
+                    refs[canonical] = page_ref
+                    break
+    return refs
 
 
 def _looks_like_contents_or_front_matter_page(text: str) -> bool:
@@ -3506,7 +3686,7 @@ def _check_accumulated_fund_text(
         if has_run:
             return findings, performed, skipped
 
-    skipped.append(f"{stmt_name} skipped because rotated/OCR table structure was not confidently parsed.")
+    skipped.append(f"{stmt_name}: Page {page.number} skipped because rotated/OCR table structure was not confidently parsed.")
     return findings, performed, skipped
 
 
