@@ -5452,7 +5452,7 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
         # body instead of the policy subsection, regardless of which page has tables.
         best = valid_occs[-1]
         headings[number] = (best[0], best[1])
-        
+    _augment_note_headings_from_statement_refs(headings, document)
     return headings
 
 
@@ -5520,9 +5520,94 @@ def _augment_note_headings_from_statement_refs(headings: dict[str, tuple[str, in
         title = _statement_line_item_title(item.line_item)
         existing = headings.get(item.ref)
         if existing is None:
-            continue
+            inferred = _infer_missing_note_heading_from_statement_ref(item.ref, title, headings, document)
+            if inferred:
+                headings[item.ref.upper()] = inferred
         elif existing[0].lower() in {"staff costs"} and "personnel" in item.line_item.lower():
             headings[item.ref] = (title, existing[1])
+
+
+def _infer_missing_note_heading_from_statement_ref(
+    ref: str,
+    title: str,
+    headings: dict[str, tuple[str, int]],
+    document: PdfDocument,
+) -> tuple[str, int] | None:
+    if not ref or not _valid_note_number(ref) or not title:
+        return None
+    numeric_ref = _note_ref_number(ref)
+    if numeric_ref is None:
+        return None
+    notes_start_page = _notes_start_page(document)
+    if notes_start_page is None and document.ocr_used:
+        return None
+    lower_bound = notes_start_page or 1
+    upper_bound = max((page.number for page in document.pages), default=lower_bound)
+    for other_ref, (_other_title, page_number) in headings.items():
+        other_number = _note_ref_number(other_ref)
+        if other_number is None:
+            continue
+        if other_number < numeric_ref:
+            lower_bound = max(lower_bound, page_number)
+        elif other_number > numeric_ref:
+            upper_bound = min(upper_bound, page_number)
+    normalized_title = _normalise_match_words(title)
+    if len(normalized_title.split()) < 2:
+        return None
+    for page in document.pages:
+        if page.number < lower_bound or page.number > upper_bound:
+            continue
+        if notes_start_page is not None and page.number < notes_start_page:
+            continue
+        if page.number > lower_bound and _is_post_notes_supplement_page(page.text):
+            break
+        next_heading_index = _first_later_note_heading_index(page.text, numeric_ref) if page.number == upper_bound else None
+        for index, raw_line in enumerate(page.text.splitlines()):
+            if next_heading_index is not None and index >= next_heading_index:
+                break
+            line = re.sub(r"\s+", " ", raw_line.strip())
+            if _standalone_note_heading_line_matches(line, normalized_title):
+                return title, page.number
+    return None
+
+
+def _note_ref_number(ref: str) -> int | None:
+    match = re.match(r"(\d{1,2})", str(ref or ""))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _first_later_note_heading_index(text: str, numeric_ref: int) -> int | None:
+    for index, raw_line in enumerate(text.splitlines()):
+        line = raw_line.strip()
+        match = NOTE_HEADING_RE.match(line) or NOTE_NUMBER_ONLY_RE.match(line)
+        if not match:
+            continue
+        other_ref = str(match.group(1))
+        if not _valid_note_number(other_ref):
+            continue
+        other_number = _note_ref_number(other_ref)
+        if other_number is not None and other_number > numeric_ref:
+            return index
+    return None
+
+
+def _standalone_note_heading_line_matches(line: str, normalized_title: str) -> bool:
+    if not line or _amounts_in_text(line):
+        return False
+    normalized_line = _normalise_match_words(line)
+    if not normalized_line or "continued" in normalized_line:
+        return False
+    if normalized_line == normalized_title:
+        return True
+    title_words = normalized_title.split()
+    line_words = normalized_line.split()
+    return (
+        normalized_line.startswith(normalized_title)
+        and len(line_words) <= len(title_words) + 3
+        and not _note_heading_title_looks_narrative(line)
+    )
 
 
 def _statement_line_item_title(line_item: str) -> str:

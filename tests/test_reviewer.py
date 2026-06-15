@@ -1562,6 +1562,35 @@ def test_changes_statement_page_is_inferred_from_contents_when_rotated():
     assert page.number == 16
 
 
+def test_note_heading_inferred_when_extraction_drops_note_number():
+    document = PdfDocument(
+        [
+            PdfPage(
+                14,
+                "Statement of Financial Position as at 31 December 2025\n"
+                "2025 2024\nNote(s) N'000 N'000\n"
+                "Deferred tax 9 13,629 13,284\n"
+                "Trade and other payables 10 2,969,630 2,881,552\n"
+                "Total Equity and Liabilities 4,544,782 3,898,493",
+                [],
+            ),
+            PdfPage(
+                35,
+                "Notes to the Financial Statements\n2025 2024\nN'000 N'000\n"
+                "Deferred tax\n"
+                "The deferred tax assets and deferred tax liability relate to income tax.\n"
+                "Deferred tax liability 13,629 13,284\n"
+                "10. Trade and other payables\nTrade payables 427,359 634,025",
+                [],
+            ),
+        ]
+    )
+
+    headings = reviewer._note_headings_by_page(document)
+
+    assert headings["9"] == ("Deferred tax", 35)
+
+
 def test_note_heading_detection_starts_after_notes_heading_when_present():
     document = PdfDocument(
         [
