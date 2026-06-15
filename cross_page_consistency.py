@@ -18,6 +18,39 @@ DATE_FORMAT_1_RE = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|
 DATE_FORMAT_2_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+20\d{2}\b", re.I)
 DATE_FORMAT_3_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b", re.I)
 
+
+def _date_format_context_requires_standardisation(line: str) -> bool:
+    lower = line.lower()
+    excluded = (
+        "incorporated",
+        "commenced",
+        "legal framework",
+        "pending legal",
+        "litigation",
+        "contingenc",
+        "tax rate",
+        "effective",
+        "adopt",
+        "amendment",
+        "standard",
+        "ifrs",
+        "ias",
+    )
+    if any(term in lower for term in excluded):
+        return False
+    required = (
+        "year ended",
+        "financial statements for the year ended",
+        "approved",
+        "signed",
+        "dated",
+        "date of approval",
+        "as at",
+        "reporting period",
+    )
+    return any(term in lower for term in required)
+
+
 def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], dict[str, list[dict[str, str]]]]:
     findings = []
     export_data = {
@@ -37,15 +70,17 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         # Avoid extracting dates/names from purely legal/standard texts if possible
         text = page.text
         
-        # Extract dates
-        for match in DATE_FORMAT_1_RE.finditer(text):
-            date_occurrences[match.group(0)].append(page.number)
-        for match in DATE_FORMAT_2_RE.finditer(text):
-            date_occurrences[match.group(0)].append(page.number)
-        for match in DATE_FORMAT_3_RE.finditer(text):
-            # Only add if it wasn't already matched as part of FORMAT 1 or 2
-            if not any(match.group(0) in d for d in date_occurrences.keys()):
-                date_occurrences[match.group(0)].append(page.number)
+        # Extract dates with line-level context. Page-level context creates false positives because most pages
+        # carry a repeating "year ended" header.
+        for line in text.splitlines():
+            for match in DATE_FORMAT_1_RE.finditer(line):
+                date_occurrences[match.group(0)].append((page.number, line.strip()))
+            for match in DATE_FORMAT_2_RE.finditer(line):
+                date_occurrences[match.group(0)].append((page.number, line.strip()))
+            for match in DATE_FORMAT_3_RE.finditer(line):
+                # Only add if it wasn't already matched as part of FORMAT 1 or 2
+                if not any(match.group(0) in d for d in date_occurrences.keys()):
+                    date_occurrences[match.group(0)].append((page.number, line.strip()))
             
         # Extract potential names in signature blocks or directors lists
         page_lower = text.lower()
@@ -193,14 +228,19 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
     expected_format = "31 December 2025 (DD Month YYYY)"
     preferred_re = re.compile(r"\b(?:\d{1,2}\s+)?(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b", re.I)
 
-    for date_str, pages in date_occurrences.items():
-        # Only flag date formatting if the text around it indicates reporting or signing context
-        context_text = " ".join([page.text for p in document.pages if p.number in pages]).lower()
-        if any(kw in context_text for kw in ("ended", "signed", "dated", "approved", "as at")):
+    for date_str, occurrences in date_occurrences.items():
+        pages = [page for page, _line in occurrences]
+        relevant_contexts = [
+            (page, line)
+            for page, line in occurrences
+            if _date_format_context_requires_standardisation(line)
+        ]
+        if relevant_contexts:
             if not preferred_re.match(date_str):
+                relevant_pages = [page for page, _line in relevant_contexts]
                 export_data["dates"].append({
                     "Date found": date_str,
-                    "Page": ", ".join(map(str, set(pages))),
+                    "Page": ", ".join(map(str, sorted(set(relevant_pages)))),
                     "Expected format": expected_format,
                     "Comment": "Inconsistent date format."
                 })
@@ -208,16 +248,16 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     Finding(
                         "Formatting",
                         "Low",
-                        _format_page_location(pages),
+                        _format_page_location(relevant_pages),
                         f"Date '{date_str}' does not match the preferred format.",
-                        f"Found on pages: {', '.join(map(str, set(pages)))}",
+                        f"Found on pages: {', '.join(map(str, sorted(set(relevant_pages))))}",
                         f"Update to match the predominant format ({expected_format})."
                     )
                 )
             else:
                 export_data["dates"].append({
                     "Date found": date_str,
-                    "Page": ", ".join(map(str, set(pages))),
+                    "Page": ", ".join(map(str, sorted(set(pages)))),
                     "Expected format": expected_format,
                     "Comment": "Consistent."
                 })

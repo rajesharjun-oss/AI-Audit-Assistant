@@ -49,6 +49,46 @@ def test_name_consistency_suppresses_single_page_ocr_artifact_when_canonical_exi
     assert not any("Lait Labode" in str(row) for row in export["names"])
 
 
+def test_footnote_asterisks_are_not_unreadable_placeholders():
+    document = PdfDocument(
+        [
+            PdfPage(
+                25,
+                "4. Other receivables\nPrepayments*** 55,331 -\n"
+                "***This relates to payment made during the year in respect of rent.",
+                [],
+            )
+        ]
+    )
+
+    assert document.unreadable_value_count == 0
+    assert not [finding for finding in check_extraction_quality(document) if "Unreadable or placeholder" in finding.issue]
+
+
+def test_narrative_dates_do_not_trigger_format_findings():
+    document = PdfDocument(
+        [
+            PdfPage(
+                4,
+                "Financial Statements for the year ended 31 December 2025\n"
+                "The Company was incorporated on 7th May 2019 as a private limited liability company.",
+                [],
+            ),
+            PdfPage(
+                36,
+                "22. Contingencies\n"
+                "The solicitors confirmed that the Company did not have pending legal cases as at 31st December 2025.",
+                [],
+            ),
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not [finding for finding in findings if finding.category == "Formatting"]
+    assert not [row for row in export["dates"] if row.get("Comment") == "Inconsistent date format."]
+
+
 def test_excel_name_export_guard_suppresses_one_page_ocr_artifact():
     from export_utils import clean_name_consistency_rows
 
