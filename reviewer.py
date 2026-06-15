@@ -6444,7 +6444,55 @@ def _note_sections(document: PdfDocument) -> dict[str, str]:
                     pending_number = None
         for current in current_refs:
             sections[current].append(line)
-    return {number: "\n".join(lines) for number, lines in sections.items()}
+    section_text = {number: "\n".join(lines) for number, lines in sections.items()}
+    _augment_note_sections_from_inferred_headings(section_text, document)
+    return section_text
+
+
+def _augment_note_sections_from_inferred_headings(sections: dict[str, str], document: PdfDocument) -> None:
+    headings = _note_headings_by_page(document)
+    for ref, (title, page_number) in headings.items():
+        if ref in sections:
+            continue
+        inferred_section = _extract_section_from_standalone_heading(document, ref, title, page_number)
+        if inferred_section:
+            sections[ref] = inferred_section
+
+
+def _extract_section_from_standalone_heading(
+    document: PdfDocument,
+    ref: str,
+    title: str,
+    page_number: int,
+) -> str:
+    numeric_ref = _note_ref_number(ref)
+    if numeric_ref is None:
+        return ""
+    start_page = next((page for page in document.pages if page.number == page_number), None)
+    if start_page is None:
+        return ""
+    normalized_title = _normalise_match_words(title)
+    collecting = False
+    collected: list[str] = []
+    for page in document.pages:
+        if page.number < page_number:
+            continue
+        if page.number > page_number and _is_post_notes_supplement_page(page.text):
+            break
+        for raw_line in page.text.splitlines():
+            line = re.sub(r"\s+", " ", raw_line.strip())
+            if not collecting:
+                if page.number == page_number and _standalone_note_heading_line_matches(line, normalized_title):
+                    collecting = True
+                    collected.append(raw_line)
+                continue
+            later_heading = NOTE_HEADING_RE.match(line) or NOTE_NUMBER_ONLY_RE.match(line)
+            if later_heading and _valid_note_number(str(later_heading.group(1))):
+                later_number = _note_ref_number(str(later_heading.group(1)))
+                if later_number is not None and later_number > numeric_ref:
+                    return "\n".join(collected)
+            collected.append(raw_line)
+    return "\n".join(collected)
 
 
 def _combined_note_refs_from_line(lines: list[str], index: int, line: str) -> list[str]:

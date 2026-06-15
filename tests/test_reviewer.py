@@ -1587,8 +1587,13 @@ def test_note_heading_inferred_when_extraction_drops_note_number():
     )
 
     headings = reviewer._note_headings_by_page(document)
+    rows = reviewer._note_agreement_result_rows(document)
+    deferred_tax_row = next(row for row in rows if row["Line item description"] == "Deferred Tax")
 
     assert headings["9"] == ("Deferred tax", 35)
+    assert deferred_tax_row["Review result"] == "Passed"
+    assert deferred_tax_row["Current year amount found in referenced note?"] == "Yes"
+    assert deferred_tax_row["Prior year amount found in referenced note?"] == "Yes"
 
 
 def test_note_heading_detection_starts_after_notes_heading_when_present():
