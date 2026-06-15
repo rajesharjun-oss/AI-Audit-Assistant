@@ -1937,6 +1937,8 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
         findings.extend(_check_ocr_statement_of_cash_flows(document, tolerance))
         return findings
 
+    findings.extend(_check_share_capital_line_tables(document, tolerance))
+
     skipped_tables: list[str] = []
     primary_statements = _classified_primary_statement_pages(document)
     primary_pages = {p.number for p in primary_statements.values()}
@@ -1986,6 +1988,182 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
     if skipped_tables:
         document.skipped_table_details = list(dict.fromkeys(skipped_tables))
     return findings
+
+
+def _check_share_capital_line_tables(document: PdfDocument, tolerance: Decimal) -> list[Finding]:
+    findings: list[Finding] = []
+    for page in document.pages:
+        if not _page_may_contain_share_capital_cast(page.text):
+            continue
+        schedules = _share_capital_line_schedules(page.text)
+        for schedule_index, schedule in enumerate(schedules, start=1):
+            component_rows = schedule["components"]
+            total_values = schedule["total"]
+            if len(component_rows) < 2 or len(total_values) < 2:
+                continue
+            aligned_rows: list[tuple[str, list[Decimal]]] = []
+            corrections: list[str] = []
+            for label, amounts in component_rows:
+                aligned_amounts, correction = _align_share_capital_amounts(amounts, total_values)
+                if len(aligned_amounts) == len(total_values):
+                    aligned_rows.append((label, aligned_amounts))
+                    if correction:
+                        corrections.append(f"{label}: {correction}")
+            if len(aligned_rows) < 2:
+                continue
+            column_count = min(len(total_values), min(len(row[1]) for row in aligned_rows))
+            if column_count < 2:
+                continue
+            differences: list[tuple[int, Decimal, Decimal, Decimal]] = []
+            for col in range(column_count):
+                expected = sum((amounts[col] for _label, amounts in aligned_rows), Decimal("0"))
+                reported = total_values[col]
+                diff = reported - expected
+                if abs(diff) > tolerance:
+                    differences.append((col + 1, reported, expected, diff))
+            location = f"Page {page.number} | Share capital/shareholding table"
+            row_count = len(aligned_rows)
+            if differences:
+                evidence = "; ".join(
+                    f"column {col}: reported {reported:,}, visible sum {expected:,}, difference {diff:,}"
+                    for col, reported, expected, diff in differences
+                )
+                if corrections:
+                    evidence += f" Extraction corrections applied: {'; '.join(corrections[:3])}."
+                findings.append(
+                    Finding(
+                        "Totals and rounding",
+                        "Medium",
+                        location,
+                        "Share capital or shareholding table total does not agree to visible rows.",
+                        f"Checked {row_count} visible shareholder/share-capital rows. {evidence}.",
+                        "Recalculate the issued share capital/shareholding table and confirm whether a hidden row, rounding adjustment, or extraction issue explains the difference.",
+                        metadata={"check_type": "share_capital_table", "page": str(page.number), "schedule": str(schedule_index)},
+                    )
+                )
+            else:
+                correction_note = f" Extraction corrections applied: {'; '.join(corrections[:3])}." if corrections else ""
+                findings.append(
+                    Finding(
+                        "Totals and rounding",
+                        "Passed",
+                        location,
+                        f"Share capital/shareholding table on Page {page.number} casts correctly.",
+                        f"Checked {row_count} visible rows across {column_count} numeric columns; reported totals agree within tolerance {tolerance}.{correction_note}",
+                        "No reviewer action required unless the source page is amended.",
+                        metadata={"check_type": "share_capital_table", "page": str(page.number), "schedule": str(schedule_index)},
+                    )
+                )
+    return findings
+
+
+def _page_may_contain_share_capital_cast(text: str) -> bool:
+    lower = _normalise_match_words(text[:4000])
+    share_terms = ("share capital", "issued share", "number of shares", "ordinary shares", "shareholding")
+    if not any(term in lower for term in share_terms):
+        return False
+    return "issued" in lower or "number of shares" in lower or "shareholder" in lower
+
+
+def _share_capital_line_schedules(text: str) -> list[dict[str, object]]:
+    schedules: list[dict[str, object]] = []
+    collecting = False
+    components: list[tuple[str, list[Decimal]]] = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line.strip())
+        if not line:
+            continue
+        normalized = _normalise_match_words(line)
+        if not collecting and ("issued" in normalized or "number of shares" in normalized):
+            collecting = True
+            components = []
+            continue
+        if not collecting:
+            continue
+        if _share_capital_schedule_end(line):
+            if components:
+                components = []
+            collecting = False
+            continue
+        amounts = _share_capital_amounts_from_line(line)
+        if len(amounts) < 2:
+            continue
+        if _share_capital_total_line(line, amounts):
+            schedules.append({"components": list(components), "total": amounts})
+            components = []
+            collecting = False
+            continue
+        label = _share_capital_component_label(line)
+        if label:
+            components.append((label, amounts))
+    return schedules
+
+
+def _share_capital_component_label(line: str) -> str:
+    label = re.sub(NUMBER_RE, " ", line)
+    label = re.sub(r"\s+", " ", label).strip(" -")
+    if not re.search(r"[A-Za-z]{3,}", label):
+        return ""
+    if re.search(r"\b(issued|number of shares|ordinary shares|share capital|direct|indirect)\b", label, flags=re.I):
+        return ""
+    return label
+
+
+def _share_capital_amounts_from_line(line: str) -> list[Decimal]:
+    amounts: list[Decimal] = []
+    for token in re.findall(r"\(?-?\d[\d,]*\)?", line):
+        if len(token) == 4 and token.isdigit() and token.startswith("20"):
+            continue
+        cleaned = token.strip()
+        negative = cleaned.startswith("(") and cleaned.endswith(")")
+        cleaned = cleaned.strip("()").replace(",", "")
+        try:
+            amount = Decimal(cleaned)
+        except InvalidOperation:
+            continue
+        amounts.append(-amount if negative else amount)
+    return amounts
+
+
+def _align_share_capital_amounts(amounts: list[Decimal], total_values: list[Decimal]) -> tuple[list[Decimal], str]:
+    if len(amounts) == len(total_values):
+        return amounts, ""
+    if (
+        len(total_values) == 4
+        and len(amounts) == 3
+        and abs(amounts[0]) < 1000
+        and abs(total_values[0]) < 10000
+        and abs(total_values[1]) < 10000
+        and abs(amounts[1]) >= 1000
+        and abs(amounts[2]) >= 1000
+    ):
+        return [amounts[0], amounts[0], amounts[1], amounts[2]], "duplicated first small issued-capital amount where extraction dropped the comparative value"
+    return amounts, ""
+
+
+def _share_capital_total_line(line: str, amounts: list[Decimal]) -> bool:
+    if len(amounts) < 2:
+        return False
+    label = _share_capital_component_label(line)
+    if re.search(r"\b(total|closing|issued share capital)\b", line, flags=re.I):
+        return True
+    return not label and len(amounts) >= 2
+
+
+def _share_capital_schedule_end(line: str) -> bool:
+    lower = line.lower()
+    return any(
+        marker in lower
+        for marker in (
+            "there have been no changes",
+            "directors' interests",
+            "directors interests",
+            "going concern",
+            "charitable donation",
+            "events after",
+            "auditors",
+        )
+    )
 
 
 def _skip_table_is_not_review_relevant(

@@ -1528,6 +1528,91 @@ def test_front_matter_tables_are_not_reported_as_skipped_audit_checks(monkeypatc
     assert any(row.get("Page") == "30" for row in details)
 
 
+def test_share_capital_directors_report_table_casts_as_passed():
+    document = PdfDocument(
+        [
+            PdfPage(
+                5,
+                "Directors' Report\n4. Share capital (continued)\n"
+                "Issued\n"
+                "FishBone & Lestr 995 995 994,560 994,560\n"
+                "Lai Labode 1,027 1,027 1,027,442 1,027,442\n"
+                "Cashbridge Global Leasing Company 772 772 772,136 772,136\n"
+                "Owolabi Awosan Olusegun 465 465 464,694 464,694\n"
+                "Daar Communications Limited 250 250 249,511 249,511\n"
+                "Hatleys Consults Limited 202 202 201,545 201,545\n"
+                "Banklink Africa Private Equity Limited 190 190 190,201 190,201\n"
+                "Haylett Perry Limited 138 138 138,311 138,311\n"
+                "Vidtesot Limited 93 93 93,113 93,113\n"
+                "Obasi Chimaobi Ogbonnaya 84 84 84,286 84,286\n"
+                "Adanijo Olanrewaju 82 82 82,392 82,392\n"
+                "Okoraofor Ezichi Sapphire 64 64 64,295 64,295\n"
+                "Olashore Taiwo Olagoke 51 51 50,923 50,923\n"
+                "Mzer Michael Terungwa 26 26 26,339 26,339\n"
+                "Adeoye Simileoluwa 26 26 26,339 26,339\n"
+                "Isaac Olowokere 4 4 3,659 3,659\n"
+                "Sokenu Evaristus Tolulope 1 1 896 896\n"
+                "Sylvant Limited 3 3 2,886 2,886\n"
+                "Claycounty 100 100 99,647 99,647\n"
+                "Walter Castle Limited 225 225 225,057 225,057\n"
+                "Kelmarid farms limited 202 202 201,768 201,768\n"
+                "5,000 5,000 5,000,000 5,000,000\n",
+                [],
+            )
+        ]
+    )
+
+    findings = reviewer.check_totals_and_rounding(document)
+
+    assert any(f.severity == "Passed" and "Share capital/shareholding table" in f.issue for f in findings)
+    assert not any(f.severity != "Passed" for f in findings)
+
+
+def test_share_capital_directors_report_table_flags_wrong_total():
+    document = PdfDocument(
+        [
+            PdfPage(
+                5,
+                "Directors' Report\nShare capital\nIssued\n"
+                "Alpha Limited 100 100 100,000 100,000\n"
+                "Beta Limited 200 200 200,000 200,000\n"
+                "302 300 300,000 300,000\n",
+                [],
+            )
+        ]
+    )
+
+    findings = reviewer.check_totals_and_rounding(document)
+
+    assert any(
+        f.category == "Totals and rounding"
+        and f.severity == "Medium"
+        and "Share capital or shareholding table total does not agree" in f.issue
+        for f in findings
+    )
+
+
+def test_share_capital_table_handles_dropped_repeated_small_amount():
+    document = PdfDocument(
+        [
+            PdfPage(
+                5,
+                "Directors' Report\nShare capital\nIssued\n"
+                "Alpha Limited 100 100 100,000 100,000\n"
+                "Beta Limited 200 200 200,000 200,000\n"
+                "Small Holder 3 2,886 2,886\n"
+                "303 303 302,886 302,886\n",
+                [],
+            )
+        ]
+    )
+
+    findings = reviewer.check_totals_and_rounding(document)
+
+    assert any(f.severity == "Passed" and "Extraction corrections applied" in f.evidence for f in findings)
+    assert not any(f.severity != "Passed" for f in findings)
+
+
 def test_changes_statement_page_is_inferred_from_contents_when_rotated():
     document = PdfDocument(
         [
