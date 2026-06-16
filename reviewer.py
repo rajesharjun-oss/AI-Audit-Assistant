@@ -329,7 +329,8 @@ def review_pdf(
         checks_performed.append("Cautious note-reference validation completed for primary statement note references.")
         checks_performed.append("Basic note reference and note amount agreement checks completed.")
     note_sections = _note_sections(document)
-    policy_findings, policy_export = review_notes_1_and_2(document, profile, note_sections)
+    policy_map = _accounting_policy_map(document)
+    policy_findings, policy_export = review_notes_1_and_2(document, profile, note_sections, policy_map=policy_map)
     findings.extend(policy_findings)
     if getattr(document, "skipped_table_details", None):
         checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables; details are listed in Skipped table details.")
@@ -475,7 +476,7 @@ def _build_result(
         "notes_heading_candidates": _notes_heading_candidate_rows(document),
         "primary_statement_pages": _format_primary_statement_debug(document),
         "ocr_statement_rows": _format_ocr_statement_rows_debug(document),
-        "note_agreement_results": _note_agreement_result_rows(document),
+        "note_agreement_results": _filtered_note_agreement_rows(document),
         "skipped_table_details": _skipped_table_detail_rows(document),
         "skipped_table_summary": _skipped_table_summary_rows(document),
         "detected_profile": infer_detected_profile(document),
@@ -1235,6 +1236,20 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     return rows
 
 
+def _filtered_note_agreement_rows(document: PdfDocument) -> list[dict[str, str]]:
+    rows = _note_agreement_result_rows(document)
+    filtered: list[dict[str, str]] = []
+    for row in rows:
+        result = str(row.get("Review result", ""))
+        reason = str(row.get("Reason", ""))
+        if result == "Internal note":
+            continue
+        if result == "Review prompt" and "low-confidence heading-only debug result" in reason.lower():
+            continue
+        filtered.append(row)
+    return filtered
+
+
 def _skipped_table_detail_rows(document: PdfDocument) -> list[dict[str, str]]:
     details = getattr(document, "skipped_table_details", []) or []
     rows: list[dict[str, str]] = []
@@ -1356,6 +1371,12 @@ def _note_agreement_result_row(
     has_note = "Yes" if item.ref else "No"
     review_req = "Yes" if item.ref else "No"
     comment = f"This line item is referenced to Note {item.ref}." if item.ref else "No note number."
+    reason_lower = reason.lower()
+    export_result = result
+    if result == "Skipped" and ("debug" in reason_lower or "low-confidence" in reason_lower):
+        export_result = "Internal note"
+    elif result == "Review prompt" and "low-confidence heading-only debug result" in reason_lower:
+        export_result = "Internal note"
 
     return {
         "Statement": item.statement_name,
@@ -1367,7 +1388,7 @@ def _note_agreement_result_row(
         "Has note?": has_note,
         "Review required?": review_req,
         "Comment": comment,
-        "Review result": result,
+        "Review result": export_result,
         "Reason": reason,
         "Current year amount found in referenced note?": current_found,
         "Prior year amount found in referenced note?": prior_found,
@@ -1741,6 +1762,8 @@ def _detect_principal_activities(text: str) -> str:
     lower = text.lower()
     if any(term in lower for term in ("cash reward", "consumer loyalty", "loyalty reward", "reward service")):
         return "Consumer loyalty and rewards / cash reward service"
+    if any(term in lower for term in ("rendering supervisory services", "supervisory services", "management of related entities", "related entities under the group structure", "group structure")):
+        return "Management of related entities, including supervisory and related group support services."
     if _professional_membership_activity_context(lower):
         return "Professional membership body, including member services, professional development, training, and certification."
     if any(term in lower for term in ("property investment", "investment property", "rental income", "income from property")):
@@ -1773,6 +1796,8 @@ def _professional_membership_activity_context(lower: str) -> bool:
 def _summarise_activity_sentence(extracted: str) -> str:
     normalized = re.sub(r"\s+", " ", extracted).strip(" .")
     lower = normalized.lower()
+    if any(term in lower for term in ("rendering supervisory services", "supervisory services", "management of related entities", "related entities", "group structure")):
+        return "Management of related entities, including supervisory and related group support services."
     if _professional_membership_activity_context(lower):
         return "Professional membership body, including member services, professional development, training, and certification."
     if any(term in lower for term in ("cash reward", "consumer loyalty", "loyalty reward", "reward service")):
@@ -6472,8 +6497,15 @@ def _statement_excluded_from_note_agreement(statement_name: str, page_text: str)
 
 def _clean_statement_line_item(text: str) -> str:
     cleaned = _statement_label(text)
+    cleaned = re.sub(r"\bdraft\b", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"\b(total|net)\b", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b(?:page|pages)\b\s*\d+\b", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b(?:continued|contd)\b", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b[a-z]\b$", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b(?:d|dr|draft)\s*$", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
+    if cleaned in {"assets", "liabilities", "equity", "equity and liabilities"}:
+        return ""
     return cleaned
 
 

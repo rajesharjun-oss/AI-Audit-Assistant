@@ -319,6 +319,8 @@ def _short_context(line: str, limit: int = 220) -> str:
 def _likely_ocr_name_artifact(name1: str, pages1: set[int], name2: str, pages2: set[int]) -> bool:
     if pages1 == pages2 and len(pages1) == 1:
         return True
+    if _single_page_token_artifact(name1, pages1, name2, pages2):
+        return True
     count1 = len(pages1)
     count2 = len(pages2)
     if count1 == count2:
@@ -332,6 +334,28 @@ def _likely_ocr_name_artifact(name1: str, pages1: set[int], name2: str, pages2: 
     if len(rare_pages) > 1 or len(common_pages_set) < 2:
         return False
     return _names_look_like_spelling_variants(rare_name, common_name)
+
+
+def _single_page_token_artifact(name1: str, pages1: set[int], name2: str, pages2: set[int]) -> bool:
+    if not (pages1 & pages2):
+        return False
+    rare_name, rare_pages, common_name, common_pages = (
+        (name1, pages1, name2, pages2) if len(pages1) < len(pages2) else (name2, pages2, name1, pages1)
+    )
+    if len(rare_pages) != 1 or len(common_pages) < 2:
+        return False
+    rare_tokens = _normalise_name_tokens(rare_name)
+    common_tokens = _normalise_name_tokens(common_name)
+    if len(rare_tokens) != len(common_tokens) or len(rare_tokens) < 2:
+        return False
+    differing_pairs = [(left, right) for left, right in zip(rare_tokens, common_tokens) if left != right]
+    if len(differing_pairs) != 1:
+        return False
+    left, right = differing_pairs[0]
+    if left[:1] != right[:1]:
+        return False
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    return len(longer) - len(shorter) == 1 and longer.startswith(shorter)
 
 
 def _suggest_standard_name(name1: str, pages1: set[int], name2: str, pages2: set[int]) -> str:

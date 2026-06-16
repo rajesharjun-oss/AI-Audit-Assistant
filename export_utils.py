@@ -34,6 +34,8 @@ def _looks_like_one_page_name_artifact(name1: str, pages1: set[int], name2: str,
         return False
     if not (pages1 & pages2):
         return False
+    if _single_page_token_artifact(name1, pages1, name2, pages2):
+        return True
     if len(pages1) == len(pages2):
         return len(pages1) == 1 and _name_similarity(name1, name2) >= 0.9
     rare_pages, common_pages = (pages1, pages2) if len(pages1) < len(pages2) else (pages2, pages1)
@@ -42,3 +44,23 @@ def _looks_like_one_page_name_artifact(name1: str, pages1: set[int], name2: str,
 
 def _name_similarity(name1: str, name2: str) -> float:
     return SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
+
+
+def _single_page_token_artifact(name1: str, pages1: set[int], name2: str, pages2: set[int]) -> bool:
+    rare_name, rare_pages, common_name, common_pages = (
+        (name1, pages1, name2, pages2) if len(pages1) < len(pages2) else (name2, pages2, name1, pages1)
+    )
+    if len(rare_pages) != 1 or len(common_pages) < 2:
+        return False
+    rare_tokens = re.findall(r"[A-Za-z]+", rare_name.lower())
+    common_tokens = re.findall(r"[A-Za-z]+", common_name.lower())
+    if len(rare_tokens) != len(common_tokens) or len(rare_tokens) < 2:
+        return False
+    diffs = [(left, right) for left, right in zip(rare_tokens, common_tokens) if left != right]
+    if len(diffs) != 1:
+        return False
+    left, right = diffs[0]
+    if left[:1] != right[:1]:
+        return False
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    return len(longer) - len(shorter) == 1 and longer.startswith(shorter)

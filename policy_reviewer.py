@@ -62,9 +62,62 @@ def _infer_expected_policies(nature_text: str, document_text: str = "") -> list[
         policies.extend(["financial instruments", "ECL", "fair value measurement"])
     return list(set(policies))
 
-def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_sections: dict[str, str]) -> tuple[list[Finding], list[dict[str, str]]]:
+TOPIC_POLICY_MAP = {
+    "Basis of preparation": None,
+    "Significant judgements and estimates": None,
+    "PPE": "ppe",
+    "Intangible assets": "intangibles",
+    "Financial instruments": "financial instruments",
+    "Receivables / ECL": "financial instruments",
+    "Tax": "tax",
+    "Revenue": "revenue",
+    "Contract liabilities": "revenue",
+    "Cash and cash equivalents": "financial instruments",
+}
+
+
+def _row_status(comment: str, suggested: str) -> str:
+    if "[missing policy]" in comment.lower():
+        return "Not elevated"
+    if suggested:
+        return "Review"
+    return "Observed"
+
+
+def _topic_expected(topic: str, expected_policies: list[str], document_text: str, nature_text: str) -> bool:
+    lower_expected = " | ".join(expected_policies).lower()
+    lower_doc = document_text.lower()
+    lower_nature = nature_text.lower()
+    if topic in {"Basis of preparation", "Significant judgements and estimates"}:
+        return True
+    if topic == "Revenue":
+        return any(term in lower_expected or term in lower_doc or term in lower_nature for term in ("revenue", "contract", "customer", "turnover", "income"))
+    if topic == "Contract liabilities":
+        return any(term in lower_doc for term in ("contract liability", "deferred revenue", "unearned revenue", "advance from customers"))
+    if topic == "Tax":
+        return any(term in lower_doc for term in ("tax", "taxation", "deferred tax", "current tax"))
+    if topic == "Cash and cash equivalents":
+        return any(term in lower_doc for term in ("cash and cash equivalents", "bank balance", "short-term deposit"))
+    if topic == "Receivables / ECL":
+        return any(term in lower_doc for term in ("receivable", "expected credit loss", "ecl", "loss allowance", "trade receivable"))
+    if topic == "Financial instruments":
+        return any(term in lower_doc for term in ("financial asset", "financial liability", "fvtpl", "fvoci", "amortised cost", "financial instrument"))
+    if topic == "PPE":
+        return any(term in lower_doc for term in ("property, plant", "ppe", "depreciation"))
+    if topic == "Intangible assets":
+        return any(term in lower_doc for term in ("intangible", "software", "amortisation", "amortization"))
+    return False
+
+
+def review_notes_1_and_2(
+    document: PdfDocument,
+    profile: CompanyProfile,
+    note_sections: dict[str, str],
+    policy_map: dict[str, bool] | None = None,
+) -> tuple[list[Finding], list[dict[str, str]]]:
     findings = []
     export_rows = []
+    policy_map = policy_map or {}
     
     note_1 = note_sections.get("1", "")
     note_2 = note_sections.get("2", "")
@@ -94,7 +147,8 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
             "Expected standard topic": ", ".join(expected_policies),
             "Industry alignment": industry_context_str,
             "Comment": f"Based on nature of business, expected policy areas include: {', '.join(expected_policies)}.",
-            "Suggested correction if needed": ""
+            "Suggested correction if needed": "",
+            "Review status": "Observed",
         })
 
     # Map the 10 specific policy topics!
@@ -141,7 +195,8 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
                 "Expected standard topic": "N/A",
                 "Industry alignment": "Possible boilerplate / other topic",
                 "Comment": "Reviewed but did not map strongly to the core 10 policy areas.",
-                "Suggested correction if needed": ""
+                "Suggested correction if needed": "",
+                "Review status": "Observed",
             })
             continue
             
@@ -152,19 +207,29 @@ def review_notes_1_and_2(document: PdfDocument, profile: CompanyProfile, note_se
                 "Expected standard topic": topic,
                 "Industry alignment": "Appears relevant",
                 "Comment": f"Paragraph addresses {topic}.",
-                "Suggested correction if needed": ""
+                "Suggested correction if needed": "",
+                "Review status": "Observed",
             })
 
     # Output missing core topics
     for topic in REQUIRED_TOPICS:
-        if topic not in found_topics:
-            export_rows.append({
-                "Paragraph reviewed": "[MISSING POLICY]",
-                "Standard mentioned": "N/A",
-                "Expected standard topic": topic,
-                "Industry alignment": "Missing core policy",
-                "Comment": f"The core policy '{topic}' was not clearly detected in Note 1 or 2.",
-                "Suggested correction if needed": f"Consider adding a policy paragraph for {topic} if applicable."
-            })
+        mapped_policy = TOPIC_POLICY_MAP.get(topic)
+        if mapped_policy and policy_map.get(mapped_policy):
+            continue
+        if topic in found_topics:
+            continue
+        if not _topic_expected(topic, expected_policies, doc_text, nature_of_business):
+            continue
+        suggested = f"Consider adding a policy paragraph for {topic} if applicable."
+        comment = f"[Missing policy] The core policy '{topic}' was not clearly detected in Note 1 or 2."
+        export_rows.append({
+            "Paragraph reviewed": "[MISSING POLICY]",
+            "Standard mentioned": "N/A",
+            "Expected standard topic": topic,
+            "Industry alignment": "Missing expected policy",
+            "Comment": comment,
+            "Suggested correction if needed": suggested,
+            "Review status": _row_status(comment, suggested),
+        })
             
     return findings, export_rows
