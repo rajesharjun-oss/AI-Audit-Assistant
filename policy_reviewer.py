@@ -15,6 +15,13 @@ STANDARD_TOPICS = {
     "IAS 24": ["related party", "key management personnel"]
 }
 
+NOTES_HEADING_PATTERNS = (
+    "notes to the financial statements",
+    "notes to financial statements",
+    "notes forming part of the financial statements",
+    "notes to the accounts",
+)
+
 def _extract_nature_of_business(document: PdfDocument, note_1_2_text: str) -> str:
     """Attempts to extract the nature of business from Note 1/2 or General Info."""
     text_lower = note_1_2_text.lower()
@@ -62,6 +69,126 @@ def _infer_expected_policies(nature_text: str, document_text: str = "") -> list[
         policies.extend(["financial instruments", "ECL", "fair value measurement"])
     return list(set(policies))
 
+
+def _policy_heading_from_note_text(note_text: str) -> str:
+    for line in str(note_text or "").splitlines():
+        clean = re.sub(r"\s+", " ", line).strip(" -:.")
+        if clean and len(clean) > 5:
+            return clean
+    return ""
+
+
+def _normalise_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _policy_paragraph_usable(paragraph: str) -> bool:
+    normalized = _normalise_text(paragraph)
+    if not normalized or len(normalized) < 40:
+        return False
+    header_markers = (
+        "directors report",
+        "independent auditor",
+        "statement of financial position",
+        "statement of profit or loss",
+        "statement of comprehensive income",
+        "statement of cash flows",
+        "statement of changes in equity",
+        "together with the directors",
+        "financial statements for the year ended",
+        "notes to the financial statements",
+        "value added statement",
+        "five year financial summary",
+    )
+    if any(marker in normalized[:220] for marker in header_markers):
+        return False
+    digit_count = sum(character.isdigit() for character in paragraph)
+    letter_count = sum(character.isalpha() for character in paragraph)
+    non_ascii_count = sum(1 for character in paragraph if ord(character) > 127)
+    if non_ascii_count > max(12, len(paragraph) // 10):
+        return False
+    if digit_count > max(18, int(letter_count * 0.4)):
+        return False
+    if normalized.count("n '000") >= 2 or normalized.count("n'000") >= 2:
+        return False
+    return True
+
+
+def _policy_chunks(note_text: str, prefix: str) -> list[str]:
+    if not note_text.strip():
+        return []
+    pattern = rf"(?=^\s*{re.escape(prefix)}\.\d+\b)"
+    parts = re.split(pattern, note_text, flags=re.M)
+    chunks = [part.strip() for part in parts if part.strip()]
+    return chunks if chunks else [note_text]
+
+
+def _policy_match_score(paragraph_lower: str, keywords: list[str]) -> int:
+    score = sum(1 for keyword in keywords if keyword in paragraph_lower)
+    head = paragraph_lower[:180]
+    score += sum(2 for keyword in keywords if keyword in head)
+    return score
+
+
+def _preview_around_keywords(paragraph: str, keywords: list[str], width: int = 200) -> str:
+    lower = paragraph.lower()
+    for keyword in keywords:
+        index = lower.find(keyword)
+        if index == -1:
+            continue
+        start = max(0, index - 40)
+        end = min(len(paragraph), index + width)
+        snippet = paragraph[start:end].strip()
+        return ("... " if start > 0 else "") + snippet + ("..." if end < len(paragraph) else "")
+    return paragraph[:200] + ("..." if len(paragraph) > 200 else "")
+
+
+def _notes_1_and_2_text(document: PdfDocument, note_sections: dict[str, str]) -> tuple[str, str]:
+    note_1 = str(note_sections.get("1", "") or "")
+    note_2 = str(note_sections.get("2", "") or "")
+    if not note_1 and not note_2:
+        return "", ""
+
+    pages = document.pages
+    note_2_heading = _policy_heading_from_note_text(note_2)
+    notes_start_page = None
+    fallback_notes_page = None
+    note_2_page = None
+
+    for page in pages:
+        page_lower = page.text.lower()
+        if any(marker in page_lower for marker in NOTES_HEADING_PATTERNS):
+            if fallback_notes_page is None:
+                fallback_notes_page = page.number
+            if notes_start_page is None and any(
+                marker in page_lower
+                for marker in ("material accounting policies", "significant accounting policies", "basis of preparation", "1.1", "1.2")
+            ):
+                notes_start_page = page.number
+    notes_start_page = notes_start_page or fallback_notes_page
+
+    for page in pages:
+        page_lower = page.text.lower()
+        if notes_start_page is None or page.number < notes_start_page:
+            continue
+        normalized_page = _normalise_text(page.text)
+        if note_2_page is None and (
+            re.search(r"(?:^|\n)\s*2[\).]?\s+(?:new\s+standards|standards\s+and\s+interpretations)\b", page.text, re.I)
+            or (note_2_heading and _normalise_text(note_2_heading[:60])[:35] in normalized_page)
+        ):
+            note_2_page = page.number
+
+    if note_1 and notes_start_page and note_2_page and note_2_page > notes_start_page:
+        middle_pages = [
+            page.text
+            for page in pages
+            if notes_start_page < page.number < note_2_page
+        ]
+        if middle_pages:
+            note_1 = "\n\n".join([note_1, *middle_pages]).strip()
+
+    return note_1, note_2
+
 TOPIC_POLICY_MAP = {
     "Basis of preparation": None,
     "Significant judgements and estimates": None,
@@ -73,6 +200,7 @@ TOPIC_POLICY_MAP = {
     "Revenue": "revenue",
     "Contract liabilities": "revenue",
     "Cash and cash equivalents": "financial instruments",
+    "Standards and interpretations": None,
 }
 
 
@@ -121,6 +249,7 @@ def review_notes_1_and_2(
     
     note_1 = note_sections.get("1", "")
     note_2 = note_sections.get("2", "")
+    note_1, note_2 = _notes_1_and_2_text(document, note_sections)
     
     # Also include any sub-notes like 1.1, 2.1, 2.2 etc.
     subnotes_1 = [v for k, v in note_sections.items() if str(k).startswith("1.") or str(k).startswith("1A") or str(k).startswith("1B")]
@@ -162,12 +291,21 @@ def review_notes_1_and_2(
         "Tax": ["taxation", "income tax", "deferred tax", "current tax", "tax expense"],
         "Revenue": ["revenue", "performance obligation", "contract with customer", "sale of goods", "rendering of services"],
         "Contract liabilities": ["contract liabilit", "deferred revenue", "advance", "unearned"],
-        "Cash and cash equivalents": ["cash and cash", "cash equivalent", "bank balance", "short-term deposit"]
+        "Cash and cash equivalents": ["cash and cash", "cash equivalent", "bank balance", "short-term deposit"],
+        "Standards and interpretations": ["new standards", "standards and interpretations", "not yet effective", "effective and adopted", "amendments to", "interpretations effective"],
     }
     
     # Check paragraphs against topics
-    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', combined_text) if p.strip()]
+    combined_text = "\n\n".join(part for part in (note_1, note_2) if part.strip()).strip() or combined_text
+    policy_candidates = [
+        *(_policy_chunks(note_1, "1") if note_1 else []),
+        *(_policy_chunks(note_2, "2") if note_2 else []),
+    ]
+    if not policy_candidates:
+        policy_candidates = [p.strip() for p in re.split(r'\n\s*\n', combined_text) if p.strip()]
+    paragraphs = [p for p in policy_candidates if _policy_paragraph_usable(p)]
     found_topics = set()
+    topic_matches: dict[str, tuple[int, str, str]] = {}
     
     for para in paragraphs:
         if len(para) < 30:
@@ -188,28 +326,27 @@ def review_notes_1_and_2(
         mentioned_standards = list(dict.fromkeys(mentioned_standards))
         standards_str = ", ".join(mentioned_standards) if mentioned_standards else "None specifically cited"
         
-        if not matched_topics:
-            export_rows.append({
-                "Paragraph reviewed": para[:200] + ("..." if len(para) > 200 else ""),
-                "Standard mentioned": standards_str,
-                "Expected standard topic": "N/A",
-                "Industry alignment": "Possible boilerplate / other topic",
-                "Comment": "Reviewed but did not map strongly to the core 10 policy areas.",
-                "Suggested correction if needed": "",
-                "Review status": "Observed",
-            })
-            continue
-            
         for topic in matched_topics:
-            export_rows.append({
-                "Paragraph reviewed": para[:200] + ("..." if len(para) > 200 else ""),
-                "Standard mentioned": standards_str,
-                "Expected standard topic": topic,
-                "Industry alignment": "Appears relevant",
-                "Comment": f"Paragraph addresses {topic}.",
-                "Suggested correction if needed": "",
-                "Review status": "Observed",
-            })
+            keyword_score = _policy_match_score(para_lower, REQUIRED_TOPICS[topic])
+            existing = topic_matches.get(topic)
+            preview = _preview_around_keywords(para, REQUIRED_TOPICS[topic])
+            if existing is None or keyword_score > existing[0]:
+                topic_matches[topic] = (keyword_score, preview, standards_str)
+
+    for topic in REQUIRED_TOPICS:
+        match = topic_matches.get(topic)
+        if not match:
+            continue
+        _score, preview, standards_str = match
+        export_rows.append({
+            "Paragraph reviewed": preview,
+            "Standard mentioned": standards_str,
+            "Expected standard topic": topic,
+            "Industry alignment": "Appears relevant",
+            "Comment": f"Paragraph addresses {topic}.",
+            "Suggested correction if needed": "",
+            "Review status": "Observed",
+        })
 
     # Output missing core topics
     for topic in REQUIRED_TOPICS:

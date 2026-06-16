@@ -476,7 +476,7 @@ def _build_result(
         "notes_heading_candidates": _notes_heading_candidate_rows(document),
         "primary_statement_pages": _format_primary_statement_debug(document),
         "ocr_statement_rows": _format_ocr_statement_rows_debug(document),
-        "note_agreement_results": _filtered_note_agreement_rows(document),
+        "note_agreement_results": _filtered_note_agreement_rows(document, findings),
         "skipped_table_details": _skipped_table_detail_rows(document),
         "skipped_table_summary": _skipped_table_summary_rows(document),
         "detected_profile": infer_detected_profile(document),
@@ -1236,14 +1236,31 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     return rows
 
 
-def _filtered_note_agreement_rows(document: PdfDocument) -> list[dict[str, str]]:
+def _filtered_note_agreement_rows(document: PdfDocument, findings: list[Finding] | None = None) -> list[dict[str, str]]:
     rows = _note_agreement_result_rows(document)
+    note_prompt_keys = {
+        str((finding.metadata or {}).get("line_key", "")).strip()
+        for finding in (findings or [])
+        if finding.category == "Notes agreement" and finding.metadata and finding.metadata.get("line_key")
+    }
     filtered: list[dict[str, str]] = []
     for row in rows:
         result = str(row.get("Review result", ""))
         reason = str(row.get("Reason", ""))
+        confidence = str(row.get("Match confidence", ""))
         if result == "Internal note":
             continue
+        if result == "Review prompt" and confidence.lower() == "low":
+            continue
+        if result == "Review prompt" and note_prompt_keys:
+            row_note = str(row.get("Note number", "")).strip()
+            row_line = str(row.get("Line item description", "")).strip().lower()
+            matching_key = any(
+                key.startswith(f"{row_note}|") and row_line in key.lower()
+                for key in note_prompt_keys
+            )
+            if not matching_key:
+                continue
         if result == "Review prompt" and "low-confidence heading-only debug result" in reason.lower():
             continue
         filtered.append(row)
@@ -1927,33 +1944,30 @@ def check_primary_statement_consistency(
         skipped.extend(page_skipped)
         
     # Value Added Statement cross-check
-    vas_page = None
-    for page in document.pages:
-        head = "\n".join(page.text.splitlines()[:15]).lower()
-        if "value added" in head:
-            vas_page = page
-            break
+    vas_page = next((page for page in document.pages if _looks_like_value_added_page(page.text)), None)
             
     if vas_page:
         pl_page = _find_statement_page(document, income_stmt_name)
         if pl_page:
-            pl_rows = _statement_rows(pl_page.text)
-            pl_amounts = _row_amounts_any(pl_rows, ["finance cost", "interest expense", "finance costs"])
+            pl_amounts, pl_line = _line_amount_for_aliases(pl_page.text, ("interest expense", "finance cost", "finance costs"))
             if pl_amounts:
-                pl_finance_cost = pl_amounts[-1]
-                vas_rows = _statement_rows(vas_page.text)
-                vas_amounts = _row_amounts_any(vas_rows, ["interest expense", "interest", "finance cost", "interest payable", "providers of capital", "interest paid"])
+                pl_finance_cost = pl_amounts[0]
+                vas_amounts, vas_line = _line_amount_for_aliases(
+                    vas_page.text,
+                    ("interest expense", "interest", "finance cost", "interest payable", "providers of capital", "interest paid"),
+                )
                 if vas_amounts:
-                    vas_finance_cost = vas_amounts[-1]
+                    vas_finance_cost = vas_amounts[0]
+                    performed.append("Value Added Statement: interest expense compared with primary statement where readable.")
                     if abs(abs(vas_finance_cost) - abs(pl_finance_cost)) > tolerance:
                         findings.append(
                             Finding(
-                                "Review prompt",
-                                "Low",
                                 "Value Added Statement",
-                                "Interest expense in Value Added Statement does not match P&L.",
-                                f"P&L shows {pl_finance_cost:,}, but Value Added Statement shows {vas_finance_cost:,}.",
-                                "Review both statements and confirm whether the difference is expected (e.g., cash paid vs incurred)."
+                                "Medium",
+                                f"Page {vas_page.number} | Value Added Statement",
+                                f"Value Added Statement shows interest expense of {abs(vas_finance_cost):,}, while the primary statement shows {abs(pl_finance_cost):,}.",
+                                f"Value Added Statement line: {vas_line} | Primary statement line: {pl_line}",
+                                "Review whether the Value Added Statement label, classification, or amount is appropriate.",
                             )
                         )
                         
@@ -2921,29 +2935,56 @@ def _ignore_formatting_line(line: str) -> bool:
 
 def _check_note_contradictions(document: PdfDocument) -> list[Finding]:
     findings: list[Finding] = []
-    text = document.text
-    # Norrenberger specific check: cash and cash equivalents was nil
-    if re.search(r"cash and cash equivalents (was|is) nil\b", text, re.I):
-        # Find closing cash from cash flow statement
-        cf_page = _find_statement_page(document, "Statement of cash flows")
-        if cf_page:
-            rows = _statement_rows(cf_page.text)
-            cl_aliases = [
-                "total cash at end of the year", "cash at end of the year", 
-                "cash and cash equivalents at end of year", "closing cash", "cash and cash equivalents at the end of the year"
-            ]
-            closing_amounts = _row_amounts_any(rows, cl_aliases)
-            if closing_amounts and closing_amounts[-1] != 0:
-                findings.append(
-                    Finding(
-                        "Narrative consistency",
-                        "Medium",
-                        "Notes to the financial statements",
-                        "Note narrative contradicts cash flow table amount.",
-                        f"A note states that cash and cash equivalents was nil, but the statement of cash flows reports {closing_amounts[-1]:,}.",
-                        "Correct the note narrative or the reported table amount to remove the contradiction."
-                    )
-                )
+    note_sections = _note_sections(document)
+    headings = _note_headings_by_page(document)
+    nil_patterns = (
+        r"\bwas nil\b",
+        r"\bis nil\b",
+        r"\bamounted to nil\b",
+        r"\bno balance\b",
+        r"\bnone\b",
+        r"\bzero\b",
+    )
+    comparative_markers = (
+        "comparative",
+        "prior year",
+        "previous year",
+        "did not commence",
+        "until the financial year under review",
+        "resulting in a nil comparative balance",
+        "as at 31 december 2024",
+        "as at 31 december 2023",
+    )
+    for ref, section in note_sections.items():
+        title, page_number = headings.get(ref, ("", 0))
+        if not title or not section:
+            continue
+        lines = [re.sub(r"\s+", " ", line).strip() for line in section.splitlines() if line.strip()]
+        contradiction_line = ""
+        for line in lines[:12]:
+            lower = line.lower()
+            if any(marker in lower for marker in comparative_markers):
+                continue
+            if any(re.search(pattern, lower, re.I) for pattern in nil_patterns):
+                contradiction_line = line
+                break
+        if not contradiction_line:
+            continue
+        non_zero_amounts = [amount for amount in _amounts_in_text(section) if abs(amount) > Decimal("1")]
+        if not non_zero_amounts:
+            continue
+        largest = max(non_zero_amounts, key=lambda amount: abs(amount))
+        findings.append(
+            Finding(
+                "Narrative consistency",
+                "Medium",
+                f"Page {page_number or 'Unknown'} | Note {ref}",
+                f"Note {ref} states that a balance was nil, but the same note table shows a non-zero amount.",
+                f"{contradiction_line} | Note heading: {title} | Non-zero amount detected in same note: {largest:,.0f}",
+                "Review the narrative disclosure against the note table and correct the wording or the amount presentation.",
+            )
+        )
+        break
     return findings
 
 def check_notes_agreement(
@@ -4940,6 +4981,35 @@ def _row_amounts_any(rows: dict[str, list[Decimal]], labels: tuple[str, ...]) ->
         if amounts:
             return amounts
     return []
+
+
+def _line_amount_for_aliases(text: str, aliases: tuple[str, ...]) -> tuple[list[Decimal], str]:
+    alias_norms = [_normalise_match_words(alias) for alias in aliases]
+    for line in text.splitlines():
+        raw_line = re.sub(r"\s+", " ", line).strip()
+        if not raw_line:
+            continue
+        note_ref, ref_start, ref_end = _detect_statement_row_note_token(line)
+        label_source = line[:ref_start] if note_ref else line
+        label = _normalise_match_words(_statement_label(label_source))
+        if not label:
+            continue
+        if not any(label == alias or label.startswith(alias) or alias in label for alias in alias_norms):
+            continue
+        amount_source = f"{line[:ref_start]} {line[ref_end:]}" if note_ref else line
+        amounts = [_parse_decimal(token) for token in _amount_tokens_from_statement_line(amount_source)]
+        parsed = [amount for amount in amounts if amount is not None and abs(amount) < Decimal("100000000")]
+        if parsed:
+            return parsed[:2], raw_line
+    return [], ""
+
+
+def _looks_like_value_added_page(text: str) -> bool:
+    header = "\n".join(text.splitlines()[:12]).lower()
+    return bool(
+        re.search(r"^\s*(statement of value added|value added statement)\b", header, re.I | re.M)
+        or re.search(r"\bvalue added\b", header, re.I) and "statement" in header
+    )
 
 
 def _sum_row_amounts(rows: dict[str, list[Decimal]], labels: tuple[str, ...]) -> list[Decimal]:

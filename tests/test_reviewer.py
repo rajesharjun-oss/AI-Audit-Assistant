@@ -49,6 +49,61 @@ def test_name_consistency_suppresses_single_page_ocr_artifact_when_canonical_exi
     assert not any("Lait Labode" in str(row) for row in export["names"])
 
 
+def test_note_narrative_contradiction_flags_nil_text_against_same_note_amount():
+    document = PdfDocument(
+        [
+            PdfPage(
+                15,
+                "Notes to the Financial Statements\n"
+                "3. Cash and cash equivalents\n"
+                "Cash and cash equivalents at the end of the reporting period was nil.\n"
+                "Cash on hand 1,000\n"
+                "Bank balances 326,625\n"
+                "Short-term deposits 2,588,842\n"
+                "2,916,467",
+                [],
+            )
+        ]
+    )
+
+    findings = reviewer._check_note_contradictions(document)
+
+    assert any(finding.category == "Narrative consistency" and "nil" in finding.evidence.lower() for finding in findings)
+
+
+def test_value_added_interest_expense_difference_is_review_prompt_not_casting_error():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Acme Limited\n"
+                "Statement of profit or loss\n"
+                "2025 2024\n"
+                "Revenue 500 400\n"
+                "Interest expense (737,539) -\n"
+                "Profit before taxation 100 -\n"
+                "Taxation (10) -\n"
+                "Profit for the year 90 -",
+                [],
+            ),
+            PdfPage(
+                2,
+                "Value Added Statement\n"
+                "2025 2024\n"
+                "Management fee income 1,219,571 -\n"
+                "Interest expense (2,009,024) -\n"
+                "Other operating income 1,461,391 -",
+                [],
+            ),
+        ]
+    )
+
+    findings, performed, _skipped = check_primary_statement_consistency(document)
+
+    assert any("Value Added Statement" in check for check in performed)
+    assert any(finding.category == "Value Added Statement" and finding.severity == "Medium" for finding in findings)
+
+
 def test_footnote_asterisks_are_not_unreadable_placeholders():
     document = PdfDocument(
         [
