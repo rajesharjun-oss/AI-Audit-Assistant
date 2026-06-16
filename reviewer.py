@@ -268,6 +268,10 @@ def review_pdf(
     findings: list[Finding] = []
     checks_performed: list[str] = []
     checks_skipped: list[str] = []
+    rotated_pages = getattr(document, "rotated_page_details", []) or []
+    if rotated_pages:
+        page_summary = ", ".join(f"Page {item['page']} ({item['rotation']}deg)" for item in rotated_pages)
+        checks_performed.append(f"Auto-rotation recovery applied during extraction: {page_summary}.")
     note_validation_debug = _note_validation_debug(document, options.run_cautious_note_agreement, [])
     document_scope = _document_scope(document)
     limited_scope_extract = document_scope == "Limited-scope statement extract"
@@ -447,6 +451,7 @@ def _build_result(
         
     positive_assurance = _positive_assurance_text(findings, checks_performed_list)
     note_validation_debug = note_validation_debug or _note_validation_debug(document, False, [])
+    rotated_pages = getattr(document, "rotated_page_details", []) or []
     metrics = {
         "document_scope": _document_scope(document),
         "pages": len(document.pages),
@@ -465,6 +470,7 @@ def _build_result(
         "ocr_used": "Yes" if document.ocr_used else "No",
         "ocr_pages": document.ocr_pages,
         "ocr_tables": document.ocr_tables,
+        "rotated_pages": rotated_pages,
         "tables": sum(len(page.tables) for page in document.pages),
         "findings": len(findings),
         "high": sum(1 for item in findings if item.severity == "High"),
@@ -4340,26 +4346,40 @@ def _check_accumulated_fund_text(
     stmt_name = "Statement of changes in equity" if is_company else "Statement of changes in accumulated fund"
     word_fund = "equity" if is_company else "accumulated fund"
     
-    balance_rows = [(line, _amounts_from_statement_line(line)) for line in lines if any(k in line.lower() for k in ["balance as at", "balance at", "opening total equity", "closing total equity", "1 january", "31 december"])]
-    surplus_rows = [(line, _amounts_from_statement_line(line)) for line in lines if any(k in line.lower() for k in ["surplus for the year", "profit for the year", "profit/(loss) for the year"])]
+    balance_rows = [
+        (idx, line, _amounts_from_statement_line(line))
+        for idx, line in enumerate(lines)
+        if any(k in line.lower() for k in ["balance as at", "balance at", "opening total equity", "closing total equity", "1 january", "31 december"])
+    ]
+    surplus_rows = [
+        (idx, line, _amounts_from_statement_line(line))
+        for idx, line in enumerate(lines)
+        if any(k in line.lower() for k in ["surplus for the year", "profit for the year", "profit/(loss) for the year"])
+    ]
     
     if len(balance_rows) >= 2 and len(surplus_rows) >= 1:
-        opening_2025 = balance_rows[-2][1]
-        closing_2025 = balance_rows[-1][1]
-        surplus_2025 = surplus_rows[-1][1]
+        opening_idx, _, opening_2025 = balance_rows[-2]
+        closing_idx, _, closing_2025 = balance_rows[-1]
+        _, _, surplus_2025 = surplus_rows[-1]
+        direct_equity_movement = _equity_direct_movement_amount(lines[opening_idx + 1 : closing_idx])
         if len(opening_2025) >= 4 and len(closing_2025) >= 4 and surplus_2025:
-            expected_total = opening_2025[-1] + surplus_2025[-1]
+            expected_total = opening_2025[-1] + surplus_2025[-1] + direct_equity_movement
             reported_total = closing_2025[-1]
             diff = expected_total - reported_total
             if abs(diff) > tolerance:
+                movement_text = (
+                    f" + direct equity movements {direct_equity_movement:,}"
+                    if direct_equity_movement
+                    else ""
+                )
                 findings.append(
                     Finding(
                         "Calculation",
                         "High" if abs(diff) > tolerance * 5 else "Medium",
                         stmt_name,
                         f"Closing {word_fund} does not agree to opening {word_fund} plus surplus.",
-                        f"Reported closing {reported_total:,}; expected {expected_total:,} (opening {opening_2025[-1]:,} + surplus {surplus_2025[-1]:,}). Difference: {diff:,}.",
-                        f"Check if there are prior year adjustments, dividends, or other comprehensive income lines modifying {word_fund}.",
+                        f"Reported closing {reported_total:,}; expected {expected_total:,} (opening {opening_2025[-1]:,} + surplus {surplus_2025[-1]:,}{movement_text}). Difference: {diff:,}.",
+                        f"Check if there are prior year adjustments, capital contributions, dividends, or other comprehensive income lines modifying {word_fund}.",
                     )
                 )
             else:
@@ -4397,6 +4417,39 @@ def _check_accumulated_fund_text(
 
     skipped.append(f"{stmt_name}: Page {page.number} skipped because rotated/OCR table structure was not confidently parsed.")
     return findings, performed, skipped
+
+
+def _equity_direct_movement_amount(lines: list[str]) -> Decimal:
+    movement_lines: list[list[Decimal]] = []
+    preferred_lines: list[list[Decimal]] = []
+    for line in lines:
+        lower = line.lower()
+        if not any(
+            marker in lower
+            for marker in (
+                "contribution by owners",
+                "contributions by and distributions to owners",
+                "distribution to owners",
+                "directly in equity",
+                "dividend",
+                "issue of shares",
+                "share premium",
+            )
+        ):
+            continue
+        amounts = _amounts_from_statement_line(line)
+        if not amounts:
+            continue
+        movement_lines.append(amounts)
+        if "total contributions" in lower or "distributions to owners" in lower or "directly in equity" in lower:
+            preferred_lines.append(amounts)
+    selected = preferred_lines or movement_lines
+    if not selected:
+        return Decimal("0")
+    last_amounts = [amounts[-1] for amounts in selected if amounts]
+    if not last_amounts:
+        return Decimal("0")
+    return max(last_amounts, key=lambda value: abs(value))
 
 
 

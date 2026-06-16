@@ -18,6 +18,25 @@ from models import PdfDocument, PdfPage, ReviewOptions
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
+FINANCIAL_OCR_WORDS = {
+    "statement",
+    "changes",
+    "equity",
+    "capital",
+    "premium",
+    "reserve",
+    "accumulated",
+    "loss",
+    "profit",
+    "income",
+    "balance",
+    "january",
+    "december",
+    "share",
+    "total",
+    "company",
+    "financial",
+}
 
 
 def extract_pdf(path: str | Path) -> PdfDocument:
@@ -25,32 +44,52 @@ def extract_pdf(path: str | Path) -> PdfDocument:
     fast_pages = _extract_text_fast(path)
 
     pages: list[PdfPage] = []
-    with pdfplumber.open(str(path)) as pdf:
-        for index, page in enumerate(pdf.pages, start=1):
-            fast_text = fast_pages[index - 1].text if fast_pages and index - 1 < len(fast_pages) else ""
-            text = page.extract_text(x_tolerance=1, y_tolerance=3) or fast_text
-            if not text.strip():
-                pages.append(PdfPage(index, "", []))
-                continue
-            tables = page.extract_tables() or []
-            cleaned_tables = [
-                [[_clean_cell(cell) for cell in row] for row in table if any(row)]
-                for table in tables
-            ]
-            
-            # If the extracted tables don't have good column structure, fallback to text lines
-            has_good_structure = False
-            for table in cleaned_tables:
-                if sum(1 for row in table if len(row) >= 2) >= 3:
-                    has_good_structure = True
-                    break
-            
-            if not cleaned_tables or not has_good_structure:
-                cleaned_tables = _tables_from_text_lines(text)
-            pages.append(PdfPage(index, text, cleaned_tables))
+    rotated_page_details: list[dict[str, object]] = []
+    executable = _resolve_tesseract()
+    fitz_source = fitz.open(str(path)) if executable else None
+    if executable:
+        pytesseract.pytesseract.tesseract_cmd = executable
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for index, page in enumerate(pdf.pages, start=1):
+                fast_text = fast_pages[index - 1].text if fast_pages and index - 1 < len(fast_pages) else ""
+                text = page.extract_text(x_tolerance=1, y_tolerance=3) or fast_text
+                if not text.strip():
+                    pages.append(PdfPage(index, "", []))
+                    continue
+                tables = page.extract_tables() or []
+                cleaned_tables = [
+                    [[_clean_cell(cell) for cell in row] for row in table if any(row)]
+                    for table in tables
+                ]
+
+                if executable and fitz_source and _should_retry_with_rotated_ocr(text):
+                    ocr_text, ocr_tables, rotation = _ocr_page_best_rotation(fitz_source[index - 1], 200)
+                    if _ocr_text_quality_score(ocr_text) >= _ocr_text_quality_score(text) + 8:
+                        text = ocr_text
+                        cleaned_tables = ocr_tables
+                        rotated_page_details.append({"page": index, "rotation": rotation})
+
+                # If the extracted tables don't have good column structure, fallback to text lines
+                has_good_structure = False
+                for table in cleaned_tables:
+                    if sum(1 for row in table if len(row) >= 2) >= 3:
+                        has_good_structure = True
+                        break
+
+                if not cleaned_tables or not has_good_structure:
+                    cleaned_tables = _tables_from_text_lines(text)
+                pages.append(PdfPage(index, text, cleaned_tables))
+    finally:
+        if fitz_source is not None:
+            fitz_source.close()
     if pages:
-        return PdfDocument(pages)
-    return PdfDocument(fast_pages or [])
+        document = PdfDocument(pages)
+        setattr(document, "rotated_page_details", rotated_page_details)
+        return document
+    document = PdfDocument(fast_pages or [])
+    setattr(document, "rotated_page_details", rotated_page_details)
+    return document
 
 
 def extract_pdf_with_ocr(
@@ -98,12 +137,14 @@ def extract_pdf_with_ocr(
             ocr_tables=sum(len(page.tables) for page in pages),
             ocr_error=f"OCR failed after {ocr_pages} page(s): {exc}",
         )
-    return PdfDocument(
+    result = PdfDocument(
         pages,
         ocr_used=ocr_pages > 0,
         ocr_pages=ocr_pages,
         ocr_tables=sum(len(page.tables) for page in pages),
     )
+    setattr(result, "rotated_page_details", getattr(base_document, "rotated_page_details", []))
+    return result
 
 
 def _extract_text_fast(path: Path) -> list[PdfPage] | None:
@@ -143,6 +184,58 @@ def _ocr_page(page: object, dpi: int) -> tuple[str, list[list[list[str]]]]:
     text = "\n".join(line["text"] for line in lines)
     tables = _reconstruct_ocr_tables(lines)
     return text, tables
+
+
+def _ocr_page_best_rotation(page: object, dpi: int) -> tuple[str, list[list[list[str]]], int]:
+    dpi = max(120, min(dpi, 300))
+    best_text = ""
+    best_tables: list[list[list[str]]] = []
+    best_score = float("-inf")
+    best_rotation = 0
+    for rotation in (0, 90, 270, 180):
+        matrix = fitz.Matrix(dpi / 72, dpi / 72).prerotate(rotation)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        with Image.open(BytesIO(pixmap.tobytes("png"))) as image:
+            image = image.convert("L")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                data = pytesseract.image_to_data(image, config="--oem 3 --psm 6", output_type=pytesseract.Output.DICT)
+        lines = _ocr_lines_from_data(data)
+        text = "\n".join(line["text"] for line in lines)
+        score = _ocr_text_quality_score(text)
+        if score > best_score:
+            best_score = score
+            best_text = text
+            best_tables = _reconstruct_ocr_tables(lines)
+            best_rotation = rotation
+    return best_text, best_tables, best_rotation
+
+
+def _should_retry_with_rotated_ocr(text: str) -> bool:
+    sample = text[:2500]
+    if not sample.strip():
+        return False
+    if "â‚¬" in sample or "â€" in sample or "€" in sample:
+        return True
+    tokens = re.findall(r"[A-Za-z]{3,}", sample)
+    if len(tokens) < 20:
+        return False
+    recognisable = sum(1 for token in tokens if token.lower() in FINANCIAL_OCR_WORDS)
+    odd_markers = len(re.findall(r"[â‚¬Â¢Â£Â¥]|[A-Za-z]{1,2}[â€˜â€™][A-Za-z]{1,3}|000,,|,,N", sample))
+    return odd_markers >= 3 and recognisable <= 6
+
+
+def _ocr_text_quality_score(text: str) -> int:
+    if not text.strip():
+        return 0
+    tokens = re.findall(r"[A-Za-z]{3,}", text)
+    numbers = NUMBER_RE.findall(text)
+    recognisable = sum(1 for token in tokens if token.lower() in FINANCIAL_OCR_WORDS)
+    odd_markers = len(re.findall(r"[â‚¬Â¢Â£Â¥]|[â€˜â€™]|�", text))
+    score = min(len(tokens), 80) + min(len(numbers) * 2, 60) + recognisable * 8 - odd_markers * 10
+    if "statement of changes in equity" in text.lower():
+        score += 50
+    return score
 
 
 def _ocr_lines_from_data(data: dict[str, list[object]]) -> list[dict[str, object]]:

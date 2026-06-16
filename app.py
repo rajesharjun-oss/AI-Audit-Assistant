@@ -325,6 +325,7 @@ def _build_excel_export(result) -> bytes:
     detected_profile = result.metrics.get("detected_profile", {})
     profile_rows = [{"Field": key, "Detected value": value} for key, value in detected_profile.items()] if isinstance(detected_profile, dict) else []
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
         exception_rows = _finding_rows(result) or [
             {
@@ -396,7 +397,6 @@ def _build_excel_export(result) -> bytes:
         pd.DataFrame(skipped_summary_rows).to_excel(writer, sheet_name="Skipped checks summary", index=False)
         skipped_table_rows = result.metrics.get("skipped_table_details", []) or [{"Page": "None", "Reason skipped": "No table-specific skips recorded."}]
         pd.DataFrame(skipped_table_rows).to_excel(writer, sheet_name="Skipped table details", index=False)
-        pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
             for cell in worksheet[1]:

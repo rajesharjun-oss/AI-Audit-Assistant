@@ -1862,6 +1862,37 @@ def test_changes_statement_page_is_inferred_from_contents_when_rotated():
     assert page.number == 16
 
 
+def test_rotated_gibberish_page_is_marked_for_ocr_retry():
+    gibberish = "(â‚¬8zâ€˜6â‚¬L) = (p16â€˜E0rT) TTHPEE= i z pT8IZ7â€˜E6OLrTT"
+    clean = "Statement of Changes in Equity\nBalance at 1 January 2025 5,000 10,000"
+
+    assert extraction._should_retry_with_rotated_ocr(gibberish)
+    assert not extraction._should_retry_with_rotated_ocr(clean)
+
+
+def test_changes_in_equity_check_includes_direct_equity_movements():
+    page = PdfPage(
+        16,
+        "Statement of Changes in Equity\n"
+        "Balance at 1 January 2025 5,000 1,670,895 1,675,895 179,284 (1,103,914) 751,265\n"
+        "Profit for the year - - - - 341,832 341,832\n"
+        "Contribution by owners of the Company - 57,298 57,298 - - 57,298\n"
+        "Balance at 31 December 2025 5,000 1,728,193 1,733,193 179,284 (762,082) 1,150,395\n",
+        [],
+    )
+
+    findings, performed, skipped = reviewer._check_accumulated_fund_text(
+        page,
+        Decimal("1"),
+        False,
+        PdfDocument([page]),
+    )
+
+    assert performed
+    assert not skipped
+    assert not findings
+
+
 def test_note_heading_inferred_when_extraction_drops_note_number():
     document = PdfDocument(
         [
