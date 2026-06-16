@@ -1739,8 +1739,12 @@ def _detect_entity_type(text: str) -> str:
 
 def _detect_principal_activities(text: str) -> str:
     lower = text.lower()
-    if "celd" in lower or "cash reward" in lower or "consumer loyalty" in lower:
+    if any(term in lower for term in ("cash reward", "consumer loyalty", "loyalty reward", "reward service")):
         return "Consumer loyalty and rewards / cash reward service"
+    if _professional_membership_activity_context(lower):
+        return "Professional membership body, including member services, professional development, training, and certification."
+    if any(term in lower for term in ("property investment", "investment property", "rental income", "income from property")):
+        return "Property investment and related rental income activities."
     
     matches = list(re.finditer(r"(?:principal activities|nature of business|principal activity)[\s\S]{1,300}?(?:\\n\\n|\.\s)", text, re.I))
     if matches:
@@ -1751,8 +1755,33 @@ def _detect_principal_activities(text: str) -> str:
         if "directors" in extracted.lower() or "report" in extracted.lower() or "general information" in extracted.lower():
             pass
         else:
-            return extracted.strip()
+            return _summarise_activity_sentence(extracted)
     return ""
+
+
+def _professional_membership_activity_context(lower: str) -> bool:
+    membership_terms = ("membership", "members", "fellows", "associates", "subscriptions")
+    activity_terms = ("training", "certification", "professional development", "member services", "professional body")
+    entity_terms = ("institute", "council", "association", "professional")
+    return (
+        any(term in lower for term in membership_terms)
+        and any(term in lower for term in activity_terms)
+        and any(term in lower for term in entity_terms)
+    )
+
+
+def _summarise_activity_sentence(extracted: str) -> str:
+    normalized = re.sub(r"\s+", " ", extracted).strip(" .")
+    lower = normalized.lower()
+    if _professional_membership_activity_context(lower):
+        return "Professional membership body, including member services, professional development, training, and certification."
+    if any(term in lower for term in ("cash reward", "consumer loyalty", "loyalty reward", "reward service")):
+        return "Consumer loyalty and rewards / cash reward service"
+    if any(term in lower for term in ("property investment", "investment property", "rental income", "income from property")):
+        return "Property investment and related rental income activities."
+    if len(normalized) > 180:
+        return normalized[:177].rsplit(" ", 1)[0].rstrip(" ,;") + "..."
+    return normalized
 
 
 
@@ -2018,7 +2047,11 @@ def _check_simple_note_text_casting(page: PdfPage, tolerance: Decimal) -> list[F
             line = re.sub(r"\s+", " ", raw_line.strip())
             if not line:
                 continue
+            if checked_columns and re.match(r"^\d{1,2}\.\d+\b", line):
+                break
             normalized = _normalise_match_words(line)
+            if checked_columns and _simple_note_text_after_total_narrative(normalized):
+                break
             if _simple_note_text_line_boundary(normalized):
                 component_rows = []
                 continue
@@ -2040,7 +2073,15 @@ def _check_simple_note_text_casting(page: PdfPage, tolerance: Decimal) -> list[F
                             mismatches.append(
                                 f"Note {note_ref} {heading}, column {col + 1}: reported {reported:,}, visible sum {expected:,}, difference {diff:,}"
                             )
-                component_rows = []
+                    if all(
+                        abs(amounts[col] - sum(row_amounts[col] for _label, row_amounts in component_rows)) <= tolerance
+                        for col in range(width)
+                    ):
+                        component_rows = [(label or "subtotal", amounts)]
+                    else:
+                        component_rows = []
+                else:
+                    component_rows = []
                 continue
             if _simple_note_component_label(normalized) and not _simple_note_text_component_blocked(normalized):
                 component_rows.append((label, amounts))
@@ -2098,8 +2139,9 @@ def _simple_note_text_sections(text: str) -> list[tuple[str, str, list[str]]]:
 
 
 def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
+    heading_normalized = _normalise_match_words(heading)
     normalized = _normalise_match_words(f"{heading} {' '.join(lines[:20])}")
-    excluded = (
+    section_excluded = (
         "financial instruments and risk management",
         "maturity analysis",
         "credit risk",
@@ -2110,6 +2152,12 @@ def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
         "amendments",
         "fair value hierarchy",
         "financial instruments",
+        "reconciliation",
+        "movement in",
+        "deferred tax",
+        "taxation",
+    )
+    heading_excluded = (
         "property plant and equipment",
         "intangible assets",
         "share capital",
@@ -2117,15 +2165,23 @@ def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
         "number of shares",
         "depreciation",
         "amortisation",
-        "reconciliation",
-        "movement in",
-        "deferred tax",
-        "taxation",
     )
-    if any(term in normalized for term in excluded):
+    heading_blockers = (
+        "operating profit",
+        "profit loss",
+        "profit before tax",
+        "loss before tax",
+    )
+    if any(term in normalized for term in section_excluded):
+        return False
+    if any(term in heading_normalized for term in heading_excluded):
+        return False
+    if any(term in heading_normalized for term in heading_blockers):
         return False
     amount_lines = [line for line in lines if _simple_note_amounts_from_line(line)]
     if len(amount_lines) < 3:
+        return False
+    if _simple_note_text_has_suspicious_amount_noise(amount_lines):
         return False
     has_total = any(_looks_like_total(_normalise_match_words(line)) for line in amount_lines)
     has_numeric_total = any(
@@ -2138,8 +2194,12 @@ def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
 
 def _simple_note_amounts_from_line(line: str) -> list[Decimal]:
     amounts: list[Decimal] = []
-    for match in NUMBER_RE.finditer(line):
+    token_re = re.compile(r"\(?-?\d[\d,]*\)?|(?:(?<=\s)-(?=\s|$))")
+    for match in token_re.finditer(line):
         token = match.group(0)
+        if token == "-":
+            amounts.append(Decimal("0"))
+            continue
         if token.startswith("20") and len(token.strip("()")) == 4:
             continue
         cleaned = token.strip()
@@ -2150,13 +2210,26 @@ def _simple_note_amounts_from_line(line: str) -> list[Decimal]:
         except InvalidOperation:
             continue
         amounts.append(-amount if negative else amount)
+    if len(amounts) >= 3 and 0 < amounts[0] <= 60 and _line_appears_to_have_note_ref_before_amounts(line):
+        amounts = amounts[1:]
     return amounts
 
 
+def _line_appears_to_have_note_ref_before_amounts(line: str) -> bool:
+    first_number = NUMBER_RE.search(line)
+    if not first_number:
+        return False
+    label_before = line[: first_number.start()]
+    return bool(re.search(r"[A-Za-z]{3,}", label_before))
+
+
 def _simple_note_text_line_boundary(normalized_line: str) -> bool:
+    if normalized_line.startswith("details "):
+        return True
     return any(
         marker in normalized_line
         for marker in (
+            "details of",
             "the movement",
             "reconciliation",
             "major components",
@@ -2166,6 +2239,39 @@ def _simple_note_text_line_boundary(normalized_line: str) -> bool:
             "2025 2024",
         )
     )
+
+
+def _simple_note_text_after_total_narrative(normalized_line: str) -> bool:
+    if normalized_line.startswith("details "):
+        return True
+    return any(
+        marker in normalized_line
+        for marker in (
+            "details of",
+            "the company",
+            "the group",
+            "in line with",
+            "frc rule",
+            "statutory audit",
+            "the table shows",
+            "number of employees",
+            "whose earnings",
+            "during the year",
+            "pension reform act",
+            "defined contribution",
+            "retirement savings",
+        )
+    )
+
+
+def _simple_note_text_has_suspicious_amount_noise(amount_lines: list[str]) -> bool:
+    if len(amount_lines) < 6:
+        return False
+    suspicious = 0
+    for line in amount_lines:
+        if re.search(r"\b[A-Za-z]{1,3}\d{2,}\b", line) or re.search(r"\b\d+[A-Za-z]{1,3}\d+\b", line):
+            suspicious += 1
+    return suspicious > 0
 
 
 def _simple_note_text_component_blocked(normalized_line: str) -> bool:
@@ -2275,8 +2381,12 @@ def _simple_note_table_castable(table: list[list[str]], page_text: str) -> bool:
         "value added",
         "five year",
         "financial summary",
+        "financial instruments",
         "property plant and equipment",
         "intangible assets",
+        "share capital",
+        "ordinary shares",
+        "number of shares",
         "depreciation",
         "amortisation",
         "reconciliation of carrying amount",
@@ -2312,7 +2422,10 @@ def _simple_note_table_castable(table: list[list[str]], page_text: str) -> bool:
 
 
 def _simple_note_component_label(label: str) -> bool:
-    if not _looks_like_amount_line(label):
+    if not label.strip() or not re.search(r"[a-z]{3,}", label):
+        return False
+    excluded = ("note", "date", "audited", "restated")
+    if any(word in label for word in excluded):
         return False
     blocked = (
         "opening balance",
@@ -2323,9 +2436,6 @@ def _simple_note_component_label(label: str) -> bool:
         "carrying amount",
         "gross",
         "accumulated",
-        "depreciation",
-        "amortisation",
-        "impairment",
         "maturity",
         "not past due",
         "past due",
@@ -2572,16 +2682,27 @@ def _notes_table_skip_needs_reviewer_attention(text: str) -> bool:
         "intangible assets",
         "financial assets",
         "trade and other receivables",
+        "trade other receivables",
         "cash and cash equivalents",
+        "cash cash equivalents",
         "share capital",
         "share premium",
         "deferred tax",
         "trade and other payables",
+        "trade other payables",
+        "borrowings",
+        "loans and borrowings",
+        "bank loan",
+        "bank loans",
         "current tax liabilities",
         "contract liabilities",
         "revenue",
         "direct expenses",
         "other income",
+        "operating gains",
+        "operating losses",
+        "other operating gains",
+        "other operating losses",
         "operating expenses",
         "expenses",
         "expense",
