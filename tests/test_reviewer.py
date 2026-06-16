@@ -1520,7 +1520,7 @@ def test_skipped_table_summary_groups_notes_arithmetic_skips(monkeypatch):
                 + ("Primary context.\n" * 70),
                 [],
             ),
-            PdfPage(10, "Notes to the financial statements\n3 Revenue\nRevenue 100 90", [[["Revenue", "2025", "2024"], ["Fees", "100", "90"], ["Total", "100", "90"]]]),
+            PdfPage(10, "Notes to the financial statements\n3 Revenue\nRevenue 100 90", [[["Revenue", "2025", "2024"], ["Fees", "60", "50"], ["Subscriptions", "40", "40"], ["Total", "100", "90"]]]),
             PdfPage(11, "4 Expenses\nExpenses 60 50", [[["Expenses", "2025", "2024"], ["Admin", "60", "50"], ["Total", "60", "50"]]]),
         ]
     )
@@ -1531,10 +1531,130 @@ def test_skipped_table_summary_groups_notes_arithmetic_skips(monkeypatch):
     summary = result.metrics["skipped_table_summary"]
 
     notes_group = next(row for row in summary if row["Skipped check group"] == "Notes tables - manual review recommended")
-    assert notes_group["Pages affected"] == "Pages 10-11"
-    assert notes_group["Tables affected"] == "2"
+    assert notes_group["Pages affected"] == "Page 11"
+    assert notes_group["Tables affected"] == "1"
     assert notes_group["Can automated check be fixed?"] == "Partially"
     assert "may merge" in notes_group["Why reviewer should review"].lower()
+
+
+def test_simple_note_table_casts_when_structure_is_clear(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90\n"
+                + ("Primary context.\n" * 70),
+                [],
+            ),
+            PdfPage(
+                10,
+                "Notes to the financial statements\n3 Revenue\n",
+                [[["Revenue", "2025", "2024"], ["Fees", "60", "55"], ["Subscriptions", "40", "35"], ["Total", "100", "90"]]],
+            ),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions())
+
+    assert any(
+        row["Result"] == "Passed" and "Simple note table on Page 10" in row["Check"]
+        for row in result.metrics["check_results"]
+    )
+    assert not result.metrics["skipped_table_details"]
+
+
+def test_simple_note_table_flags_wrong_total(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90\n"
+                + ("Primary context.\n" * 70),
+                [],
+            ),
+            PdfPage(
+                10,
+                "Notes to the financial statements\n3 Revenue\n",
+                [[["Revenue", "2025", "2024"], ["Fees", "60", "55"], ["Subscriptions", "40", "35"], ["Total", "105", "90"]]],
+            ),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions())
+
+    assert any(
+        finding.category == "Totals and rounding"
+        and finding.severity == "Medium"
+        and "Simple note table total does not agree" in finding.issue
+        for finding in result.findings
+    )
+
+
+def test_simple_note_text_section_casts_when_table_grid_is_poor(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90\n"
+                + ("Primary context.\n" * 70),
+                [],
+            ),
+            PdfPage(
+                10,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "17. Employee costs",
+                        "Basic 385,648 -",
+                        "Other payroll levies 26,366 -",
+                        "Other allowance 96,146 -",
+                        "Pension cost 23,003 -",
+                        "531,163 -",
+                    ]
+                ),
+                [[["Financial Statements for the year ended", "31", "2025"], ["N '", "000", "000"], ["Header fragment", "", ""]]],
+            ),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions())
+
+    assert any(
+        row["Result"] == "Passed" and "Simple note section on Page 10" in row["Check"]
+        for row in result.metrics["check_results"]
+    )
+    assert not result.metrics["skipped_table_details"]
+
+
+def test_complex_note_table_is_not_casted(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nTotal assets 100 90\nTotal equity and liabilities 100 90\n"
+                + ("Primary context.\n" * 70),
+                [],
+            ),
+            PdfPage(
+                10,
+                "Notes to the financial statements\n4 Trade and other payables\nMaturity analysis",
+                [[["Trade and other payables", "2025", "2024"], ["Less than 30 days", "100", "90"], ["31 to 90 days", "20", "10"], ["Total", "120", "100"]]],
+            ),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions())
+
+    assert not any("Simple note table on Page 10" in row["Check"] for row in result.metrics["check_results"])
+    assert not any("Simple note table total does not agree" in finding.issue for finding in result.findings)
 
 
 def test_front_matter_tables_are_not_reported_as_skipped_audit_checks(monkeypatch):

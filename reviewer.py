@@ -1947,6 +1947,7 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
     primary_statements = _classified_primary_statement_pages(document)
     primary_pages = {p.number for p in primary_statements.values()}
     notes_start_page = _notes_start_page(document)
+    line_checked_note_pages: set[int] = set()
     
     for page in document.pages:
         for table_index, table in enumerate(page.tables, start=1):
@@ -1956,6 +1957,16 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
             if _skip_table_is_not_review_relevant(page, table_quality, primary_pages, notes_start_page):
                 continue
             if notes_start_page is not None and page.number >= notes_start_page and page.number not in primary_pages:
+                targeted_note_findings = _check_simple_note_table_casting(page, table_index, table, tolerance)
+                if targeted_note_findings:
+                    findings.extend(targeted_note_findings)
+                    continue
+                if page.number not in line_checked_note_pages:
+                    line_note_findings = _check_simple_note_text_casting(page, tolerance)
+                    if line_note_findings:
+                        findings.extend(line_note_findings)
+                        line_checked_note_pages.add(page.number)
+                        continue
                 skipped_tables.append(
                     f"Page {page.number}, table {table_index}: skipped because generic arithmetic is not reliable for notes tables; use note-reference and amount-agreement checks instead."
                 )
@@ -1992,6 +2003,335 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
     if skipped_tables:
         document.skipped_table_details = list(dict.fromkeys(skipped_tables))
     return findings
+
+
+def _check_simple_note_text_casting(page: PdfPage, tolerance: Decimal) -> list[Finding]:
+    findings: list[Finding] = []
+    sections = _simple_note_text_sections(page.text)
+    for note_ref, heading, lines in sections:
+        if not _simple_note_text_section_castable(heading, lines):
+            continue
+        component_rows: list[tuple[str, list[Decimal]]] = []
+        checked_columns = 0
+        mismatches: list[str] = []
+        for raw_line in lines:
+            line = re.sub(r"\s+", " ", raw_line.strip())
+            if not line:
+                continue
+            normalized = _normalise_match_words(line)
+            if _simple_note_text_line_boundary(normalized):
+                component_rows = []
+                continue
+            amounts = _simple_note_amounts_from_line(line)
+            if not amounts:
+                continue
+            label = re.sub(NUMBER_RE, " ", line)
+            label = re.sub(r"\s+", " ", label).strip(" -:;")
+            is_total = _looks_like_total(normalized) or (not re.search(r"[A-Za-z]{3,}", label) and len(component_rows) >= 2)
+            if is_total:
+                if len(component_rows) >= 2:
+                    width = min(len(amounts), min(len(row_amounts) for _label, row_amounts in component_rows))
+                    for col in range(width):
+                        expected = sum(row_amounts[col] for _label, row_amounts in component_rows)
+                        reported = amounts[col]
+                        diff = reported - expected
+                        checked_columns += 1
+                        if abs(diff) > tolerance:
+                            mismatches.append(
+                                f"Note {note_ref} {heading}, column {col + 1}: reported {reported:,}, visible sum {expected:,}, difference {diff:,}"
+                            )
+                component_rows = []
+                continue
+            if _simple_note_component_label(normalized) and not _simple_note_text_component_blocked(normalized):
+                component_rows.append((label, amounts))
+        if checked_columns:
+            location = f"Page {page.number} | Note {note_ref} {heading}"
+            if mismatches:
+                findings.append(
+                    Finding(
+                        "Totals and rounding",
+                        "Medium",
+                        location,
+                        "Simple note section total does not agree to visible component rows.",
+                        "; ".join(mismatches[:4]),
+                        "Recalculate the note section and confirm whether a hidden row, rounding adjustment, or extraction issue explains the difference.",
+                        metadata={"check_type": "simple_note_text_casting", "page": str(page.number), "note": note_ref},
+                    )
+                )
+            else:
+                findings.append(
+                    Finding(
+                        "Totals and rounding",
+                        "Passed",
+                        location,
+                        f"Simple note section on Page {page.number} casts correctly.",
+                        f"Checked Note {note_ref} {heading}; {checked_columns} amount column(s) agreed within tolerance {tolerance}.",
+                        "No reviewer action required unless the source note is amended.",
+                        metadata={"check_type": "simple_note_text_casting", "page": str(page.number), "note": note_ref},
+                    )
+                )
+    return findings
+
+
+def _simple_note_text_sections(text: str) -> list[tuple[str, str, list[str]]]:
+    sections: list[tuple[str, str, list[str]]] = []
+    current_ref = ""
+    current_heading = ""
+    current_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line.strip())
+        if not line:
+            continue
+        match = NOTE_HEADING_RE.match(line)
+        if match and _valid_note_heading(match.group(1), match.group(2)):
+            if current_ref and current_lines:
+                sections.append((current_ref, current_heading, current_lines))
+            current_ref = match.group(1).upper()
+            current_heading = match.group(2).strip()
+            current_lines = []
+            continue
+        if current_ref:
+            current_lines.append(line)
+    if current_ref and current_lines:
+        sections.append((current_ref, current_heading, current_lines))
+    return sections
+
+
+def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
+    normalized = _normalise_match_words(f"{heading} {' '.join(lines[:20])}")
+    excluded = (
+        "financial instruments and risk management",
+        "maturity analysis",
+        "credit risk",
+        "expected credit loss",
+        "ecl",
+        "related parties",
+        "new standards",
+        "amendments",
+        "fair value hierarchy",
+        "financial instruments",
+        "property plant and equipment",
+        "intangible assets",
+        "share capital",
+        "ordinary shares",
+        "number of shares",
+        "depreciation",
+        "amortisation",
+        "reconciliation",
+        "movement in",
+        "deferred tax",
+        "taxation",
+    )
+    if any(term in normalized for term in excluded):
+        return False
+    amount_lines = [line for line in lines if _simple_note_amounts_from_line(line)]
+    if len(amount_lines) < 3:
+        return False
+    has_total = any(_looks_like_total(_normalise_match_words(line)) for line in amount_lines)
+    has_numeric_total = any(
+        len(_simple_note_amounts_from_line(line)) >= 1
+        and not re.search(r"[A-Za-z]{3,}", re.sub(NUMBER_RE, " ", line))
+        for line in amount_lines[2:]
+    )
+    return has_total or has_numeric_total
+
+
+def _simple_note_amounts_from_line(line: str) -> list[Decimal]:
+    amounts: list[Decimal] = []
+    for match in NUMBER_RE.finditer(line):
+        token = match.group(0)
+        if token.startswith("20") and len(token.strip("()")) == 4:
+            continue
+        cleaned = token.strip()
+        negative = cleaned.startswith("(") and cleaned.endswith(")")
+        cleaned = cleaned.strip("()").replace(",", "")
+        try:
+            amount = Decimal(cleaned)
+        except InvalidOperation:
+            continue
+        amounts.append(-amount if negative else amount)
+    return amounts
+
+
+def _simple_note_text_line_boundary(normalized_line: str) -> bool:
+    return any(
+        marker in normalized_line
+        for marker in (
+            "the movement",
+            "reconciliation",
+            "major components",
+            "tax at the applicable",
+            "effective tax rate",
+            "n 000",
+            "2025 2024",
+        )
+    )
+
+
+def _simple_note_text_component_blocked(normalized_line: str) -> bool:
+    return any(
+        marker in normalized_line
+        for marker in (
+            "note",
+            "tax rate",
+            "effective",
+            "reconciliation",
+            "temporary difference",
+        )
+    )
+
+
+def _check_simple_note_table_casting(
+    page: PdfPage,
+    table_index: int,
+    table: list[list[str]],
+    tolerance: Decimal,
+) -> list[Finding]:
+    """Cast only simple note tables with clear component rows and total rows."""
+    if not _simple_note_table_castable(table, page.text):
+        return []
+    note_cols = _note_columns(table)
+    rows = [_numeric_row(row, note_cols) for row in table]
+    max_cols = max((len(row) for row in rows), default=0)
+    results: list[Finding] = []
+    mismatches: list[str] = []
+    passed_columns = 0
+    for col in range(1, max_cols):
+        if col in note_cols:
+            continue
+        components: list[Decimal] = []
+        column_checked = False
+        for row_index, row in enumerate(rows[1:], start=1):
+            label = str(row[0] or "").strip().lower() if row else ""
+            if _is_table_boundary_row(row):
+                components = []
+                continue
+            value = row[col] if col < len(row) else None
+            if not isinstance(value, Decimal):
+                continue
+            if _looks_like_total(label):
+                if len(components) >= 2:
+                    expected = sum(components, Decimal("0"))
+                    diff = value - expected
+                    column_checked = True
+                    if abs(diff) > tolerance:
+                        mismatches.append(
+                            f"column {col + 1}, row {row_index + 1}: reported {value:,}, visible sum {expected:,}, difference {diff:,}"
+                        )
+                components = []
+            elif _simple_note_component_label(label):
+                components.append(value)
+        if column_checked:
+            passed_columns += 1
+    if not passed_columns:
+        return []
+    location = f"Page {page.number}, table {table_index}"
+    if mismatches:
+        results.append(
+            Finding(
+                "Totals and rounding",
+                "Medium",
+                location,
+                "Simple note table total does not agree to visible component rows.",
+                "; ".join(mismatches[:4]),
+                "Recalculate the note table and confirm whether a hidden row, rounding adjustment, or extraction issue explains the difference.",
+                metadata={"check_type": "simple_note_table_casting", "page": str(page.number), "table": str(table_index)},
+            )
+        )
+    else:
+        results.append(
+            Finding(
+                "Totals and rounding",
+                "Passed",
+                location,
+                f"Simple note table on Page {page.number}, table {table_index} casts correctly.",
+                f"Checked {passed_columns} amount column(s); reported totals agree within tolerance {tolerance}.",
+                "No reviewer action required unless the source note is amended.",
+                metadata={"check_type": "simple_note_table_casting", "page": str(page.number), "table": str(table_index)},
+            )
+        )
+    return results
+
+
+def _simple_note_table_castable(table: list[list[str]], page_text: str) -> bool:
+    if len(table) < 3:
+        return False
+    table_text = _normalise_match_words(" ".join(" ".join(str(cell or "") for cell in row) for row in table))
+    page_lower = _normalise_match_words(page_text[:3000])
+    combined = f"{table_text} {page_lower}"
+    excluded = (
+        "financial instruments and risk management",
+        "maturity analysis",
+        "credit risk",
+        "expected credit loss",
+        "ecl",
+        "sensitivity analysis",
+        "related parties",
+        "directors remuneration",
+        "key management",
+        "new standards",
+        "amendments",
+        "fair value hierarchy",
+        "value added",
+        "five year",
+        "financial summary",
+        "property plant and equipment",
+        "intangible assets",
+        "depreciation",
+        "amortisation",
+        "reconciliation of carrying amount",
+        "gross carrying amount",
+        "accumulated depreciation",
+    )
+    if any(term in combined for term in excluded):
+        return False
+    header_text = _normalise_match_words(" ".join(str(cell or "") for cell in table[0]))
+    has_amount_header = _table_has_financial_amount_header(table) or len(set(YEAR_RE.findall(header_text))) >= 1
+    if not has_amount_header:
+        return False
+    note_cols = _note_columns(table)
+    rows = [_numeric_row(row, note_cols) for row in table]
+    total_rows = 0
+    component_rows = 0
+    amount_counts: list[int] = []
+    for row in rows[1:]:
+        label = str(row[0] or "").strip().lower() if row else ""
+        count = _row_amount_count(row)
+        if count:
+            amount_counts.append(count)
+        if count and _looks_like_total(label):
+            total_rows += 1
+        elif count and _simple_note_component_label(label):
+            component_rows += 1
+    if total_rows == 0 or component_rows < 2:
+        return False
+    if not amount_counts:
+        return False
+    common_count = max(set(amount_counts), key=amount_counts.count)
+    return common_count >= 1 and amount_counts.count(common_count) / len(amount_counts) >= 0.7
+
+
+def _simple_note_component_label(label: str) -> bool:
+    if not _looks_like_amount_line(label):
+        return False
+    blocked = (
+        "opening balance",
+        "closing balance",
+        "at 1 january",
+        "at 31 december",
+        "balance at",
+        "carrying amount",
+        "gross",
+        "accumulated",
+        "depreciation",
+        "amortisation",
+        "impairment",
+        "maturity",
+        "not past due",
+        "past due",
+        "stage ",
+    )
+    return not any(term in label for term in blocked)
 
 
 def _check_share_capital_line_tables(document: PdfDocument, tolerance: Decimal) -> list[Finding]:
