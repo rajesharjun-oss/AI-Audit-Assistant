@@ -1893,6 +1893,25 @@ def test_changes_in_equity_check_includes_direct_equity_movements():
     assert not findings
 
 
+def test_simple_note_text_casting_can_infer_one_noisy_missing_amount_from_total():
+    page = PdfPage(
+        38,
+        "Notes to the Financial Statements\n"
+        "17. Operating expenses\n"
+        "Advertising 421,366 188,606\n"
+        "Entertainment 2,478 D123\n"
+        "Travel expenses 199,281 148,968\n"
+        "623,125 342,697\n",
+        [],
+    )
+
+    findings = reviewer._check_simple_note_text_casting(page, Decimal("1"))
+
+    assert findings
+    assert findings[0].severity == "Passed"
+    assert "5,123" in findings[0].evidence
+
+
 def test_note_heading_inferred_when_extraction_drops_note_number():
     document = PdfDocument(
         [

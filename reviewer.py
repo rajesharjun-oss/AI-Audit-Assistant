@@ -2085,9 +2085,10 @@ def _check_simple_note_text_casting(page: PdfPage, tolerance: Decimal) -> list[F
     for note_ref, heading, lines in sections:
         if not _simple_note_text_section_castable(heading, lines):
             continue
-        component_rows: list[tuple[str, list[Decimal]]] = []
+        component_rows: list[dict[str, object]] = []
         checked_columns = 0
         mismatches: list[str] = []
+        corrections: list[str] = []
         for raw_line in lines:
             line = re.sub(r"\s+", " ", raw_line.strip())
             if not line:
@@ -2108,28 +2109,37 @@ def _check_simple_note_text_casting(page: PdfPage, tolerance: Decimal) -> list[F
             is_total = _looks_like_total(normalized) or (not re.search(r"[A-Za-z]{3,}", label) and len(component_rows) >= 2)
             if is_total:
                 if len(component_rows) >= 2:
-                    width = min(len(amounts), min(len(row_amounts) for _label, row_amounts in component_rows))
+                    width = min(len(amounts), max(len(row["amounts"]) for row in component_rows))
                     for col in range(width):
-                        expected = sum(row_amounts[col] for _label, row_amounts in component_rows)
+                        prepared = _prepare_simple_note_column(component_rows, col, amounts[col], line)
+                        if not prepared:
+                            continue
+                        expected = prepared["expected"]
                         reported = amounts[col]
                         diff = reported - expected
                         checked_columns += 1
+                        for correction in prepared["corrections"]:
+                            if correction not in corrections:
+                                corrections.append(correction)
                         if abs(diff) > tolerance:
                             mismatches.append(
                                 f"Note {note_ref} {heading}, column {col + 1}: reported {reported:,}, visible sum {expected:,}, difference {diff:,}"
                             )
                     if all(
-                        abs(amounts[col] - sum(row_amounts[col] for _label, row_amounts in component_rows)) <= tolerance
+                        (
+                            prepared := _prepare_simple_note_column(component_rows, col, amounts[col], line)
+                        )
+                        and abs(amounts[col] - prepared["expected"]) <= tolerance
                         for col in range(width)
                     ):
-                        component_rows = [(label or "subtotal", amounts)]
+                        component_rows = [{"label": label or "subtotal", "amounts": amounts, "raw_line": line}]
                     else:
                         component_rows = []
                 else:
                     component_rows = []
                 continue
             if _simple_note_component_label(normalized) and not _simple_note_text_component_blocked(normalized):
-                component_rows.append((label, amounts))
+                component_rows.append({"label": label, "amounts": amounts, "raw_line": line})
         if checked_columns:
             location = f"Page {page.number} | Note {note_ref} {heading}"
             if mismatches:
@@ -2145,18 +2155,61 @@ def _check_simple_note_text_casting(page: PdfPage, tolerance: Decimal) -> list[F
                     )
                 )
             else:
+                correction_note = f" Extraction support: {'; '.join(corrections[:3])}." if corrections else ""
                 findings.append(
                     Finding(
                         "Totals and rounding",
                         "Passed",
                         location,
                         f"Simple note section on Page {page.number} casts correctly.",
-                        f"Checked Note {note_ref} {heading}; {checked_columns} amount column(s) agreed within tolerance {tolerance}.",
+                        f"Checked Note {note_ref} {heading}; {checked_columns} amount column(s) agreed within tolerance {tolerance}.{correction_note}",
                         "No reviewer action required unless the source note is amended.",
                         metadata={"check_type": "simple_note_text_casting", "page": str(page.number), "note": note_ref},
                     )
                 )
     return findings
+
+
+def _prepare_simple_note_column(
+    component_rows: list[dict[str, object]],
+    col: int,
+    reported_total: Decimal,
+    total_line: str,
+) -> dict[str, object] | None:
+    present_values: list[Decimal] = []
+    missing_rows: list[dict[str, object]] = []
+    corrections: list[str] = []
+    for row in component_rows:
+        amounts = row["amounts"]
+        if col < len(amounts):
+            present_values.append(amounts[col])
+        else:
+            missing_rows.append(row)
+    if not present_values:
+        return None
+    if not missing_rows:
+        return {"expected": sum(present_values, Decimal("0")), "corrections": corrections}
+    if len(missing_rows) != 1:
+        return None
+    missing_row = missing_rows[0]
+    raw_line = str(missing_row.get("raw_line", ""))
+    if not _simple_note_missing_amount_candidate(raw_line):
+        return None
+    inferred = reported_total - sum(present_values, Decimal("0"))
+    if abs(inferred) >= Decimal("100000000"):
+        return None
+    corrections.append(
+        f"Inferred missing column {col + 1} amount {inferred:,} for '{missing_row.get('label', 'line item')}' from the reported total because the extracted row contained a noisy amount token."
+    )
+    return {"expected": sum(present_values, Decimal("0")) + inferred, "corrections": corrections}
+
+
+def _simple_note_missing_amount_candidate(raw_line: str) -> bool:
+    return bool(
+        re.search(r"\b[A-Za-z]\d{2,}\b", raw_line)
+        or re.search(r"\b\d+[A-Za-z]\d+\b", raw_line)
+        or re.search(r"\s-\s*$", raw_line)
+    )
 
 
 def _simple_note_text_sections(text: str) -> list[tuple[str, str, list[str]]]:
@@ -2242,6 +2295,10 @@ def _simple_note_amounts_from_line(line: str) -> list[Decimal]:
     token_re = re.compile(r"\(?-?\d[\d,]*\)?|(?:(?<=\s)-(?=\s|$))")
     for match in token_re.finditer(line):
         token = match.group(0)
+        before = line[match.start() - 1] if match.start() > 0 else " "
+        after = line[match.end()] if match.end() < len(line) else " "
+        if token != "-" and (before.isalpha() or after.isalpha()):
+            continue
         if token == "-":
             amounts.append(Decimal("0"))
             continue
@@ -2316,7 +2373,7 @@ def _simple_note_text_has_suspicious_amount_noise(amount_lines: list[str]) -> bo
     for line in amount_lines:
         if re.search(r"\b[A-Za-z]{1,3}\d{2,}\b", line) or re.search(r"\b\d+[A-Za-z]{1,3}\d+\b", line):
             suspicious += 1
-    return suspicious > 0
+    return suspicious > max(1, len(amount_lines) // 8)
 
 
 def _simple_note_text_component_blocked(normalized_line: str) -> bool:
