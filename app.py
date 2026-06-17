@@ -124,6 +124,21 @@ def _finding_rows(result) -> list[dict[str, str]]:
     return rows
 
 
+def _finding_summary_rows(result) -> list[dict[str, str]]:
+    rows = []
+    for finding in result.findings:
+        rows.append(
+            {
+                "Severity": finding.severity,
+                "Category": finding.category,
+                "Page reference": _page_reference_for_finding(finding, result),
+                "Issue": finding.issue,
+                "Recommendation": finding.recommendation,
+            }
+        )
+    return rows
+
+
 def _finding_confidence(finding, result) -> str:
     if finding.metadata and finding.metadata.get("match_confidence"):
         return f"Review prompt / {finding.metadata['match_confidence']}"
@@ -336,6 +351,9 @@ def _build_excel_export(result) -> bytes:
         {"Metric": "note_reference_rows_detected", "Value": result.metrics.get("note_reference_rows_detected", 0)},
         {"Metric": "note_headings_detected", "Value": result.metrics.get("note_headings_detected", 0)},
         {"Metric": "note_reference_findings", "Value": result.metrics.get("note_reference_findings", 0)},
+        {"Metric": "AI policy review status", "Value": result.metrics.get("ai_policy_review_status", "disabled")},
+        {"Metric": "AI policy review model", "Value": result.metrics.get("ai_policy_review_model", "")},
+        {"Metric": "AI policy review summary", "Value": result.metrics.get("ai_policy_review_summary", "")},
     ]
     checks_performed = [{"Check performed": item} for item in _metric_lines(result.metrics.get("checks_performed"), "No deterministic checks completed.")]
     checks_skipped = _checks_skipped_rows(result) or [{"Check area": "None", "Reason skipped": "No major checks skipped."}]
@@ -347,6 +365,8 @@ def _build_excel_export(result) -> bytes:
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         pd.DataFrame(profile_rows).to_excel(writer, sheet_name="Detected profile", index=False)
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
+        finding_summary_rows = _finding_summary_rows(result) or [{"Severity": "", "Category": "", "Page reference": "", "Issue": "No automated findings were identified.", "Recommendation": ""}]
+        pd.DataFrame(finding_summary_rows).to_excel(writer, sheet_name="Findings summary", index=False)
         exception_rows = _finding_rows(result) or [
             {
                 "ID": "",
@@ -397,6 +417,8 @@ def _build_excel_export(result) -> bytes:
         
         policy_rows = result.metrics.get("policy_export", []) or [{"Paragraph reviewed": "None found"}]
         pd.DataFrame(policy_rows).to_excel(writer, sheet_name="Notes 1 and 2 policy review", index=False)
+        ai_policy_rows = result.metrics.get("ai_policy_export", []) or [{"Title": "AI policy review not enabled or no rows returned."}]
+        pd.DataFrame(ai_policy_rows).to_excel(writer, sheet_name="AI policy judgement", index=False)
         
         unref_rows = result.metrics.get("unreferenced_notes", []) or [{"Note": "None", "Heading": "None found", "Comment": "All notes referenced or filtered"}]
         pd.DataFrame(unref_rows).to_excel(writer, sheet_name="Unreferenced notes", index=False)
@@ -427,6 +449,7 @@ def _build_excel_export(result) -> bytes:
                 max_length = max((len(str(cell.value or "")) for cell in column_cells), default=10)
                 worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 70)
         _format_exception_register_sheet(writer.book["Exception register"])
+        _format_excel_table_sheet(writer.book["Findings summary"], "FindingsSummary")
         _format_excel_table_sheet(writer.book["Primary statement line items"], "PrimaryLineItems")
         _format_excel_table_sheet(writer.book["Items without notes summary"], "NoNotesSummary")
         _format_excel_table_sheet(writer.book["Note-linked review"], "NoteLinkedReview")
@@ -434,6 +457,7 @@ def _build_excel_export(result) -> bytes:
         _format_excel_table_sheet(writer.book["Notes heading candidates"], "NotesHeadingCandidates")
         _format_excel_table_sheet(writer.book["OCR statement rows"], "OCRStatementRows")
         _format_excel_table_sheet(writer.book["Notes 1 and 2 policy review"], "PolicyReview")
+        _format_excel_table_sheet(writer.book["AI policy judgement"], "AIPolicyJudgement")
         _format_excel_table_sheet(writer.book["Unreferenced notes"], "UnreferencedNotes")
         _format_excel_table_sheet(writer.book["Key amount consistency"], "AmountConsistency")
         _format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
@@ -546,6 +570,8 @@ def _detected_profile_rows(result) -> list[list[str]]:
 def _build_word_memo_export(result) -> bytes:
     memo = build_ai_review_memo(result)
     assurance = str(result.metrics.get("positive_assurance", ""))
+    ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
+    ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
     disclaimer = (
         "This automated review supports financial statement review procedures but does not replace professional "
         "judgement, firm methodology, or the auditor's responsibility to evaluate the report and underlying evidence."
@@ -558,6 +584,12 @@ def _build_word_memo_export(result) -> bytes:
         _docx_paragraph(memo),
         _docx_paragraph(disclaimer),
     ]
+    if ai_summary or ai_status != "disabled":
+        body_parts.append(_docx_paragraph("AI Policy Judgement", "Heading1"))
+        if ai_summary:
+            body_parts.append(_docx_paragraph(ai_summary))
+        else:
+            body_parts.append(_docx_paragraph(f"Status: {ai_status}"))
     if assurance:
         body_parts.append(_docx_paragraph(assurance))
     body_parts.extend(
@@ -930,6 +962,23 @@ with st.container(border=True):
                 "Detailed amount agreement remains skipped until table confidence improves."
             ),
         )
+        use_ai_policy_review = st.checkbox(
+            "Enable AI policy and standards judgement",
+            value=False,
+            help=(
+                "Runs an optional AI review over accounting policies and related disclosures to assess "
+                "policy relevance, standards context, disclosure completeness, and industry fit. "
+                "Requires OPENAI_API_KEY on the server."
+            ),
+        )
+        ai_model = st.text_input(
+            "AI model",
+            value="gpt-5-mini",
+            help="Used only when AI policy and standards judgement is enabled.",
+        )
+    if review_mode != "Advanced Review":
+        use_ai_policy_review = False
+        ai_model = "gpt-5-mini"
 
 st.markdown('<div class="section-label">Audit review modules</div>', unsafe_allow_html=True)
 st.markdown(
@@ -1004,6 +1053,8 @@ try:
                 ocr_max_pages=int(ocr_max_pages),
                 ocr_dpi=int(ocr_dpi),
                 run_cautious_note_agreement=cautious_note_agreement,
+                use_ai_policy_review=use_ai_policy_review,
+                ai_model=ai_model.strip() or "gpt-5-mini",
             ),
         )
 finally:
@@ -1035,6 +1086,12 @@ if isinstance(detected_profile, dict):
         for key, value in detected_profile.items()
     ]
     st.dataframe(pd.DataFrame(profile_rows), use_container_width=True, hide_index=True)
+
+if result.metrics.get("ai_policy_review_status") == "completed":
+    ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
+    if ai_summary:
+        st.markdown('<div class="section-label">AI policy judgement</div>', unsafe_allow_html=True)
+        st.info(ai_summary)
 
 st.markdown(
     f"""
@@ -1132,6 +1189,7 @@ rows = [
     {
         "Severity": finding.severity,
         "Category": finding.category,
+        "Page reference": _page_reference_for_finding(finding, result),
         "Location": finding.location,
         "Issue": finding.issue,
         "Evidence": finding.evidence,
@@ -1143,8 +1201,10 @@ st.markdown('<div class="section-label">Exception register</div>', unsafe_allow_
 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 for finding in filtered:
-    with st.expander(f"{finding.severity}: {finding.issue}", expanded=finding.severity == "High"):
+    page_ref = _page_reference_for_finding(finding, result) or finding.location
+    with st.expander(f"{finding.severity}: {page_ref} - {finding.issue}", expanded=finding.severity == "High"):
         st.write(f"**Category:** {finding.category}")
+        st.write(f"**Page reference:** {page_ref}")
         st.write(f"**Location:** {finding.location}")
         st.write(f"**Evidence:** {finding.evidence}")
         st.write(f"**Recommendation:** {finding.recommendation}")

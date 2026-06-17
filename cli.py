@@ -35,6 +35,8 @@ def main() -> int:
     parser.add_argument("--ocr", action="store_true", help="Run local OCR if the PDF has low embedded text coverage")
     parser.add_argument("--ocr-max-pages", type=int, default=60, help="Maximum scanned pages to OCR")
     parser.add_argument("--ocr-dpi", type=int, default=200, help="OCR render DPI, usually 150-300")
+    parser.add_argument("--ai-policy-review", action="store_true", help="Run optional AI judgement for policy relevance, disclosure completeness, and industry fit")
+    parser.add_argument("--ai-model", default="gpt-5-mini", help="Model to use for optional AI policy judgement")
     parser.add_argument("--output", type=Path, help="Optional markdown report path")
     args = parser.parse_args()
 
@@ -50,7 +52,13 @@ def main() -> int:
     result = review_pdf(
         args.pdf,
         profile,
-        ReviewOptions(use_ocr=args.ocr, ocr_max_pages=args.ocr_max_pages, ocr_dpi=args.ocr_dpi),
+        ReviewOptions(
+            use_ocr=args.ocr,
+            ocr_max_pages=args.ocr_max_pages,
+            ocr_dpi=args.ocr_dpi,
+            use_ai_policy_review=args.ai_policy_review,
+            ai_model=args.ai_model,
+        ),
     )
     report = findings_to_markdown(result)
     if args.output:

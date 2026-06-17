@@ -131,6 +131,8 @@ class ReviewOptions:
     ocr_max_pages: int | None = 60
     ocr_dpi: int = 300
     run_cautious_note_agreement: bool = False
+    use_ai_policy_review: bool = False
+    ai_model: str = "gpt-5-mini"
 
 
 @dataclass(frozen=True)

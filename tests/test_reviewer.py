@@ -3,6 +3,7 @@ from pathlib import Path
 
 import extraction
 import reviewer
+from ai_policy_review import AiPolicyReviewResult
 from cross_page_consistency import _names_look_like_spelling_variants, check_cross_page_consistency
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
@@ -118,6 +119,84 @@ def test_footnote_asterisks_are_not_unreadable_placeholders():
 
     assert document.unreadable_value_count == 0
     assert not [finding for finding in check_extraction_quality(document) if "Unreadable or placeholder" in finding.issue]
+
+
+def test_optional_ai_policy_review_adds_findings_and_export(monkeypatch):
+    filler = "Additional extracted policy context.\n" * 80
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nCash and cash equivalents 100 90\nTotal assets 100 90\nEquity 100 90\nTotal equity and liabilities 100 90\n"
+                + filler,
+                [],
+            ),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n1. Significant accounting policies\nRevenue from contracts with customers ...\n"
+                "The entity also mentions IAS 17 as the current lease policy.\n"
+                + filler,
+                [],
+            )
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+    monkeypatch.setattr(
+        reviewer,
+        "run_ai_policy_review",
+        lambda *args, **kwargs: AiPolicyReviewResult(
+            findings=[
+                reviewer.Finding(
+                    category="AI policy judgement",
+                    severity="Medium",
+                    location="Page 1",
+                    issue="Lease policy appears to cite a superseded standard in current policy wording.",
+                    evidence="IAS 17 appears in the current lease accounting paragraph.",
+                    recommendation="Update the lease policy wording to IFRS 16 if that is the current basis.",
+                    metadata={"match_confidence": "Medium"},
+                )
+            ],
+            export_rows=[{"Title": "Lease policy context", "Status": "review_prompt"}],
+            summary="Lease policy wording may still reference a superseded standard.",
+            status="completed",
+            model="gpt-5-mini",
+        ),
+    )
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_policy_review=True))
+
+    assert any(f.category == "AI policy judgement" for f in result.findings)
+    assert result.metrics["ai_policy_review_status"] == "completed"
+    assert result.metrics["ai_policy_review_model"] == "gpt-5-mini"
+    assert result.metrics["ai_policy_export"] == [{"Title": "Lease policy context", "Status": "review_prompt"}]
+    assert "AI policy and standards judgement completed using gpt-5-mini." in result.metrics["checks_performed"]
+
+
+def test_ai_policy_review_missing_key_is_reported_as_skipped(monkeypatch):
+    filler = "Additional extracted policy context.\n" * 80
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nCash and cash equivalents 100 90\nTotal assets 100 90\nEquity 100 90\nTotal equity and liabilities 100 90\n"
+                + filler,
+                [],
+            ),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n1. Significant accounting policies\nRevenue from contracts with customers ...\n"
+                + filler,
+                [],
+            )
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_policy_review=True))
+
+    assert result.metrics["ai_policy_review_status"] == "unavailable"
+    assert "OPENAI_API_KEY is not configured" in result.metrics["checks_skipped"]
 
 
 def test_narrative_dates_do_not_trigger_format_findings():
@@ -680,7 +759,33 @@ def test_ocr_cash_beginning_and_end_rows_are_parsed():
     findings, performed, skipped = check_primary_statement_consistency(document)
 
     assert not findings
-    assert any("cash at beginning/end checked" in item for item in performed)
+    assert any("opening plus movement checked to closing" in item for item in performed)
+
+
+def test_cash_flow_statement_checks_net_movement_when_investing_section_is_absent_but_zero():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of cash flows",
+                        "Net cash generated from/(used in) operating activities 2,579 49,881",
+                        "Net cash used in financing activities - (39,917)",
+                        "Total cash movement for the year 2,579 9,964",
+                        "Loss on foreign exchange (2,579) (9,964)",
+                        "Cash and cash equivalents at the end of the year - -",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    findings, performed, skipped = check_primary_statement_consistency(document)
+
+    assert any("Statement of cash flows: net cash increase checked." == item for item in performed)
+    assert not any("net cash increase checked" in item.lower() for item in skipped)
 
 
 def test_arithmetic_skips_merged_numeric_cells():

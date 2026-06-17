@@ -10,6 +10,7 @@ from pathlib import Path
 from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage, ReviewOptions, ReviewResult
 from cross_page_consistency import check_cross_page_consistency
 from policy_reviewer import review_notes_1_and_2
+from ai_policy_review import run_ai_policy_review
 from extraction import extract_pdf, extract_pdf_with_ocr
 
 
@@ -336,6 +337,27 @@ def review_pdf(
     policy_map = _accounting_policy_map(document)
     policy_findings, policy_export = review_notes_1_and_2(document, profile, note_sections, policy_map=policy_map)
     findings.extend(policy_findings)
+    ai_policy_export: list[dict[str, str]] = []
+    ai_policy_summary = ""
+    ai_policy_status = "disabled"
+    ai_policy_model = options.ai_model
+    if options.use_ai_policy_review:
+        ai_review = run_ai_policy_review(
+            document,
+            profile,
+            note_sections,
+            policy_map=policy_map,
+            model=options.ai_model,
+        )
+        ai_policy_status = ai_review.status
+        ai_policy_model = ai_review.model
+        ai_policy_summary = ai_review.summary
+        ai_policy_export = ai_review.export_rows
+        if ai_review.status == "completed":
+            findings.extend(ai_review.findings)
+            checks_performed.append(f"AI policy and standards judgement completed using {ai_review.model}.")
+        elif ai_review.message:
+            checks_skipped.append(ai_review.message)
     if getattr(document, "skipped_table_details", None):
         checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables; details are listed in Skipped table details.")
     
@@ -348,7 +370,19 @@ def review_pdf(
         f for f in findings
         if not (f.category == "Notes agreement" and f.metadata and f.metadata.get("match_confidence") == "Low")
     ]
-    return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug, cross_page_export, policy_export)
+    return _build_result(
+        document,
+        findings,
+        checks_performed,
+        checks_skipped,
+        note_validation_debug,
+        cross_page_export,
+        policy_export,
+        ai_policy_export,
+        ai_policy_status,
+        ai_policy_model,
+        ai_policy_summary,
+    )
 
 
 def _get_note_section_with_fallback(ref: str, note_sections: dict[str, str], document: PdfDocument | None = None) -> str:
@@ -422,6 +456,10 @@ def _build_result(
     note_validation_debug: dict[str, int | str | bool] | None = None,
     cross_page_export: dict | None = None,
     policy_export: list[dict] | None = None,
+    ai_policy_export: list[dict] | None = None,
+    ai_policy_status: str = "disabled",
+    ai_policy_model: str = "",
+    ai_policy_summary: str = "",
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     
@@ -491,6 +529,10 @@ def _build_result(
         "check_results": check_result_rows,
         "cross_page_export": cross_page_export or {},
         "policy_export": policy_export or [],
+        "ai_policy_export": ai_policy_export or [],
+        "ai_policy_review_status": ai_policy_status,
+        "ai_policy_review_model": ai_policy_model,
+        "ai_policy_review_summary": ai_policy_summary,
         "checks_performed_count": len(checks_performed_list),
         "checks_passed_count": sum(1 for row in check_result_rows if row.get("Result") == "Passed"),
         "checks_skipped_count": len(checks_skipped_list),
@@ -3354,6 +3396,8 @@ def findings_to_markdown(result: ReviewResult) -> str:
         f"note_reference_rows_detected: {result.metrics.get('note_reference_rows_detected', 0)}",
         f"note_headings_detected: {result.metrics.get('note_headings_detected', 0)}",
         f"note_reference_findings: {result.metrics.get('note_reference_findings', 0)}",
+        f"ai_policy_review_status: {result.metrics.get('ai_policy_review_status', 'disabled')}",
+        f"ai_policy_review_model: {result.metrics.get('ai_policy_review_model', '')}",
         "",
         "## Review dimensions",
         "",
@@ -3374,6 +3418,9 @@ def findings_to_markdown(result: ReviewResult) -> str:
         str(result.metrics.get("checks_skipped", "No major checks skipped.")),
         "",
     ]
+    ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
+    if ai_summary:
+        lines.extend(["## AI Policy Judgement", "", ai_summary, ""])
     if not result.findings:
         lines.append("No issues were detected by the automated checks.")
         return "\n".join(lines)
@@ -3393,13 +3440,16 @@ def findings_to_markdown(result: ReviewResult) -> str:
 
 def build_ai_review_memo(result: ReviewResult) -> str:
     assurance = str(result.metrics.get("positive_assurance", ""))
+    ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
+    ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
     scope_intro = ""
     if result.metrics.get("document_scope") == "Limited-scope statement extract":
         scope_intro = "Limited-scope review performed on Statement of Financial Position only. "
     if not result.findings:
+        ai_text = f" AI policy judgement: {ai_summary}" if ai_summary and ai_status == "completed" else ""
         return (
             f"AI review memo: {scope_intro}{assurance or 'No automated exceptions were detected.'} Perform a final manual review of scanned pages, "
-            "judgemental disclosures, and any areas where PDF extraction may have missed tables."
+            f"judgemental disclosures, and any areas where PDF extraction may have missed tables.{ai_text}"
         )
     by_category = Counter(finding.category for finding in result.findings)
     high_risk = [finding for finding in result.findings if finding.severity == "High"]
@@ -3428,13 +3478,18 @@ def build_ai_review_memo(result: ReviewResult) -> str:
     if "Accounting policies" in categories:
         likely_causes.append("boilerplate policy wording not tailored to the entity")
     cause_text = "; ".join(likely_causes) if likely_causes else "presentation or extraction exceptions"
+    ai_text = ""
+    if ai_status == "completed" and ai_summary:
+        ai_text = f" AI policy judgement: {ai_summary}"
+    elif ai_status in {"unavailable", "error", "skipped"}:
+        ai_text = " AI policy judgement was not completed, so policy/context conclusions remain based on deterministic checks only."
     return (
         "AI review memo: "
         f"{scope_intro}"
         f"{assurance + ' ' if assurance else ''}"
         f"{result.metrics['findings']} findings were identified across {top_categories}. "
         f"{priority} Likely causes include {cause_text}. "
-        f"{next_step}"
+        f"{next_step}{ai_text}"
     )
 
 
@@ -4550,7 +4605,8 @@ def _check_cash_flow_text(
     if document and page.number < len(document.pages):
         next_page = document.pages[page.number]
         text += "\n" + next_page.text
-    rows = _statement_rows(text)
+    row_parses = _statement_row_parses(text, "Statement of cash flows")
+    rows = {label: list(row.amounts) for label, row in row_parses.items()}
     if document:
         lines = _statement_note_lines(document)
         for item in lines:
@@ -4595,14 +4651,23 @@ def _check_cash_flow_text(
                 return True
         return False
     
-    op = next((v for k, v in rows.items() if _match(k, op_aliases)), None) or next((v for k, v in rows.items() if "operat" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "operat" in k), None)
-    inv = next((v for k, v in rows.items() if _match(k, inv_aliases)), None) or next((v for k, v in rows.items() if "invest" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "invest" in k), None)
-    fin = next((v for k, v in rows.items() if _match(k, fin_aliases)), None) or next((v for k, v in rows.items() if "financ" in k and "net cash" in k), None) or next((v for k, v in rows.items() if "financ" in k), None)
-    mov = next((v for k, v in rows.items() if _match(k, mov_aliases)), None) or next((v for k, v in rows.items() if ("increase" in k or "decrease" in k or "movement" in k or "net cash" in k or "cash flow" in k) and not any(x in k for x in ["operat", "invest", "financ"])), None)
+    op = next((v for k, v in rows.items() if _match(k, op_aliases)), None) or next((v for k, v in rows.items() if "operat" in _normalise_cash_flow_label(k) and "net cash" in _normalise_cash_flow_label(k)), None) or next((v for k, v in rows.items() if "operat" in _normalise_cash_flow_label(k)), None)
+    inv = next((v for k, v in rows.items() if _match(k, inv_aliases)), None) or next((v for k, v in rows.items() if "invest" in _normalise_cash_flow_label(k) and "net cash" in _normalise_cash_flow_label(k)), None) or next((v for k, v in rows.items() if "invest" in _normalise_cash_flow_label(k)), None)
+    fin = next((v for k, v in rows.items() if _match(k, fin_aliases)), None) or next((v for k, v in rows.items() if "financ" in _normalise_cash_flow_label(k) and "net cash" in _normalise_cash_flow_label(k)), None) or next((v for k, v in rows.items() if "financ" in _normalise_cash_flow_label(k)), None)
+    mov = next((v for k, v in rows.items() if _match(k, mov_aliases)), None) or next((v for k, v in rows.items() if ("increase" in _normalise_cash_flow_label(k) or "decrease" in _normalise_cash_flow_label(k) or "movement" in _normalise_cash_flow_label(k) or "net cash" in _normalise_cash_flow_label(k)) and not any(x in _normalise_cash_flow_label(k) for x in ["operat", "invest", "financ"])), None)
     
-    opening = next((v for k, v in rows.items() if _match(k, open_aliases)), None) or next((v for k, v in rows.items() if ("beginning" in k or " 1 " in k or "january" in k or "start" in k) and "cash" in k), None)
-    closing = next((v for k, v in rows.items() if _match(k, close_aliases)), None) or next((v for k, v in rows.items() if ("end" in k or " 31 " in k or "december" in k) and "cash" in k), None)
-    exch = next((v for k, v in rows.items() if _match(k, exch_aliases)), None) or next((v for k, v in rows.items() if "exchange" in k), None)
+    opening = next((v for k, v in rows.items() if _match(k, open_aliases)), None) or next((v for k, v in rows.items() if ("beginning" in _normalise_cash_flow_label(k) or "january" in _normalise_cash_flow_label(k) or "start" in _normalise_cash_flow_label(k)) and "cash" in _normalise_cash_flow_label(k)), None)
+    closing = next((v for k, v in rows.items() if _match(k, close_aliases)), None) or next((v for k, v in rows.items() if ("end" in _normalise_cash_flow_label(k) or "december" in _normalise_cash_flow_label(k)) and "cash" in _normalise_cash_flow_label(k)), None)
+    exch = next((v for k, v in rows.items() if _match(k, exch_aliases)), None) or next((v for k, v in rows.items() if "exchange" in _normalise_cash_flow_label(k)), None)
+
+    vector_length = max((len(v) for v in rows.values() if v), default=0)
+    zero_vector = [Decimal("0")] * vector_length if vector_length else None
+    normalized_text = _normalise_cash_flow_label(text)
+    if mov and vector_length:
+        if inv is None and "investing activities" not in normalized_text and "investing activity" not in normalized_text:
+            inv = zero_vector
+        if fin is None and "financing activities" not in normalized_text and "financing activity" not in normalized_text:
+            fin = zero_vector
 
     if op and inv and fin and mov:
         expected = [a + b + c for a, b, c in zip(op, inv, fin)]
