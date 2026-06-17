@@ -384,6 +384,7 @@ def review_pdf(
         ai_policy_status,
         ai_policy_model,
         ai_policy_summary,
+        ai_policy_message,
     )
 
 
@@ -462,6 +463,7 @@ def _build_result(
     ai_policy_status: str = "disabled",
     ai_policy_model: str = "",
     ai_policy_summary: str = "",
+    ai_policy_message: str = "",
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     
