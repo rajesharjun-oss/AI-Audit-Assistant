@@ -2336,8 +2336,11 @@ def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
 
 
 def _simple_note_amounts_from_line(line: str) -> list[Decimal]:
+    line = re.sub(r"^\s*\d+[A-Z]?\.\s*", "", line.strip(), flags=re.I)
+    line = re.sub(r"\b\d{1,3}\s+DRAFT\b", "", line, flags=re.I)
+    line = re.sub(r"\bDRAFT\b", "", line, flags=re.I).strip()
     amounts: list[Decimal] = []
-    token_re = re.compile(r"\(?-?\d[\d,]*\)?|(?:(?<=\s)-(?=\s|$))")
+    token_re = re.compile(r"\(?-?\d[\d,]*\)?|(?:(?:^|(?<=\s))-(?=\s|$))")
     for match in token_re.finditer(line):
         token = match.group(0)
         before = line[match.start() - 1] if match.start() > 0 else " "
@@ -3755,6 +3758,11 @@ def _check_note_internal_total(findings: list[Finding], ref: str, title: str, se
     if not _simple_note_total_check_allowed(title, section):
         return
     lines = [line for line in section.splitlines() if line.strip()]
+    if _simple_note_text_section_castable(title, lines):
+        return
+    amount_line_widths = [len(_simple_note_amounts_from_line(line)) for line in lines]
+    if any(width >= 2 for width in amount_line_widths if width):
+        return
     running: list[Decimal] = []
     for line in lines:
         lower = line.lower()
@@ -4813,7 +4821,7 @@ def _parse_ocr_statement_row(line: str) -> OcrStatementRow | None:
 
 
 def _detect_statement_row_note_token(line: str) -> tuple[str, int, int]:
-    for match in re.finditer(r"\b(?:note\s+)?(\d{1,2}[A-Za-z]?)(?!\s*,)\b(?=\s*(?:[=:]\s*)?\(?-?\d)", line, flags=re.I):
+    for match in re.finditer(r"\b(?:note\s+)?(\d{1,2}[A-Za-z]?)(?!\s*,)\b(?=\s*(?:[=:]\s*)?(?:-\s*)?\(?-?\d)", line, flags=re.I):
         ref = match.group(1).upper()
         if not _valid_note_number(ref):
             continue
@@ -5177,6 +5185,8 @@ def _line_amount_for_aliases(text: str, aliases: tuple[str, ...]) -> tuple[list[
         amount_source = f"{line[:ref_start]} {line[ref_end:]}" if note_ref else line
         amounts = [_parse_decimal(token) for token in _amount_tokens_from_statement_line(amount_source)]
         parsed = [amount for amount in amounts if amount is not None and abs(amount) < Decimal("100000000")]
+        if len(parsed) >= 3 and 0 < parsed[0] <= 60 and parsed[1] == 0:
+            parsed = parsed[1:]
         if parsed:
             return parsed[:2], raw_line
     return [], ""

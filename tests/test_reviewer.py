@@ -11,6 +11,8 @@ from reviewer import (
     _note_headings,
     _note_headings_by_page,
     _amounts_from_statement_line,
+    _simple_note_amounts_from_line,
+    _line_amount_for_aliases,
     check_formatting,
     check_extraction_quality,
     check_notes_agreement,
@@ -103,6 +105,88 @@ def test_value_added_interest_expense_difference_is_review_prompt_not_casting_er
 
     assert any("Value Added Statement" in check for check in performed)
     assert any(finding.category == "Value Added Statement" and finding.severity == "Medium" for finding in findings)
+
+
+def test_finance_cost_line_ignores_note_number_before_dash_amount():
+    amounts, raw_line = _line_amount_for_aliases(
+        "Finance costs 15 - (868)",
+        ("interest expense", "finance cost", "finance costs"),
+    )
+
+    assert raw_line == "Finance costs 15 - (868)"
+    assert amounts == [Decimal("0"), Decimal("-868")]
+
+
+def test_simple_note_amounts_treat_leading_dash_as_zero_and_ignore_draft_footer():
+    assert _simple_note_amounts_from_line("- 32,264") == [Decimal("0"), Decimal("32264")]
+    assert _simple_note_amounts_from_line("94,703 472,784 27 DRAFT") == [Decimal("94703"), Decimal("472784")]
+
+
+def test_ses_style_simple_note_sections_do_not_raise_false_total_findings():
+    document = PdfDocument(
+        [
+            PdfPage(
+                28,
+                "\n".join(
+                    [
+                        "11.Other operating losses",
+                        "Foreign exchange losses",
+                        "Unrealised exchange gains/(losses) 1,348 (3,775)",
+                        "Realised exchange gains/ (losses) (390) 13,739",
+                        "958 9,964",
+                        "12.Employee costs",
+                        "Salaries - 26,679",
+                        "Bonus - 3,905",
+                        "Other short-term costs - 95",
+                        "Pension costs - 1,585",
+                        "- 32,264",
+                        "Average number of persons employed during the year",
+                        "Administration - 1",
+                        "13.Depreciation expenses",
+                        "Depreciation",
+                        "Property, plant and equipment - 30,216",
+                        "14.Operating expenses",
+                        "Auditors remuneration 4,677 5,422",
+                        "Bank charges - 28",
+                        "Professional fees 40,985 49,806",
+                        "Office expenses 352 21,487",
+                        "Loss on disposal - 6,426",
+                        "Restructuring expense 180 1,652",
+                        "Fines and penalties * 10,113 -",
+                        "Security - 503",
+                        "Technical service fees ** 34,418 372,009",
+                        "Telecommunication expenses 3,978 3,805",
+                        "Transportation and travelling - 11,646",
+                        "94,703 472,784",
+                        "27",
+                        "DRAFT",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    findings = reviewer.check_totals_and_rounding(document)
+
+    assert not any("Note 12 Employee costs" in finding.location and finding.severity != "Passed" for finding in findings)
+    assert not any("Note 14 Operating expenses" in finding.location and finding.severity != "Passed" for finding in findings)
+
+
+def test_ses_style_note_4_internal_total_is_not_flagged_from_heading_number_noise():
+    findings: list[reviewer.Finding] = []
+    section = "\n".join(
+        [
+            "4.Trade and other receivables",
+            "Amount due from related parties (note 17) 260,213 225,062",
+            "Prepayments 1,577 -",
+            "Total trade and other receivables 261,790 225,062",
+        ]
+    )
+
+    reviewer._check_note_internal_total(findings, "4", "trade and other receivables", section, Decimal("1"))
+
+    assert not findings
 
 
 def test_footnote_asterisks_are_not_unreadable_placeholders():
