@@ -140,6 +140,43 @@ def test_narrative_dates_do_not_trigger_format_findings():
 
     findings, export = check_cross_page_consistency(document)
 
+
+def test_key_amount_consistency_picks_up_follow_on_tax_heading_totals():
+    document = PdfDocument(
+        [
+            PdfPage(
+                4,
+                "Directors' report\n"
+                "Taxation (46,581) (43,638)\n",
+                [],
+            ),
+            PdfPage(
+                15,
+                "Statement of Profit or Loss\n"
+                "Taxation 23 (46,581) (43,638)\n",
+                [],
+            ),
+            PdfPage(
+                40,
+                "23. Taxation\n"
+                "Major components of the tax expense\n"
+                "Current\n"
+                "46,236 36,721\n"
+                "Deferred\n"
+                "345 6,917\n"
+                "46,581 43,638\n",
+                [],
+            ),
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not findings
+    taxation_row = next(row for row in export["key_amounts"] if row["Metric"] == "Taxation")
+    assert taxation_row["Pages checked"] == "Pages 4, 15, 40"
+    assert "Page 40" in taxation_row["Context"]
+
     assert not [finding for finding in findings if finding.category == "Formatting"]
     assert not [row for row in export["dates"] if row.get("Comment") == "Inconsistent date format."]
 

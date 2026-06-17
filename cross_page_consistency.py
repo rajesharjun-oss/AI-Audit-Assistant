@@ -6,11 +6,11 @@ from models import PdfDocument, Finding
 
 # 1. Key Amounts Consistency
 KEY_METRICS = {
-    "Revenue": re.compile(r"^(?:Revenue|Turnover|Gross Earnings)\b", re.I),
-    "Profit before tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?\s+before\s+tax(?:ation)?\b", re.I),
-    "Taxation": re.compile(r"^(?:Taxation|Income tax expense)\b", re.I),
-    "Profit after tax": re.compile(r"^(?:Profit|Loss)(?:\/\(loss\))?(?:\s+after\s+tax(?:ation)?|\s+for\s+the\s+(?:year|period))\b", re.I),
-    "Total comprehensive income": re.compile(r"^Total\s+comprehensive\s+(?:income|loss)\b", re.I)
+    "Revenue": re.compile(r"^(?:['‘’\"]\s*)?(?:\d+[A-Za-z]?[.)]?\s+)?(?:Revenue|Turnover|Gross Earnings)\b", re.I),
+    "Profit before tax": re.compile(r"^(?:['‘’\"]\s*)?(?:\d+[A-Za-z]?[.)]?\s+)?(?:Profit|Loss)(?:\/\(loss\))?\s+before\s+tax(?:ation)?\b", re.I),
+    "Taxation": re.compile(r"^(?:['‘’\"]\s*)?(?:\d+[A-Za-z]?[.)]?\s+)?(?:Taxation|Income tax expense)\b", re.I),
+    "Profit after tax": re.compile(r"^(?:['‘’\"]\s*)?(?:\d+[A-Za-z]?[.)]?\s+)?(?:Profit|Loss)(?:\/\(loss\))?(?:\s+after\s+tax(?:ation)?|\s+for\s+the\s+(?:year|period))\b", re.I),
+    "Total comprehensive income": re.compile(r"^(?:['‘’\"]\s*)?(?:\d+[A-Za-z]?[.)]?\s+)?Total\s+comprehensive\s+(?:income|loss)\b", re.I)
 }
 
 # 2. Dates
@@ -138,11 +138,15 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     if 2 <= len(tokens) <= 4 and all(t[0].isupper() for t in tokens if t.isalpha()):
                         name_candidates.append((clean_name, page.number))
 
-        for line in text.splitlines():
+        lines = text.splitlines()
+        seen_metric_rows: set[tuple[str, int, str]] = set()
+        for index, line in enumerate(lines):
             line = line.strip()
             # Try to match key metrics
             for metric_name, pattern in KEY_METRICS.items():
                 if pattern.match(line):
+                    if metric_name == "Taxation" and "income tax expense" in line.lower() and not re.search(r"\d", line):
+                        continue
                     lower = line.lower()
                     if any(sw in lower for sw in ["loss allowance", "loss on foreign", "loss carried forward", "revenue contract", "contract liabilit"]):
                         continue
@@ -169,9 +173,20 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                         
                         try:
                             val = Decimal(clean_amt)
-                            amount_occurrences[metric_name].append((val, prior_amt, page.number, line))
+                            row_key = (metric_name, page.number, f"{val}|{prior_amt}")
+                            if row_key not in seen_metric_rows:
+                                seen_metric_rows.add(row_key)
+                                amount_occurrences[metric_name].append((val, prior_amt, page.number, line))
                         except Exception:
                             pass
+                    else:
+                        follow_on = _follow_on_metric_amounts(metric_name, lines, index)
+                        if follow_on:
+                            val, prior_amt, context_line = follow_on
+                            row_key = (metric_name, page.number, f"{val}|{prior_amt}")
+                            if row_key not in seen_metric_rows:
+                                seen_metric_rows.add(row_key)
+                                amount_occurrences[metric_name].append((val, prior_amt, page.number, context_line))
 
     # Process amounts
     for metric_name, occurrences in amount_occurrences.items():
@@ -180,23 +195,24 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
         val_map = defaultdict(list)
         all_prior_amts = set()
         for val, prior_amt, page_num, line in occurrences:
-            val_map[val].append((page_num, line))
+            compare_val = _consistency_compare_value(metric_name, val)
+            val_map[compare_val].append((page_num, line, val))
             if prior_amt is not None:
-                all_prior_amts.add(prior_amt)
+                all_prior_amts.add(_consistency_compare_value(metric_name, prior_amt))
         
         # If multiple different values found for the same metric
         val_keys = [k for k in val_map.keys() if k not in all_prior_amts]
         if len(val_keys) > 1:
             desc = []
             issue_pages = set()
-            for val, locs in val_map.items():
-                pages = [str(p) for p, _line in locs]
-                issue_pages.update(p for p, _line in locs)
-                desc.append(f"Amount {val:,.0f} found on pages: {', '.join(sorted(set(pages), key=int))}")
-                for p, l in locs:
+            for compare_val, locs in val_map.items():
+                pages = [str(p) for p, _line, _raw in locs]
+                issue_pages.update(p for p, _line, _raw in locs)
+                desc.append(f"Amount {compare_val:,.0f} found on pages: {', '.join(sorted(set(pages), key=int))}")
+                for p, l, raw_val in locs:
                     export_data["key_amounts"].append({
                         "Metric": metric_name,
-                        "Amount": f"{val:,.0f}",
+                        "Amount": f"{raw_val:,.0f}",
                         "Page": str(p),
                         "Context": _short_context(l),
                         "Issue": "Discrepancy"
@@ -214,13 +230,18 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             )
         else:
             # Consistent
-            val, locs = list(val_map.items())[0]
-            pages = sorted({p for p, _line in locs})
+            _compare_val, locs = list(val_map.items())[0]
+            pages = sorted({p for p, _line, _raw in locs})
+            display_val = next((raw for _page, _line, raw in locs), _compare_val)
+            context_summary = " | ".join(
+                f"Page {page}: {_short_context(line, 140)}"
+                for page, line, _raw in sorted(locs, key=lambda item: item[0])[:6]
+            )
             export_data["key_amounts"].append({
                 "Metric": metric_name,
-                "Amount": f"{val:,.0f}",
+                "Amount": f"{display_val:,.0f}",
                 "Pages checked": _format_page_location(pages),
-                "Context": "Consistent across detected occurrences.",
+                "Context": context_summary or "Consistent across detected occurrences.",
                 "Issue": "Consistent"
             })
 
@@ -314,6 +335,56 @@ def _short_context(line: str, limit: int = 220) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 3].rstrip() + "..."
+
+
+def _consistency_compare_value(metric_name: str, value: Decimal) -> Decimal:
+    if metric_name == "Taxation":
+        return abs(value)
+    return value
+
+
+def _follow_on_metric_amounts(
+    metric_name: str,
+    lines: list[str],
+    start_index: int,
+) -> tuple[Decimal, Decimal | None, str] | None:
+    if metric_name not in {"Taxation", "Revenue", "Profit before tax", "Profit after tax", "Total comprehensive income"}:
+        return None
+    candidates: list[tuple[Decimal, Decimal | None, str]] = []
+    for offset in range(1, 20):
+        if start_index + offset >= len(lines):
+            break
+        candidate = re.sub(r"\s+", " ", lines[start_index + offset].strip())
+        if not candidate:
+            continue
+        candidate_lower = candidate.lower()
+        if metric_name == "Taxation" and any(marker in candidate_lower for marker in ("reconciliation", "accounting profit", "tax effect of adjustments")):
+            break
+        if any(pattern.match(candidate) for pattern in KEY_METRICS.values()):
+            break
+        if re.match(r"^\d{1,2}\.\s", candidate):
+            break
+        amounts = re.findall(r"\(?-?\d[\d,]*\)?", candidate)
+        parsed: list[Decimal] = []
+        for amount in amounts:
+            clean = amount.replace(",", "").replace("(", "-").replace(")", "")
+            if len(clean.strip("-")) <= 2:
+                continue
+            if len(clean.strip("-")) == 4 and clean.strip("-").startswith("20"):
+                continue
+            try:
+                parsed.append(Decimal(clean))
+            except Exception:
+                continue
+        if len(parsed) >= 1 and not re.search(r"[A-Za-z]{3,}", re.sub(r"\(?-?\d[\d,]*\)?", " ", candidate)):
+            val = parsed[0]
+            prior = parsed[1] if len(parsed) >= 2 else None
+            candidates.append((val, prior, f"{lines[start_index].strip()} -> {candidate}"))
+    if not candidates:
+        return None
+    if metric_name == "Taxation":
+        return candidates[-1]
+    return candidates[0]
 
 
 def _likely_ocr_name_artifact(name1: str, pages1: set[int], name2: str, pages2: set[int]) -> bool:

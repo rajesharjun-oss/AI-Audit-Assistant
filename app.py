@@ -168,14 +168,29 @@ def _page_reference(location: str, evidence: str = "") -> str:
 
 def _page_reference_for_finding(finding, result) -> str:
     direct = _page_reference(finding.location, finding.evidence)
+    metadata = finding.metadata or {}
+    if finding.category == "Notes agreement":
+        pages: set[int] = set(int(match) for match in re.findall(r"\bPage\s+(\d+)\b", direct or ""))
+        note_pages = _note_page_reference_map(result)
+        for key in ("referenced_note", "suggested_note", "alternative_note_found"):
+            note_ref = str(metadata.get(key, "") or "").upper().strip()
+            if not note_ref:
+                continue
+            page_text = note_pages.get(note_ref) or note_pages.get(re.sub(r"[A-Z]+$", "", note_ref))
+            if page_text:
+                pages.update(int(match) for match in re.findall(r"\d+", page_text))
+        if pages:
+            ordered = sorted(pages)
+            return f"Page {ordered[0]}" if len(ordered) == 1 else "Pages " + ", ".join(str(page) for page in ordered)
     if direct:
         return direct
     note_match = re.search(r"\bNote\s+(\d+[A-Z]?)\b", f"{finding.location}\n{finding.issue}\n{finding.evidence}", flags=re.I)
     if note_match:
         note_pages = _note_page_reference_map(result)
         note_ref = note_match.group(1).upper()
-        if note_ref in note_pages:
-            return note_pages[note_ref]
+        page_text = note_pages.get(note_ref) or note_pages.get(re.sub(r"[A-Z]+$", "", note_ref))
+        if page_text:
+            return page_text
     location = str(finding.location or "").strip()
     if location:
         return location
@@ -187,6 +202,11 @@ def _note_page_reference_map(result) -> dict[str, str]:
     for row in _note_heading_rows(result):
         note = str(row.get("Note", "")).upper().strip()
         page_range = str(row.get("Page range", "") or row.get("Page", "")).strip()
+        if note and page_range:
+            mapping[note] = page_range
+    for row in _note_agreement_result_rows(result):
+        note = str(row.get("Note number", "")).upper().strip()
+        page_range = str(row.get("Note section page range", "")).strip()
         if note and page_range:
             mapping[note] = page_range
     return mapping
