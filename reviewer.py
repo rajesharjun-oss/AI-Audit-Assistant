@@ -341,6 +341,7 @@ def review_pdf(
     ai_policy_summary = ""
     ai_policy_status = "disabled"
     ai_policy_model = options.ai_model
+    ai_policy_message = ""
     if options.use_ai_policy_review:
         ai_review = run_ai_policy_review(
             document,
@@ -353,6 +354,7 @@ def review_pdf(
         ai_policy_model = ai_review.model
         ai_policy_summary = ai_review.summary
         ai_policy_export = ai_review.export_rows
+        ai_policy_message = ai_review.message
         if ai_review.status == "completed":
             findings.extend(ai_review.findings)
             checks_performed.append(f"AI policy and standards judgement completed using {ai_review.model}.")
@@ -533,6 +535,7 @@ def _build_result(
         "ai_policy_review_status": ai_policy_status,
         "ai_policy_review_model": ai_policy_model,
         "ai_policy_review_summary": ai_policy_summary,
+        "ai_policy_review_message": ai_policy_message,
         "checks_performed_count": len(checks_performed_list),
         "checks_passed_count": sum(1 for row in check_result_rows if row.get("Result") == "Passed"),
         "checks_skipped_count": len(checks_skipped_list),

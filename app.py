@@ -100,6 +100,7 @@ def _finding_rows(result) -> list[dict[str, str]]:
             "Check type": finding.category,
             "Confidence": _finding_confidence(finding, result),
             "Page reference": _page_reference_for_finding(finding, result),
+            "Note reference": _note_reference_for_finding(finding, result),
             "Statement": metadata.get("statement", ""),
             "Line item": metadata.get("line_item", ""),
             "Referenced note": metadata.get("referenced_note", ""),
@@ -132,6 +133,7 @@ def _finding_summary_rows(result) -> list[dict[str, str]]:
                 "Severity": finding.severity,
                 "Category": finding.category,
                 "Page reference": _page_reference_for_finding(finding, result),
+                "Note reference": _note_reference_for_finding(finding, result),
                 "Issue": finding.issue,
                 "Recommendation": finding.recommendation,
             }
@@ -210,6 +212,46 @@ def _page_reference_for_finding(finding, result) -> str:
     if location:
         return location
     return "Document-wide"
+
+
+def _note_reference_for_finding(finding, result) -> str:
+    metadata = finding.metadata or {}
+    note_candidates: list[str] = []
+    for key in ("referenced_note", "suggested_note", "alternative_note_found", "amount_found_in_note"):
+        value = str(metadata.get(key, "") or "").strip().upper()
+        if value:
+            if not value.startswith("NOTE "):
+                value = f"Note {value}"
+            note_candidates.append(value)
+    if note_candidates:
+        deduped = list(dict.fromkeys(note_candidates))
+        return ", ".join(deduped)
+
+    text = "\n".join(
+        str(part or "")
+        for part in (
+            finding.location,
+            finding.issue,
+            finding.evidence,
+            metadata.get("reason", ""),
+        )
+    )
+    matches = re.findall(r"\bNote\s+(\d+[A-Z]?)\b", text, flags=re.I)
+    if matches:
+        return ", ".join(f"Note {match.upper()}" for match in dict.fromkeys(matches))
+
+    page_ref = _page_reference_for_finding(finding, result)
+    if finding.category in {"Notes agreement", "Totals and rounding"} and "Page " in page_ref:
+        note_pages = _note_page_reference_map(result)
+        pages = set(re.findall(r"\d+", page_ref))
+        matched_notes = []
+        for note, note_page_range in note_pages.items():
+            note_pages_in_range = set(re.findall(r"\d+", note_page_range))
+            if pages & note_pages_in_range:
+                matched_notes.append(f"Note {note}")
+        if matched_notes:
+            return ", ".join(dict.fromkeys(matched_notes))
+    return ""
 
 
 def _note_page_reference_map(result) -> dict[str, str]:
@@ -352,7 +394,7 @@ def _build_excel_export(result) -> bytes:
         {"Metric": "note_headings_detected", "Value": result.metrics.get("note_headings_detected", 0)},
         {"Metric": "note_reference_findings", "Value": result.metrics.get("note_reference_findings", 0)},
         {"Metric": "AI policy review status", "Value": result.metrics.get("ai_policy_review_status", "disabled")},
-        {"Metric": "AI policy review model", "Value": result.metrics.get("ai_policy_review_model", "")},
+        {"Metric": "AI policy review message", "Value": result.metrics.get("ai_policy_review_message", "")},
         {"Metric": "AI policy review summary", "Value": result.metrics.get("ai_policy_review_summary", "")},
     ]
     checks_performed = [{"Check performed": item} for item in _metric_lines(result.metrics.get("checks_performed"), "No deterministic checks completed.")]
@@ -376,6 +418,7 @@ def _build_excel_export(result) -> bytes:
                 "Check type": "",
                 "Confidence": "",
                 "Page reference": "",
+                "Note reference": "",
                 "Statement": "",
                 "Line item": "",
                 "Referenced note": "",
@@ -417,7 +460,16 @@ def _build_excel_export(result) -> bytes:
         
         policy_rows = result.metrics.get("policy_export", []) or [{"Paragraph reviewed": "None found"}]
         pd.DataFrame(policy_rows).to_excel(writer, sheet_name="Notes 1 and 2 policy review", index=False)
-        ai_policy_rows = result.metrics.get("ai_policy_export", []) or [{"Title": "AI policy review not enabled or no rows returned."}]
+        ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
+        ai_message = str(result.metrics.get("ai_policy_review_message", "") or "").strip()
+        ai_default_title = {
+            "disabled": "AI policy review not enabled.",
+            "unavailable": "AI policy review was enabled but is unavailable in this environment.",
+            "skipped": "AI policy review was enabled but no suitable policy/disclosure context was detected.",
+            "error": "AI policy review was enabled but failed during execution.",
+            "completed": "AI policy review completed but returned no observation rows.",
+        }.get(ai_status, "AI policy review returned no rows.")
+        ai_policy_rows = result.metrics.get("ai_policy_export", []) or [{"Title": ai_default_title, "Status": ai_status, "Message": ai_message}]
         pd.DataFrame(ai_policy_rows).to_excel(writer, sheet_name="AI policy judgement", index=False)
         
         unref_rows = result.metrics.get("unreferenced_notes", []) or [{"Note": "None", "Heading": "None found", "Comment": "All notes referenced or filtered"}]
@@ -892,7 +944,7 @@ with st.container(border=True):
         """,
         unsafe_allow_html=True,
     )
-    review_mode = st.radio("Mode", ["Quick Review", "Advanced Review"], horizontal=True)
+    review_mode = st.radio("Mode", ["Quick Review", "Advanced Review"], horizontal=True, index=1)
     company_name = ""
     industry = ""
     reporting_currency = "Not specified"
@@ -948,13 +1000,13 @@ with st.container(border=True):
     ocr_dpi = ocr_cols[2].select_slider(
         "OCR quality",
         options=[150, 200, 250, 300],
-        value=200,
+        value=300,
         help="Higher DPI can improve OCR accuracy but takes longer.",
     )
     with st.expander("Advanced settings", expanded=review_mode == "Advanced Review"):
         cautious_note_agreement = st.checkbox(
             "Run cautious note-reference validation anyway",
-            value=False,
+            value=True,
             key="run_cautious_note_reference_validation_anyway",
             help=(
                 "When note/table confidence is below 80%, detailed note-reference validation is normally skipped. "
@@ -964,21 +1016,15 @@ with st.container(border=True):
         )
         use_ai_policy_review = st.checkbox(
             "Enable AI policy and standards judgement",
-            value=False,
+            value=True,
             help=(
                 "Runs an optional AI review over accounting policies and related disclosures to assess "
                 "policy relevance, standards context, disclosure completeness, and industry fit. "
                 "Requires OPENAI_API_KEY on the server."
             ),
         )
-        ai_model = st.text_input(
-            "AI model",
-            value="gpt-5-mini",
-            help="Used only when AI policy and standards judgement is enabled.",
-        )
     if review_mode != "Advanced Review":
         use_ai_policy_review = False
-        ai_model = "gpt-5-mini"
 
 st.markdown('<div class="section-label">Audit review modules</div>', unsafe_allow_html=True)
 st.markdown(
@@ -1054,7 +1100,7 @@ try:
                 ocr_dpi=int(ocr_dpi),
                 run_cautious_note_agreement=cautious_note_agreement,
                 use_ai_policy_review=use_ai_policy_review,
-                ai_model=ai_model.strip() or "gpt-5-mini",
+                ai_model="gpt-5-mini",
             ),
         )
 finally:
@@ -1092,6 +1138,14 @@ if result.metrics.get("ai_policy_review_status") == "completed":
     if ai_summary:
         st.markdown('<div class="section-label">AI policy judgement</div>', unsafe_allow_html=True)
         st.info(ai_summary)
+elif use_ai_policy_review:
+    ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
+    ai_message = str(result.metrics.get("ai_policy_review_message", "") or "").strip()
+    st.markdown('<div class="section-label">AI policy judgement</div>', unsafe_allow_html=True)
+    if ai_message:
+        st.warning(f"Status: {ai_status}. {ai_message}")
+    else:
+        st.warning(f"Status: {ai_status}. No AI policy observations were returned.")
 
 st.markdown(
     f"""
@@ -1190,6 +1244,7 @@ rows = [
         "Severity": finding.severity,
         "Category": finding.category,
         "Page reference": _page_reference_for_finding(finding, result),
+        "Note reference": _note_reference_for_finding(finding, result),
         "Location": finding.location,
         "Issue": finding.issue,
         "Evidence": finding.evidence,
@@ -1202,9 +1257,12 @@ st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 for finding in filtered:
     page_ref = _page_reference_for_finding(finding, result) or finding.location
+    note_ref = _note_reference_for_finding(finding, result)
     with st.expander(f"{finding.severity}: {page_ref} - {finding.issue}", expanded=finding.severity == "High"):
         st.write(f"**Category:** {finding.category}")
         st.write(f"**Page reference:** {page_ref}")
+        if note_ref:
+            st.write(f"**Note reference:** {note_ref}")
         st.write(f"**Location:** {finding.location}")
         st.write(f"**Evidence:** {finding.evidence}")
         st.write(f"**Recommendation:** {finding.recommendation}")
