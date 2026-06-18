@@ -34,6 +34,23 @@ def _checks_skipped_rows(result) -> list[dict[str, str]]:
     return rows
 
 
+def _printed_page_map(result) -> dict[int, int]:
+    raw_map = result.metrics.get("printed_page_map", {})
+    if not isinstance(raw_map, dict):
+        return {}
+    mapped: dict[int, int] = {}
+    for key, value in raw_map.items():
+        try:
+            mapped[int(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return mapped
+
+
+def _reviewer_page_number(result, page_number: int) -> int:
+    return _printed_page_map(result).get(page_number, page_number)
+
+
 def _parse_skipped_check(item: str) -> dict[str, str]:
     check_area = item
     page_reference = ""
@@ -168,13 +185,16 @@ def _table_arithmetic_display(result) -> str:
     return result.metrics.get("table_arithmetic_confidence", "0%")
 
 
-def _page_reference(location: str, evidence: str = "") -> str:
+def _page_reference(location: str, evidence: str = "", result=None) -> str:
     text = f"{location}\n{evidence}"
     pages = set()
     for match in re.finditer(r"\bpages?\s*:?\s+([0-9,\sand]+)", text, flags=re.I):
         for number in re.findall(r"\d+", match.group(1)):
-            pages.add(int(number))
-    pages.update(int(match) for match in re.findall(r"\bPage\s+(\d+)\b", text, flags=re.I))
+            page_number = int(number)
+            pages.add(_reviewer_page_number(result, page_number) if result is not None else page_number)
+    for match in re.findall(r"\bPage\s+(\d+)\b", text, flags=re.I):
+        page_number = int(match)
+        pages.add(_reviewer_page_number(result, page_number) if result is not None else page_number)
     pages = sorted(pages)
     if not pages:
         return ""
@@ -184,7 +204,7 @@ def _page_reference(location: str, evidence: str = "") -> str:
 
 
 def _page_reference_for_finding(finding, result) -> str:
-    direct = _page_reference(finding.location, finding.evidence)
+    direct = _page_reference(finding.location, finding.evidence, result)
     metadata = finding.metadata or {}
     if finding.category == "Notes agreement":
         pages: set[int] = set(int(match) for match in re.findall(r"\bPage\s+(\d+)\b", direct or ""))
@@ -478,10 +498,12 @@ def _build_excel_export(result) -> bytes:
         amount_rows = cross_export.get("key_amounts", []) or [{"Metric": "None found"}]
         name_rows = clean_name_consistency_rows(cross_export.get("names", [])) or [{"Name variant 1": "None found"}]
         date_rows = cross_export.get("dates", []) or [{"Date found": "None found"}]
+        grammar_rows = cross_export.get("grammar", []) or [{"Page": "None found"}]
         
         pd.DataFrame(amount_rows).to_excel(writer, sheet_name="Key amount consistency", index=False)
         pd.DataFrame(name_rows).to_excel(writer, sheet_name="Name consistency", index=False)
         pd.DataFrame(date_rows).to_excel(writer, sheet_name="Date consistency", index=False)
+        pd.DataFrame(grammar_rows).to_excel(writer, sheet_name="Grammar review", index=False)
         
         pd.DataFrame(check_results).to_excel(writer, sheet_name="Checks results", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
@@ -513,6 +535,7 @@ def _build_excel_export(result) -> bytes:
         _format_excel_table_sheet(writer.book["Key amount consistency"], "AmountConsistency")
         _format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
         _format_excel_table_sheet(writer.book["Date consistency"], "DateConsistency")
+        _format_excel_table_sheet(writer.book["Grammar review"], "GrammarReview")
         _format_excel_table_sheet(writer.book["Checks results"], "ChecksResults")
         _format_excel_table_sheet(writer.book["Skipped checks summary"], "SkippedChecksSummary")
         _format_excel_table_sheet(writer.book["Skipped table details"], "SkippedTableDetails")

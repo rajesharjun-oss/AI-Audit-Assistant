@@ -302,6 +302,61 @@ def test_narrative_dates_do_not_trigger_format_findings():
     )
 
     findings, export = check_cross_page_consistency(document)
+    assert not [row for row in export["dates"] if row.get("Comment") == "Inconsistent date format."]
+    assert not [finding for finding in findings if finding.category == "Formatting" and "preferred format" in finding.issue]
+
+
+def test_month_day_year_without_comma_is_preferred_date_format():
+    document = PdfDocument(
+        [
+            PdfPage(
+                5,
+                "Financial Statements for the year ended December 31 2025\n"
+                "Approved by the board on April 4 2026.",
+                [],
+            )
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not [row for row in export["dates"] if row.get("Comment") == "Inconsistent date format."]
+    assert not [finding for finding in findings if finding.category == "Formatting" and "preferred format" in finding.issue]
+
+
+def test_cross_page_consistency_flags_obvious_repeated_word_grammar_issue():
+    document = PdfDocument(
+        [
+            PdfPage(
+                12,
+                "Notes to the financial statements\n"
+                "The company company did not provide any services other than the statutory audit.",
+                [],
+            )
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert any(row["Issue"] == "Repeated word detected." for row in export["grammar"])
+    assert any("Possible grammatical or drafting issue detected." == finding.issue for finding in findings)
+
+
+def test_cross_page_consistency_flags_common_spelling_error():
+    document = PdfDocument(
+        [
+            PdfPage(
+                18,
+                "The deffered tax balance was reviewed by management and agreed to the supporting schedule.",
+                [],
+            )
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert any("Possible spelling error" in row["Issue"] for row in export["grammar"])
+    assert any(finding.issue == "Possible spelling issue detected." for finding in findings)
 
 
 def test_key_amount_consistency_picks_up_follow_on_tax_heading_totals():
@@ -2642,6 +2697,32 @@ def test_ocr_notes_start_page_falls_back_to_significant_accounting_policies_afte
     assert any(row["Normalized snippet"] for row in result.metrics["notes_heading_candidates"])
 
 
+def test_printed_footer_page_numbers_are_used_for_notes_metrics(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(28, "Notes to the Financial Statements\n14. Taxation\nCurrent tax 10 9\n27\nDRAFT", []),
+            PdfPage(29, "15. Revenue\nRevenue 100 90\n28\nDRAFT", []),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions())
+
+    assert result.metrics["printed_page_map"]["28"] == 27
+    assert result.metrics["notes_section_start_page"] == 27
+    assert "Note 14 | Page 27 | Page 27 | Taxation" in result.metrics["note_headings"]
+
+
+def test_printed_footer_page_number_detects_bottom_page_before_draft():
+    assert reviewer._printed_footer_page_number("Some text\n27\nDRAFT") == 27
+    assert reviewer._printed_footer_page_number("Some text\nPage 27") == 27
+
+
+def test_clean_note_title_repairs_common_ocr_heading_typos():
+    assert reviewer._clean_note_title("Trade and othet payables") == "Trade and other payables"
+    assert reviewer._clean_note_title("Depreciation and amottisation") == "Depreciation and amortisation"
+
+
 def test_notes_heading_candidates_include_rejected_diagnostic_rows(monkeypatch):
     document = PdfDocument(
         [
@@ -2837,7 +2918,7 @@ def test_detected_profile_infers_upload_only_context():
     profile = infer_detected_profile(document)
 
     assert profile["Company name"] == "National Institute of Professional Administrators of Nigeria"
-    assert profile["Year end"] == "December 31, 2025"
+    assert profile["Year end"] == "December 31 2025"
     assert profile["Currency"] == "NGN / N'000"
     assert profile["Framework"] == "IFRS"
     assert "professional body" in profile["Entity type"].lower()

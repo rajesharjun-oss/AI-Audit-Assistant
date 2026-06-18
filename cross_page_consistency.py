@@ -17,6 +17,39 @@ KEY_METRICS = {
 DATE_FORMAT_1_RE = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b", re.I)
 DATE_FORMAT_2_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+20\d{2}\b", re.I)
 DATE_FORMAT_3_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b", re.I)
+REPEATED_WORD_RE = re.compile(r"\b([A-Za-z]{2,})\s+\1\b", re.I)
+MISSING_SPACE_AFTER_PUNCT_RE = re.compile(r"(?<=[A-Za-z])([,;:])(?=[A-Za-z])|(?<=[A-Za-z])\.(?=[A-Za-z][a-z])")
+COMMON_SPELLING_CORRECTIONS = {
+    "teh": "the",
+    "statment": "statement",
+    "statments": "statements",
+    "finacial": "financial",
+    "managment": "management",
+    "goverance": "governance",
+    "occurence": "occurrence",
+    "seperate": "separate",
+    "comittee": "committee",
+    "subsiduary": "subsidiary",
+    "equiptment": "equipment",
+    "deffered": "deferred",
+    "depreciaton": "depreciation",
+    "ammortisation": "amortisation",
+    "ammortization": "amortization",
+    "intengible": "intangible",
+    "recievable": "receivable",
+    "recievables": "receivables",
+    "liabilty": "liability",
+    "liabilties": "liabilities",
+    "reconcilliation": "reconciliation",
+    "remuneraton": "remuneration",
+    "busines": "business",
+    "orgnisation": "organisation",
+    "orgnaisation": "organisation",
+    "acheive": "achieve",
+    "goverment": "government",
+    "contrat": "contract",
+    "relevent": "relevant",
+}
 
 
 def _date_format_context_requires_standardisation(line: str) -> bool:
@@ -51,12 +84,75 @@ def _date_format_context_requires_standardisation(line: str) -> bool:
     return any(term in lower for term in required)
 
 
+def _normalise_preferred_date_format(date_str: str) -> str:
+    cleaned = re.sub(r"(\d{1,2})(st|nd|rd|th)\b", r"\1", date_str.strip(), flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned.replace(",", " ")).strip()
+    month_first = re.match(r"^([A-Za-z]+)\s+(\d{1,2})\s+(20\d{2})$", cleaned)
+    if month_first:
+        month, day, year = month_first.groups()
+        return f"{month} {int(day)} {year}"
+    day_first = re.match(r"^(\d{1,2})\s+([A-Za-z]+)\s+(20\d{2})$", cleaned)
+    if day_first:
+        day, month, year = day_first.groups()
+        return f"{month} {int(day)} {year}"
+    return cleaned
+
+
+def _looks_like_grammar_review_line(line: str) -> bool:
+    clean = re.sub(r"\s+", " ", line).strip()
+    lower = clean.lower()
+    if len(clean) < 20:
+        return False
+    if len(re.findall(r"\d", clean)) > 3:
+        return False
+    excluded = (
+        "statement of",
+        "notes to the financial statements",
+        "n'000",
+        "note(s)",
+        "year ended",
+        "as at",
+        "page ",
+        "draft",
+    )
+    if any(marker in lower for marker in excluded):
+        return False
+    words = re.findall(r"[A-Za-z']+", clean)
+    return len(words) >= 5
+
+
+def _grammar_issue_for_line(line: str) -> str:
+    if REPEATED_WORD_RE.search(line):
+        return "Repeated word detected."
+    if MISSING_SPACE_AFTER_PUNCT_RE.search(line):
+        return "Possible missing space after punctuation."
+    return ""
+
+
+def _spelling_issue_for_line(line: str) -> str:
+    tokens = re.findall(r"[A-Za-z']+", line)
+    for index, token in enumerate(tokens):
+        normalized = token.lower()
+        if len(normalized) < 4:
+            continue
+        if normalized in {"ifrs", "ias", "naira", "ngn", "usd", "eur", "gbp"}:
+            continue
+        if index > 0 and token[:1].isupper():
+            # likely a name/proper noun in narrative text
+            continue
+        correction = COMMON_SPELLING_CORRECTIONS.get(normalized)
+        if correction:
+            return f"Possible spelling error: '{token}' -> '{correction}'."
+    return ""
+
+
 def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], dict[str, list[dict[str, str]]]]:
     findings = []
     export_data = {
         "key_amounts": [],
         "names": [],
-        "dates": []
+        "dates": [],
+        "grammar": [],
     }
     
     amount_occurrences = defaultdict(list)
@@ -81,6 +177,47 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                 # Only add if it wasn't already matched as part of FORMAT 1 or 2
                 if not any(match.group(0) in d for d in date_occurrences.keys()):
                     date_occurrences[match.group(0)].append((page.number, line.strip()))
+            if _looks_like_grammar_review_line(line):
+                grammar_issue = _grammar_issue_for_line(line)
+                spelling_issue = _spelling_issue_for_line(line)
+                if grammar_issue:
+                    export_data["grammar"].append(
+                        {
+                            "Page": str(page.number),
+                            "Issue": grammar_issue,
+                            "Context": _short_context(line),
+                            "Comment": "Review wording and punctuation.",
+                        }
+                    )
+                    findings.append(
+                        Finding(
+                            "Formatting",
+                            "Low",
+                            f"Page {page.number}",
+                            "Possible grammatical or drafting issue detected.",
+                            f"{grammar_issue} Context: {_short_context(line, 180)}",
+                            "Review the sentence for grammar, punctuation, and drafting clarity.",
+                        )
+                    )
+                if spelling_issue:
+                    export_data["grammar"].append(
+                        {
+                            "Page": str(page.number),
+                            "Issue": spelling_issue,
+                            "Context": _short_context(line),
+                            "Comment": "Review spelling and standardise the wording.",
+                        }
+                    )
+                    findings.append(
+                        Finding(
+                            "Formatting",
+                            "Low",
+                            f"Page {page.number}",
+                            "Possible spelling issue detected.",
+                            f"{spelling_issue} Context: {_short_context(line, 180)}",
+                            "Review the word choice and correct the spelling if needed.",
+                        )
+                    )
             
         # Extract potential names in signature blocks or directors lists
         page_lower = text.lower()
@@ -246,8 +383,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             })
 
     # Process dates
-    expected_format = "31 December 2025 (DD Month YYYY)"
-    preferred_re = re.compile(r"\b(?:\d{1,2}\s+)?(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b", re.I)
+    expected_format = "December 31 2025 (Month DD YYYY)"
+    preferred_re = re.compile(r"^(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\s+20\d{2}$", re.I)
 
     for date_str, occurrences in date_occurrences.items():
         pages = [page for page, _line in occurrences]
@@ -257,7 +394,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             if _date_format_context_requires_standardisation(line)
         ]
         if relevant_contexts:
-            if not preferred_re.match(date_str):
+            normalized_date = _normalise_preferred_date_format(date_str)
+            if not preferred_re.match(normalized_date):
                 relevant_pages = [page for page, _line in relevant_contexts]
                 export_data["dates"].append({
                     "Date found": date_str,
@@ -277,7 +415,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                 )
             else:
                 export_data["dates"].append({
-                    "Date found": date_str,
+                    "Date found": normalized_date,
                     "Page": ", ".join(map(str, sorted(set(pages)))),
                     "Expected format": expected_format,
                     "Comment": "Consistent."

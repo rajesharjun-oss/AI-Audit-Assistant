@@ -25,6 +25,15 @@ NORMALIZED_AMOUNT_RE = re.compile(
 NOTE_NUMBER_ONLY_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s+((?:20\d{2}|N['’]?\s?000|\$?000s?|\d{4})[\s,]*)+$", re.I)
 ENTITY_SUFFIX_RE = re.compile(r"\b(?:limited|ltd|plc|inc|corp|corporation|company)\b", re.I)
 VALID_CURRENCIES = {"NGN", "USD", "GBP", "EUR", "ZAR", "GHS", "KES", "CAD", "AUD"}
+NOTE_TITLE_OCR_CORRECTIONS = {
+    "othet": "other",
+    "amottisation": "amortisation",
+    "patty": "party",
+    "prepatation": "preparation",
+    "liabilties": "liabilities",
+    "liabilty": "liability",
+    "interpreiations": "interpretations",
+}
 
 
 @dataclass(frozen=True)
@@ -494,6 +503,7 @@ def _build_result(
     positive_assurance = _positive_assurance_text(findings, checks_performed_list)
     note_validation_debug = note_validation_debug or _note_validation_debug(document, False, [])
     rotated_pages = getattr(document, "rotated_page_details", []) or []
+    notes_start_page = _notes_start_page(document)
     metrics = {
         "document_scope": _document_scope(document),
         "pages": len(document.pages),
@@ -518,8 +528,9 @@ def _build_result(
         "high": sum(1 for item in findings if item.severity == "High"),
         "medium": sum(1 for item in findings if item.severity == "Medium"),
         "low": sum(1 for item in findings if item.severity == "Low"),
+        "printed_page_map": {str(key): value for key, value in _printed_page_number_map(document).items()},
         "note_headings": _format_note_heading_debug(document),
-        "notes_section_start_page": _notes_start_page(document) or "Not detected",
+        "notes_section_start_page": _reviewer_page_number(document, notes_start_page) if notes_start_page else "Not detected",
         "notes_heading_snippet": _format_notes_heading_snippet(document),
         "notes_heading_candidates": _notes_heading_candidate_rows(document),
         "primary_statement_pages": _format_primary_statement_debug(document),
@@ -553,6 +564,7 @@ def _note_validation_debug(
     note_findings: list[Finding],
 ) -> dict[str, int | str | bool]:
     note_reference_findings = sum(1 for finding in note_findings if finding.metadata and finding.metadata.get("referenced_note"))
+    notes_start_page = _notes_start_page(document)
     if enabled and document.ocr_used and _statement_note_lines(document) and _note_headings_by_page(document):
         mode = "review_prompt"
     elif enabled and not document.ocr_used:
@@ -564,7 +576,7 @@ def _note_validation_debug(
         "note_validation_mode": mode,
         "note_reference_rows_detected": sum(1 for i in _statement_note_lines(document) if i.ref) if document.pages else 0,
         "note_headings_detected": len(_note_headings_by_page(document)) if document.pages else 0,
-        "notes_section_start_page": _notes_start_page(document) or "Not detected",
+        "notes_section_start_page": _reviewer_page_number(document, notes_start_page) if notes_start_page else "Not detected",
         "note_reference_findings": note_reference_findings,
     }
 
@@ -653,7 +665,9 @@ def _format_primary_statement_debug(document: PdfDocument) -> str:
     classified = _classified_primary_statement_pages(document)
     if not classified:
         return "No primary statement pages detected."
-    return "\n".join(f"{name} | Page {page.number}" for name, page in classified.items())
+    return "\n".join(
+        f"{name} | Page {_reviewer_page_number(document, page.number)}" for name, page in classified.items()
+    )
 
 
 def _format_ocr_statement_rows_debug(document: PdfDocument) -> str:
@@ -669,7 +683,7 @@ def _format_ocr_statement_rows_debug(document: PdfDocument) -> str:
                 " | ".join(
                     (
                         statement_name,
-                        f"Page {page.number}",
+                        f"Page {_reviewer_page_number(document, page.number)}",
                         row.label,
                         row.note_ref,
                         _format_decimal_for_export(current_amount),
@@ -691,8 +705,76 @@ def _note_section_page_ranges(document: PdfDocument) -> dict[str, str]:
     for index, (ref, (_title, start_page)) in enumerate(ordered):
         next_page = ordered[index + 1][1][1] if index + 1 < len(ordered) else start_page
         end_page = max(start_page, next_page - 1)
-        ranges[ref] = f"Page {start_page}" if end_page == start_page else f"Pages {start_page}-{end_page}"
+        reviewer_start = _reviewer_page_number(document, start_page)
+        reviewer_end = _reviewer_page_number(document, end_page)
+        ranges[ref] = (
+            f"Page {reviewer_start}"
+            if reviewer_end == reviewer_start
+            else f"Pages {reviewer_start}-{reviewer_end}"
+        )
     return ranges
+
+
+def _printed_footer_page_number(text: str) -> int | None:
+    if not text:
+        return None
+    non_empty_lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+    if not non_empty_lines:
+        return None
+    tail = non_empty_lines[-12:]
+    for line in reversed(tail):
+        normalized = line.lower().strip(" -")
+        if normalized in {"draft", "audited", "unaudited"}:
+            continue
+        if re.fullmatch(r"\d{1,3}", normalized):
+            return int(normalized)
+        match = re.fullmatch(r"page\s+(\d{1,3})", normalized)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _printed_page_number_map(document: PdfDocument) -> dict[int, int]:
+    mapping: dict[int, int] = {}
+    for page in document.pages:
+        printed = _printed_footer_page_number(page.text)
+        if printed is not None:
+            mapping[page.number] = printed
+    return mapping
+
+
+def _reviewer_page_number(document: PdfDocument, page_number: int) -> int:
+    return _printed_page_number_map(document).get(page_number, page_number)
+
+
+def _translate_page_reference_text(text: str, document: PdfDocument) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return value
+
+    def _replace(match: re.Match[str]) -> str:
+        prefix = match.group(1)
+        body = match.group(2)
+        translated = []
+        for token in re.split(r"(\D+)", body):
+            if token.isdigit():
+                translated.append(str(_reviewer_page_number(document, int(token))))
+            else:
+                translated.append(token)
+        return prefix + "".join(translated)
+
+    return re.sub(r"\b(Pages?\s+)([\d,\-\s]+)", _replace, value, flags=re.I)
+
+
+def _apply_reviewer_page_labels_to_note_rows(document: PdfDocument, rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    for row in rows:
+        page_value = str(row.get("Page", "")).strip()
+        if page_value.isdigit():
+            row["Page"] = str(_reviewer_page_number(document, int(page_value)))
+        note_range = str(row.get("Note section page range", "")).strip()
+        if note_range:
+            row["Note section page range"] = _translate_page_reference_text(note_range, document)
+    return rows
 
 
 def _notes_start_page(document: PdfDocument) -> int | None:
@@ -1053,9 +1135,10 @@ def _candidate_followed_by_numbered_policy(lines: list[str], index: int) -> bool
 def _notes_heading_candidate_rows(document: PdfDocument) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for candidate in _notes_heading_candidates(document, include_weak=True):
+        reviewer_page = _reviewer_page_number(document, int(candidate["page"]))
         rows.append(
             {
-                "Page": str(candidate["page"]),
+                "Page": str(reviewer_page),
                 "Raw OCR snippet": str(candidate["snippet"]),
                 "Normalized snippet": str(candidate.get("normalized_snippet", "")),
                 "Similarity score": str(candidate["confidence"]),
@@ -1070,7 +1153,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     statement_lines = _statement_note_lines(document)
     if not statement_lines:
-        return rows
+        return _apply_reviewer_page_labels_to_note_rows(document, rows)
     if document.ocr_used:
         headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
         page_ranges = _note_section_page_ranges(document)
@@ -1286,7 +1369,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                 f"heading match / {matching_method or 'normalized amount'}" if alternative_ref else (matching_method or "not found"),
             )
         )
-    return rows
+    return _apply_reviewer_page_labels_to_note_rows(document, rows)
 
 
 def _filtered_note_agreement_rows(document: PdfDocument, findings: list[Finding] | None = None) -> list[dict[str, str]]:
@@ -1761,9 +1844,23 @@ def _detect_year_end(text: str) -> str:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.I)
         if match:
-            return re.sub(r"\s+", " ", match.group(1)).strip()
+            return _normalise_year_end_format(match.group(1))
     years = sorted(set(YEAR_RE.findall(text)))
     return years[-1] if years else "Not detected"
+
+
+def _normalise_year_end_format(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "").replace(",", " ")).strip()
+    cleaned = re.sub(r"(\d{1,2})(st|nd|rd|th)\b", r"\1", cleaned, flags=re.I)
+    month_first = re.match(r"^([A-Za-z]+)\s+(\d{1,2})\s+(20\d{2})$", cleaned)
+    if month_first:
+        month, day, year = month_first.groups()
+        return f"{month} {int(day)} {year}"
+    day_first = re.match(r"^(\d{1,2})\s+([A-Za-z]+)\s+(20\d{2})$", cleaned)
+    if day_first:
+        day, month, year = day_first.groups()
+        return f"{month} {int(day)} {year}"
+    return cleaned
 
 
 def _detect_currency(text: str) -> str:
@@ -6560,7 +6657,7 @@ def _format_note_heading_debug(document: PdfDocument) -> str:
         title, page_number = headings[ref]
         confidence, source_snippet = _note_heading_source_detail(document, ref, title, page_number)
         parts.append(
-            f"Note {ref} | Page {page_number} | {page_ranges.get(ref, f'Page {page_number}')} | {title} | {confidence} | {source_snippet}"
+            f"Note {ref} | Page {_reviewer_page_number(document, page_number)} | {page_ranges.get(ref, f'Page {_reviewer_page_number(document, page_number)}')} | {title} | {confidence} | {source_snippet}"
         )
     return "\n".join(parts)
 
@@ -6596,7 +6693,7 @@ def _statement_reference_pages(document: PdfDocument) -> dict[str, str]:
     pages_by_ref: dict[str, set[int]] = defaultdict(set)
     for item in _statement_note_lines(document):
         if item.ref and item.page_number:
-            pages_by_ref[item.ref.upper()].add(item.page_number)
+            pages_by_ref[item.ref.upper()].add(_reviewer_page_number(document, item.page_number))
     formatted: dict[str, str] = {}
     for ref, pages in pages_by_ref.items():
         ordered = sorted(pages)
@@ -7627,7 +7724,19 @@ def _clean_note_title(title: str) -> str:
     title = re.sub(r"\s*\(?continued\)?\s*$", "", title, flags=re.I)
     title = re.sub(r"(?:\s+20\d{2}){1,3}\s*$", "", title)
     title = re.sub(r"\s+(?:N['’]?\s?000|\$?000s?)(?:\s+(?:N['’]?\s?000|\$?000s?))*$", "", title, flags=re.I)
-    return title.strip()
+    title = re.sub(r"\s+", " ", title).strip(" -:;,.")
+    words: list[str] = []
+    for word in title.split():
+        match = re.match(r"^([A-Za-z]+)([^A-Za-z]*)$", word)
+        if not match:
+            words.append(word)
+            continue
+        stem, suffix = match.groups()
+        corrected = NOTE_TITLE_OCR_CORRECTIONS.get(stem.lower(), stem)
+        if stem[:1].isupper():
+            corrected = corrected[:1].upper() + corrected[1:]
+        words.append(corrected + suffix)
+    return " ".join(words).strip()
 
 
 def _looks_like_primary_statement_line(line: str) -> bool:
