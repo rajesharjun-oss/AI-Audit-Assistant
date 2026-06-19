@@ -159,6 +159,49 @@ def test_cash_flow_closing_check_uses_exchange_on_cash_line():
     assert not any("closing cash" in finding.issue.lower() for finding in findings)
 
 
+def test_cash_flow_without_financing_section_does_not_log_false_skip():
+    document = PdfDocument(
+        [
+            PdfPage(
+                19,
+                "\n".join(
+                    [
+                        "Statement of Cash Flows",
+                        "Net cash generated from/(used in) operating activities 341,897 816,212",
+                        "Net cash used in investing activities (428,180) (427,963)",
+                        "Total cash movement for the year (86,283) 388,249",
+                        "Cash and cash equivalents at the beginning of the year 56,041 53,109",
+                        "Losses/(Gains) on foreign exchange on cash and cash equivalents 87,178 (385,317)",
+                        "Cash and cash equivalents at the end of the year 56,936 56,041",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    findings, performed, skipped = check_primary_statement_consistency(document)
+
+    assert any("opening plus movement checked to closing" in item for item in performed)
+    assert any("net cash increase checked" in item for item in performed)
+    assert not any("operating/investing/financing/movement rows were not confidently parsed" in item for item in skipped)
+    assert not findings
+
+
+def test_payable_receivable_note_matches_absolute_amount_sign():
+    section = "13. Current tax payable/(receivable)\nCompany Income tax - current period - (1,015)"
+
+    match = reviewer._amount_match_in_section(
+        Decimal("1015"),
+        section,
+        Decimal("1"),
+        allow_absolute=reviewer._note_heading_allows_signless_amount_match("Current tax payable/(receivable)", section),
+    )
+
+    assert match["found"] is True
+    assert "absolute value" in str(match["method"])
+
+
 def test_revenue_consistency_prefers_statement_and_note_totals_over_front_matter_outlier():
     document = PdfDocument(
         [

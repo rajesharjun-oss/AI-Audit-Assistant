@@ -1328,8 +1328,10 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                 )
             )
             continue
-        current_match = _amount_match_in_section(current_amount, referenced_section, tolerance)
-        prior_match = _amount_match_in_section(prior_amount, referenced_section, tolerance)
+        referenced_heading = _get_note_heading_with_fallback(item.ref, headings)
+        allow_absolute = _note_heading_allows_signless_amount_match(referenced_heading, referenced_section)
+        current_match = _amount_match_in_section(current_amount, referenced_section, tolerance, allow_absolute=allow_absolute)
+        prior_match = _amount_match_in_section(prior_amount, referenced_section, tolerance, allow_absolute=allow_absolute)
         current_found = bool(current_match["found"])
         prior_found = bool(prior_match["found"])
         matched_snippet = str(current_match["snippet"] or prior_match["snippet"] or "")
@@ -4829,6 +4831,14 @@ def _check_cash_flow_text(
     closing = closing or _cash_flow_line_amounts_for_aliases(text, tuple(close_aliases))
     exch = exch or _cash_flow_line_amounts_for_aliases(text, tuple(exch_aliases))
 
+    op = op or None
+    inv = inv or None
+    fin = fin or None
+    mov = mov or None
+    opening = opening or None
+    closing = closing or None
+    exch = exch or None
+
     vector_length = max((len(v) for v in rows.values() if v), default=0)
     zero_vector = [Decimal("0")] * vector_length if vector_length else None
     normalized_text = _normalise_cash_flow_label(text)
@@ -7120,8 +7130,10 @@ def _check_cautious_face_note_amount_agreement(
             continue
         current_amount = item.amounts[0] if len(item.amounts) >= 1 else None
         prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
-        current_match = _amount_match_in_section(current_amount, referenced_section, tolerance)
-        prior_match = _amount_match_in_section(prior_amount, referenced_section, tolerance)
+        referenced_heading = _get_note_heading_with_fallback(item.ref, headings)
+        allow_absolute = _note_heading_allows_signless_amount_match(referenced_heading, referenced_section)
+        current_match = _amount_match_in_section(current_amount, referenced_section, tolerance, allow_absolute=allow_absolute)
+        prior_match = _amount_match_in_section(prior_amount, referenced_section, tolerance, allow_absolute=allow_absolute)
         current_found = current_match["found"]
         prior_found = prior_match["found"]
         if current_found and (prior_amount is None or prior_found):
@@ -7174,15 +7186,29 @@ def _single_amount_in_section(amount: Decimal | None, section: str, tolerance: D
     return _amount_match_in_section(amount, section, tolerance)["found"]
 
 
-def _amount_match_in_section(amount: Decimal | None, section: str, tolerance: Decimal) -> dict[str, object]:
+def _amount_match_in_section(
+    amount: Decimal | None,
+    section: str,
+    tolerance: Decimal,
+    allow_absolute: bool = False,
+) -> dict[str, object]:
     if amount is None or amount == 0 or abs(amount) <= tolerance * 5:
         return {"found": True, "snippet": "", "method": "not material"}
     for candidate, snippet, method in _normalized_amount_candidates(section):
         if abs(candidate - amount) <= tolerance:
             return {"found": True, "snippet": snippet, "method": method}
-        if amount < 0 and abs(abs(candidate) - abs(amount)) <= tolerance:
+        if (allow_absolute or amount < 0) and abs(abs(candidate) - abs(amount)) <= tolerance:
             return {"found": True, "snippet": snippet, "method": f"{method} / absolute value"}
     return {"found": False, "snippet": "", "method": "not found"}
+
+
+def _note_heading_allows_signless_amount_match(note_heading: str, note_section: str = "") -> bool:
+    combined = _normalise_match_words(f"{note_heading} {note_section[:240]}")
+    return (
+        "payable" in combined and "receivable" in combined
+    ) or (
+        "asset" in combined and "liabilit" in combined
+    )
 
 
 def _normalized_amount_candidates(text: str) -> list[tuple[Decimal, str, str]]:
