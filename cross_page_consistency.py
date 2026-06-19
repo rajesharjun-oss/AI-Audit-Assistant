@@ -149,7 +149,11 @@ def _spelling_issue_for_line(line: str) -> str:
 def _metric_line_is_comparable(metric_name: str, line: str) -> bool:
     lower = re.sub(r"\s+", " ", line.lower()).strip()
     if metric_name == "Revenue":
+        if re.search(r"[A-Za-z]\d{1,3},\d{3}", line):
+            return False
         if "revenue from contracts with customers" in lower and not re.search(r"\brevenue\b\s+\(?-?\d", lower):
+            return False
+        if any(marker in lower for marker in ("director", "chairman", "management report", "financial highlights", "five year", "five-year")):
             return False
         prefix = re.split(r"\(?-?\d[\d,\.]*\)?", lower, maxsplit=1)[0]
         prefix = re.sub(r"[^a-z ]", " ", prefix)
@@ -165,6 +169,19 @@ def _metric_line_is_comparable(metric_name: str, line: str) -> bool:
         if "from contracts with customers" in lower:
             return False
     return True
+
+
+def _metric_context_priority(metric_name: str, page_text: str, line: str) -> int:
+    lower_line = re.sub(r"\s+", " ", line.lower()).strip()
+    lower_page = page_text.lower()
+    if metric_name == "Revenue":
+        if "statement of profit or loss" in lower_page or "statement of income and expenditure" in lower_page:
+            return 3
+        if "notes to the financial statements" in lower_page:
+            return 2
+        if any(marker in lower_page for marker in ("directors' report", "management report", "five year", "five-year", "value added")):
+            return 0
+    return 1
 
 
 def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], dict[str, list[dict[str, str]]]]:
@@ -338,7 +355,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                             row_key = (metric_name, page.number, f"{val}|{prior_amt}")
                             if row_key not in seen_metric_rows:
                                 seen_metric_rows.add(row_key)
-                                amount_occurrences[metric_name].append((val, prior_amt, page.number, line))
+                                amount_occurrences[metric_name].append((val, prior_amt, page.number, line, _metric_context_priority(metric_name, text, line)))
                         except Exception:
                             pass
                     else:
@@ -348,7 +365,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                             row_key = (metric_name, page.number, f"{val}|{prior_amt}")
                             if row_key not in seen_metric_rows:
                                 seen_metric_rows.add(row_key)
-                                amount_occurrences[metric_name].append((val, prior_amt, page.number, context_line))
+                            amount_occurrences[metric_name].append((val, prior_amt, page.number, context_line, _metric_context_priority(metric_name, text, context_line)))
 
     # Process amounts
     for metric_name, occurrences in amount_occurrences.items():
@@ -356,22 +373,31 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             continue
         val_map = defaultdict(list)
         all_prior_amts = set()
-        for val, prior_amt, page_num, line in occurrences:
+        for val, prior_amt, page_num, line, priority in occurrences:
             compare_val = _consistency_compare_value(metric_name, val)
-            val_map[compare_val].append((page_num, line, val))
+            val_map[compare_val].append((page_num, line, val, priority))
             if prior_amt is not None:
                 all_prior_amts.add(_consistency_compare_value(metric_name, prior_amt))
         
         # If multiple different values found for the same metric
         val_keys = [k for k in val_map.keys() if k not in all_prior_amts]
         if len(val_keys) > 1:
+            preferred_keys = [
+                key for key, locs in val_map.items()
+                if any(priority >= 2 for _page, _line, _raw, priority in locs)
+            ]
+            if preferred_keys:
+                val_keys = preferred_keys
+        if len(val_keys) > 1:
             desc = []
             issue_pages = set()
             for compare_val, locs in val_map.items():
-                pages = [str(p) for p, _line, _raw in locs]
-                issue_pages.update(p for p, _line, _raw in locs)
+                if compare_val not in val_keys:
+                    continue
+                pages = [str(p) for p, _line, _raw, _priority in locs]
+                issue_pages.update(p for p, _line, _raw, _priority in locs)
                 desc.append(f"Amount {compare_val:,.0f} found on pages: {', '.join(sorted(set(pages), key=int))}")
-                for p, l, raw_val in locs:
+                for p, l, raw_val, _priority in locs:
                     export_data["key_amounts"].append({
                         "Metric": metric_name,
                         "Amount": f"{raw_val:,.0f}",
@@ -392,12 +418,13 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             )
         else:
             # Consistent
-            _compare_val, locs = list(val_map.items())[0]
-            pages = sorted({p for p, _line, _raw in locs})
-            display_val = next((raw for _page, _line, raw in locs), _compare_val)
+            selected_key = val_keys[0] if val_keys else next(iter(val_map))
+            locs = val_map[selected_key]
+            pages = sorted({p for p, _line, _raw, _priority in locs})
+            display_val = next((raw for _page, _line, raw, _priority in locs), selected_key)
             context_summary = " | ".join(
                 f"Page {page}: {_short_context(line, 140)}"
-                for page, line, _raw in sorted(locs, key=lambda item: item[0])[:6]
+                for page, line, _raw, _priority in sorted(locs, key=lambda item: item[0])[:6]
             )
             export_data["key_amounts"].append({
                 "Metric": metric_name,
@@ -412,6 +439,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
     preferred_re = re.compile(r"^(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\s+20\d{2}$", re.I)
 
     for date_str, occurrences in date_occurrences.items():
+        if re.fullmatch(r"(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}", date_str, re.I):
+            continue
         pages = [page for page, _line in occurrences]
         relevant_contexts = [
             (page, line)

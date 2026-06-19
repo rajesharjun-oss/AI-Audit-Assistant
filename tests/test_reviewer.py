@@ -132,6 +132,67 @@ def test_name_consistency_ignores_internal_control_headings():
     assert not export["names"]
 
 
+def test_cash_flow_closing_check_uses_exchange_on_cash_line():
+    document = PdfDocument(
+        [
+            PdfPage(
+                19,
+                "\n".join(
+                    [
+                        "Statement of Cash Flows",
+                        "Net cash generated from/(used in) operating activities 341,897 816,212",
+                        "Net cash used in investing activities (428,180) (427,963)",
+                        "Total cash movement for the year (86,283) 388,249",
+                        "Profit on foreign exchange on cash and cash equivalents 87,178 (385,317)",
+                        "Cash and cash equivalents at the beginning of the year 56,041 53,109",
+                        "Cash and cash equivalents at the end of the year 56,936 56,041",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    findings, performed, skipped = check_primary_statement_consistency(document)
+
+    assert any("opening plus movement checked to closing" in item for item in performed)
+    assert not any("closing cash" in finding.issue.lower() for finding in findings)
+
+
+def test_revenue_consistency_prefers_statement_and_note_totals_over_front_matter_outlier():
+    document = PdfDocument(
+        [
+            PdfPage(3, "Directors' report\nRevenue 349,768 247,628", []),
+            PdfPage(17, "Statement of profit or loss\nRevenue 14 349,890 249,069", []),
+            PdfPage(33, "Notes to the financial statements\n14. Revenue\nRevenue from contracts with customers\nElectricity sales 349,768 247,628\nConnection fees 122 1,441\nRevenue 349,890 249,069", []),
+            PdfPage(41, "Revenue 349,890 249,069", []),
+            PdfPage(42, "Revenue 3A49,890 249,069 141,301 143,321 89,105", []),
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not any("revenue varies across pages" in finding.issue.lower() for finding in findings)
+    revenue_row = next(row for row in export["key_amounts"] if row["Metric"] == "Revenue")
+    assert revenue_row["Amount"] == "349,890"
+
+
+def test_month_year_references_are_not_flagged_as_bad_date_format():
+    document = PdfDocument(
+        [
+            PdfPage(
+                35,
+                "22. Taxation\nThe Company was granted Pioneer Status in May 2025.",
+                [],
+            )
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not any("preferred format" in finding.issue for finding in findings)
+
+
 def test_name_consistency_suppresses_single_page_ocr_artifact_when_canonical_exists_same_page():
     document = PdfDocument(
         [

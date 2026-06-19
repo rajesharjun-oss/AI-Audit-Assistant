@@ -4797,7 +4797,12 @@ def _check_cash_flow_text(
     ]
     exch_aliases = [
         "effect of exchange rate movement on cash balances", "effect of exchange rate movement", 
-        "exchange difference on cash and cash equivalents", "exchange effect"
+        "exchange difference on cash and cash equivalents", "exchange effect",
+        "profit on foreign exchange on cash and cash equivalents",
+        "loss on foreign exchange on cash and cash equivalents",
+        "foreign exchange on cash and cash equivalents",
+        "profit on foreign exchange on cash",
+        "loss on foreign exchange on cash",
     ]
     
     def _match(row_key: str, aliases: list[str]) -> bool:
@@ -4814,7 +4819,15 @@ def _check_cash_flow_text(
     
     opening = next((v for k, v in rows.items() if _match(k, open_aliases)), None) or next((v for k, v in rows.items() if ("beginning" in _normalise_cash_flow_label(k) or "january" in _normalise_cash_flow_label(k) or "start" in _normalise_cash_flow_label(k)) and "cash" in _normalise_cash_flow_label(k)), None)
     closing = next((v for k, v in rows.items() if _match(k, close_aliases)), None) or next((v for k, v in rows.items() if ("end" in _normalise_cash_flow_label(k) or "december" in _normalise_cash_flow_label(k)) and "cash" in _normalise_cash_flow_label(k)), None)
-    exch = next((v for k, v in rows.items() if _match(k, exch_aliases)), None) or next((v for k, v in rows.items() if "exchange" in _normalise_cash_flow_label(k)), None)
+    exch = next((v for k, v in rows.items() if _match(k, exch_aliases)), None) or next((v for k, v in rows.items() if "exchange" in _normalise_cash_flow_label(k) and "cash" in _normalise_cash_flow_label(k)), None)
+
+    op = op or _cash_flow_line_amounts_for_aliases(text, tuple(op_aliases))
+    inv = inv or _cash_flow_line_amounts_for_aliases(text, tuple(inv_aliases))
+    fin = fin or _cash_flow_line_amounts_for_aliases(text, tuple(fin_aliases))
+    mov = mov or _cash_flow_line_amounts_for_aliases(text, tuple(mov_aliases))
+    opening = opening or _cash_flow_line_amounts_for_aliases(text, tuple(open_aliases))
+    closing = closing or _cash_flow_line_amounts_for_aliases(text, tuple(close_aliases))
+    exch = exch or _cash_flow_line_amounts_for_aliases(text, tuple(exch_aliases))
 
     vector_length = max((len(v) for v in rows.values() if v), default=0)
     zero_vector = [Decimal("0")] * vector_length if vector_length else None
@@ -5335,6 +5348,11 @@ def _line_amount_for_aliases(text: str, aliases: tuple[str, ...]) -> tuple[list[
         if parsed:
             return parsed[:2], raw_line
     return [], ""
+
+
+def _cash_flow_line_amounts_for_aliases(text: str, aliases: tuple[str, ...]) -> list[Decimal]:
+    amounts, _raw = _line_amount_for_aliases(text, aliases)
+    return amounts
 
 
 def _looks_like_value_added_page(text: str) -> bool:
