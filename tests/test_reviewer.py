@@ -37,6 +37,101 @@ def test_name_consistency_only_flags_typo_like_variants_not_joined_names():
     assert not _names_look_like_spelling_variants("Lai Labode", "Lai Labode Stanley Emurotu")
 
 
+def test_detected_profile_prefers_company_profile_context_over_unrelated_membership_language():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Powergen Interconnected Energy Limited\n"
+                "Corporate information\n"
+                "Nature of business and principal activities\n"
+                "The company engages in the business of provision of distributable renewable energy generation solutions, "
+                "buying and distribution of mini grids for energy generation in urban and rural households.\n",
+                [],
+            ),
+            PdfPage(2, "Directors' report\nShare capital\nOrdinary shares\n", []),
+            PdfPage(20, "Other note text mentioning members, associates, subscriptions and council governance in a different context.\n", []),
+        ]
+    )
+
+    profile = infer_detected_profile(document)
+
+    assert profile["Entity type"] == "Private company"
+    assert "Professional membership body" not in profile["Principal activities"]
+    assert "Renewable energy" in profile["Principal activities"]
+
+
+def test_scalar_equation_uses_mismatch_wording_for_failures():
+    findings: list[reviewer.Finding] = []
+
+    reviewer._check_scalar_equation(
+        findings,
+        20,
+        "Statement of cash flows",
+        "Opening cash plus total movement agrees to closing cash. Column 1.",
+        Decimal("100"),
+        Decimal("90"),
+        Decimal("1"),
+    )
+
+    assert findings
+    assert "does not agree" in findings[0].issue.lower()
+    assert "agrees to closing cash" not in findings[0].issue.lower()
+
+
+def test_note_reference_alternative_for_current_tax_receivable_requires_current_tax_heading():
+    item = reviewer.StatementNoteLine(
+        statement_name="Statement of financial position",
+        page_number=17,
+        line="Current tax receivable 13 - 1,015",
+        line_item="Current tax receivable",
+        ref="13",
+        amounts=(Decimal("1015"),),
+        explicit_ref=True,
+    )
+    headings = {"13": "Current tax payable/(receivable)", "22": "Taxation"}
+    sections = {
+        "13": "13. Current tax payable/(receivable)\nCurrent tax receivable 1,015",
+        "22": "22. Taxation\nIncome tax expense 1,015\nDeferred tax abatement 500",
+    }
+
+    alt = reviewer._alternative_note_for_missing_amounts(item, sections, headings, Decimal("1"))
+
+    assert alt == ""
+
+
+def test_revenue_consistency_skips_policy_heading_context():
+    document = PdfDocument(
+        [
+            PdfPage(4, "Statement of profit or loss\nRevenue 349,890 249,069\n", []),
+            PdfPage(
+                14,
+                "14. Revenue\nRevenue from contracts with customers\nElectricity sales 349,768 247,628\nConnection fees 122 1,441\nRevenue 349,890 249,069",
+                [],
+            ),
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not any("revenue varies across pages" in finding.issue.lower() for finding in findings)
+    assert any(row["Metric"] == "Revenue" for row in export["key_amounts"])
+
+
+def test_name_consistency_ignores_internal_control_headings():
+    document = PdfDocument(
+        [
+            PdfPage(5, "Directors' report\nInternal Control\n", []),
+            PdfPage(30, "Corporate governance\nInternal Controls\n", []),
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not findings
+    assert not export["names"]
+
+
 def test_name_consistency_suppresses_single_page_ocr_artifact_when_canonical_exists_same_page():
     document = PdfDocument(
         [

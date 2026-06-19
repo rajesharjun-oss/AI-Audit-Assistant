@@ -30,7 +30,8 @@ def _metric_lines(value: object, empty: str) -> list[str]:
 def _checks_skipped_rows(result) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for item in _metric_lines(result.metrics.get("checks_skipped"), "No major checks skipped."):
-        rows.append(_parse_skipped_check(item))
+        row = _parse_skipped_check(item)
+        rows.append(_translate_row_page_fields(row, result, ("Page reference", "Original message", "Reason skipped")))
     return rows
 
 
@@ -49,6 +50,34 @@ def _printed_page_map(result) -> dict[int, int]:
 
 def _reviewer_page_number(result, page_number: int) -> int:
     return _printed_page_map(result).get(page_number, page_number)
+
+
+def _translate_page_tokens(text: object, result) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    def replace_page_phrase(match: re.Match) -> str:
+        prefix = match.group(1)
+        body = match.group(2)
+        translated: list[str] = []
+        for token in re.split(r"(\D+)", body):
+            if token.isdigit():
+                translated.append(str(_reviewer_page_number(result, int(token))))
+            else:
+                translated.append(token)
+        return prefix + "".join(translated)
+
+    value = re.sub(r"\b(Pages?\s+)([\d,\-\sand]+)", replace_page_phrase, value, flags=re.I)
+    return value
+
+
+def _translate_row_page_fields(row: dict[str, object], result, fields: tuple[str, ...]) -> dict[str, object]:
+    translated = dict(row)
+    for field in fields:
+        if field in translated:
+            translated[field] = _translate_page_tokens(translated.get(field, ""), result)
+    return translated
 
 
 def _parse_skipped_check(item: str) -> dict[str, str]:
@@ -108,8 +137,7 @@ def _finding_rows(result) -> list[dict[str, str]]:
         metadata = finding.metadata or {}
         if finding.category == "Notes agreement" and metadata.get("match_confidence") == "Low":
             pass  # We now filter this in reviewer.py before the result is built.
-        rows.append(
-            {
+        row = {
             "ID": f"EX-{index:03d}",
             "Status": "Open",
             "Severity": finding.severity,
@@ -129,16 +157,16 @@ def _finding_rows(result) -> list[dict[str, str]]:
             "Amount found in note": metadata.get("amount_found_in_note", ""),
             "Alternative note found": metadata.get("alternative_note_found", ""),
             "Amount match confidence": metadata.get("amount_match_confidence", ""),
-            "Location": finding.location,
+            "Location": _translate_page_tokens(finding.location, result),
             "Issue": finding.issue,
-            "Evidence": finding.evidence,
+            "Evidence": _translate_page_tokens(finding.evidence, result),
             "Recommendation": finding.recommendation,
             "Reviewer comment": "",
             "Prepared by": "",
             "Reviewed by": "",
             "Date cleared": "",
             }
-        )
+        rows.append(row)
     return rows
 
 
@@ -495,10 +523,22 @@ def _build_excel_export(result) -> bytes:
         pd.DataFrame(unref_rows).to_excel(writer, sheet_name="Unreferenced notes", index=False)
         
         cross_export = result.metrics.get("cross_page_export", {})
-        amount_rows = cross_export.get("key_amounts", []) or [{"Metric": "None found"}]
-        name_rows = clean_name_consistency_rows(cross_export.get("names", [])) or [{"Name variant 1": "None found"}]
-        date_rows = cross_export.get("dates", []) or [{"Date found": "None found"}]
-        grammar_rows = cross_export.get("grammar", []) or [{"Page": "None found"}]
+        amount_rows = [
+            _translate_row_page_fields(row, result, ("Pages checked", "Context", "Issue"))
+            for row in (cross_export.get("key_amounts", []) or [{"Metric": "None found"}])
+        ]
+        name_rows = [
+            _translate_row_page_fields(row, result, ("Page 1", "Page 2"))
+            for row in (clean_name_consistency_rows(cross_export.get("names", [])) or [{"Name variant 1": "None found"}])
+        ]
+        date_rows = [
+            _translate_row_page_fields(row, result, ("Page", "Comment"))
+            for row in (cross_export.get("dates", []) or [{"Date found": "None found"}])
+        ]
+        grammar_rows = [
+            _translate_row_page_fields(row, result, ("Page", "Context"))
+            for row in (cross_export.get("grammar", []) or [{"Page": "None found"}])
+        ]
         
         pd.DataFrame(amount_rows).to_excel(writer, sheet_name="Key amount consistency", index=False)
         pd.DataFrame(name_rows).to_excel(writer, sheet_name="Name consistency", index=False)
@@ -1260,16 +1300,15 @@ filtered = [
     if (not category_filter or finding.category in category_filter)
     and (not severity_filter or finding.severity in severity_filter)
 ]
-
 rows = [
     {
         "Severity": finding.severity,
         "Category": finding.category,
         "Page reference": _page_reference_for_finding(finding, result),
         "Note reference": _note_reference_for_finding(finding, result),
-        "Location": finding.location,
+        "Location": _translate_page_tokens(finding.location, result),
         "Issue": finding.issue,
-        "Evidence": finding.evidence,
+        "Evidence": _translate_page_tokens(finding.evidence, result),
         "Recommendation": finding.recommendation,
     }
     for finding in filtered
@@ -1285,6 +1324,6 @@ for finding in filtered:
         st.write(f"**Page reference:** {page_ref}")
         if note_ref:
             st.write(f"**Note reference:** {note_ref}")
-        st.write(f"**Location:** {finding.location}")
-        st.write(f"**Evidence:** {finding.evidence}")
+        st.write(f"**Location:** {_translate_page_tokens(finding.location, result)}")
+        st.write(f"**Evidence:** {_translate_page_tokens(finding.evidence, result)}")
         st.write(f"**Recommendation:** {finding.recommendation}")

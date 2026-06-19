@@ -146,6 +146,27 @@ def _spelling_issue_for_line(line: str) -> str:
     return ""
 
 
+def _metric_line_is_comparable(metric_name: str, line: str) -> bool:
+    lower = re.sub(r"\s+", " ", line.lower()).strip()
+    if metric_name == "Revenue":
+        if "revenue from contracts with customers" in lower and not re.search(r"\brevenue\b\s+\(?-?\d", lower):
+            return False
+        prefix = re.split(r"\(?-?\d[\d,\.]*\)?", lower, maxsplit=1)[0]
+        prefix = re.sub(r"[^a-z ]", " ", prefix)
+        prefix_words = [word for word in prefix.split() if word not in {"note", "notes"}]
+        if prefix_words[:1] == ["revenue"] and len(prefix_words) <= 2:
+            return True
+        if prefix_words[:2] == ["total", "revenue"]:
+            return True
+        if prefix_words[:1] == ["turnover"]:
+            return True
+        if prefix_words[:2] == ["gross", "earnings"]:
+            return True
+        if "from contracts with customers" in lower:
+            return False
+    return True
+
+
 def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], dict[str, list[dict[str, str]]]]:
     findings = []
     export_data = {
@@ -248,7 +269,9 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                         "saturday", "sunday",
                         "opening", "additions", "depreciation", "total", "value", "distributed",
                         "balance", "at", "as", "for", "the", "ended", "loss", "profit",
-                        "net", "gross", "operating", "cash", "flows", "financing", "investing", "activities"
+                        "net", "gross", "operating", "cash", "flows", "financing", "investing", "activities",
+                        "internal", "control", "controls", "sponsoring", "organisation", "organizations",
+                        "organization", "committee", "framework", "environment", "social", "governance"
                     ]
                     if any(re.search(fr"\b{ex}\b", raw_name, re.I) for ex in exclude_words):
                         continue
@@ -282,6 +305,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             # Try to match key metrics
             for metric_name, pattern in KEY_METRICS.items():
                 if pattern.match(line):
+                    if not _metric_line_is_comparable(metric_name, line):
+                        continue
                     if metric_name == "Taxation" and "income tax expense" in line.lower() and not re.search(r"\d", line):
                         continue
                     lower = line.lower()

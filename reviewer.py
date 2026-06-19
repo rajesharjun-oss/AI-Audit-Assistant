@@ -1770,21 +1770,23 @@ def check_extraction_quality(document: PdfDocument) -> list[Finding]:
 
 def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
     text = document.text
-    lower = text.lower()
-    entity_type = _detect_entity_type(text)
+    profile_text = _profile_detection_text(document)
+    lower = profile_text.lower()
+    company_name = _detect_company_name(document)
+    entity_type = _detect_entity_type(profile_text, company_name=company_name)
     if entity_type == "Private company":
         if re.search(r"\b(financial group|group management and supervisory services)\b", lower):
             entity_type = "Private company / financial group / group management and supervisory services"
         elif re.search(r"\binvestment propert(?:y|ies)|property investment|real estate\b", lower):
             entity_type = "Private company / property investment company"
     profile = {
-        "Company name": _detect_company_name(document),
+        "Company name": company_name,
         "Year end": _detect_year_end(text),
         "Currency": _detect_currency(text),
         "Framework": _detect_framework(text),
         "Entity type": entity_type,
         "Document scope": _document_scope(document),
-        "Principal activities": _detect_principal_activities(text),
+        "Principal activities": _detect_principal_activities(profile_text),
         "Detected balances": _detect_major_balances(lower),
         "Suggested checklist areas": _suggest_checklist_areas(lower),
         "Extraction confidence": f"Text {document.extraction_confidence}% | Tables {document.table_extraction_confidence}%",
@@ -1886,13 +1888,37 @@ def _detect_framework(text: str) -> str:
     return "Not detected"
 
 
-def _detect_entity_type(text: str) -> str:
+def _profile_detection_text(document: PdfDocument) -> str:
+    first_pages = "\n".join(page.text for page in document.pages[:8])
+    snippets: list[str] = []
+    for match in re.finditer(r"(?:principal activities|nature of business|principal activity)[\s\S]{1,350}?(?:\n\n|\.\s)", document.text, re.I):
+        snippets.append(match.group(0))
+        if len(snippets) >= 3:
+            break
+    return "\n".join([first_pages, *snippets]).strip()
+
+
+def _detect_entity_type(text: str, company_name: str = "") -> str:
     lower = text.lower()
-    if re.search(r"\b(private company|private limited)\b", lower):
-        return "Private company"
-    if re.search(r"\b(plc|public limited)\b", lower):
-        return "Public company"
-    if re.search(r"\b(limited|ltd)\b", lower) or any(
+    private_score = 0
+    public_score = 0
+    nonprofit_score = 0
+
+    company_lower = company_name.lower()
+    if re.search(r"\bplc\b", company_lower) or "public limited" in company_lower:
+        public_score += 4
+    elif re.search(r"\b(limited|ltd)\b", company_lower):
+        private_score += 4
+
+    if re.search(r"\b(private company|private limited|private limited liability company)\b", lower):
+        private_score += 3
+    if re.search(r"\b(public company|public limited liability company|public limited)\b", lower):
+        public_score += 3
+    if re.search(r"\bplc\b", lower):
+        public_score += 2
+    if re.search(r"\b(limited|ltd)\b", lower):
+        private_score += 1
+    if any(
         term in lower
         for term in (
             "directors' report",
@@ -1903,7 +1929,7 @@ def _detect_entity_type(text: str) -> str:
             "dividends",
         )
     ):
-        return "Private company"
+        private_score += 2
     if any(
         term in lower
         for term in (
@@ -1921,7 +1947,13 @@ def _detect_entity_type(text: str) -> str:
             "subscriptions",
         )
     ):
+        nonprofit_score += 3
+    if nonprofit_score and nonprofit_score > max(private_score, public_score):
         return "Non-profit / professional body"
+    if private_score >= max(public_score, nonprofit_score) and private_score > 0:
+        return "Private company"
+    if public_score > 0:
+        return "Public company"
     return "Not detected"
 
 
@@ -1931,10 +1963,22 @@ def _detect_principal_activities(text: str) -> str:
         return "Consumer loyalty and rewards / cash reward service"
     if any(term in lower for term in ("rendering supervisory services", "supervisory services", "management of related entities", "related entities under the group structure", "group structure")):
         return "Management of related entities, including supervisory and related group support services."
-    if _professional_membership_activity_context(lower):
-        return "Professional membership body, including member services, professional development, training, and certification."
     if any(term in lower for term in ("property investment", "investment property", "rental income", "income from property")):
         return "Property investment and related rental income activities."
+    if any(
+        term in lower
+        for term in (
+            "renewable energy",
+            "mini grid",
+            "mini-grid",
+            "energy generation",
+            "electricity generation",
+            "distribution of mini grids",
+            "distribution of mini-grids",
+            "distributable renewable energy",
+        )
+    ):
+        return "Renewable energy generation and mini-grid distribution activities."
     
     matches = list(re.finditer(r"(?:principal activities|nature of business|principal activity)[\s\S]{1,300}?(?:\\n\\n|\.\s)", text, re.I))
     if matches:
@@ -1946,6 +1990,8 @@ def _detect_principal_activities(text: str) -> str:
             pass
         else:
             return _summarise_activity_sentence(extracted)
+    if _professional_membership_activity_context(lower):
+        return "Professional membership body, including member services, professional development, training, and certification."
     return ""
 
 
@@ -5567,7 +5613,7 @@ def _check_scalar_equation(
             "Totals and rounding",
             "High" if abs(diff) > tolerance * 5 else "Medium",
             f"Page {page_number} | {location}",
-            issue,
+            _mismatch_issue_text(issue),
             f"Expected {expected:,}; reported {reported:,}; difference {diff:,}.",
             "Review the line-extracted primary statement totals against the signed financial statements.",
         )
@@ -5634,6 +5680,22 @@ def _ocr_mismatch_issue(issue: str) -> str:
     text = text.replace("should agree to", "does not agree to")
     text = text.replace("agrees to", "does not agree to")
     return text
+
+
+def _mismatch_issue_text(issue: str) -> str:
+    text = issue
+    replacements = (
+        (" agrees to ", " does not agree to "),
+        (" agrees with ", " does not agree with "),
+        (" equals ", " does not equal "),
+        (" equal ", " do not equal "),
+    )
+    for old, new in replacements:
+        if old in text:
+            return text.replace(old, new)
+    if "does not" in text.lower():
+        return text
+    return f"{text.rstrip('.')} (mismatch detected)."
 
 
 def _check_industry_policy_fit(findings: list[Finding], document: PdfDocument, profile: CompanyProfile) -> None:
@@ -6941,6 +7003,8 @@ def _check_possible_wrong_note_references(
                 continue
             other_text = _get_note_section_with_fallback(other_ref, note_sections, document) if document else _get_note_section_with_fallback(other_ref, note_sections)
             other_text = other_text or ""
+            if not _alternative_note_semantically_allowed(item.line_item, other_heading, other_text):
+                continue
             other_match = _note_match_strength(item, other_heading, other_text, tolerance)
             other_heading_score = max(_wording_match_score(item.line_item, other_heading), _semantic_heading_score(item.line_item, other_heading))
             if other_match["amount"]:
@@ -7247,12 +7311,24 @@ def _semantic_heading_score(line_item: str, note_heading: str) -> float:
         return 0.86
     if any(term in item for term in ("cash", "bank", "cash equivalents")) and any(term in heading for term in ("cash", "bank", "cash equivalents")):
         return 0.86
+    if "current tax" in item and any(term in heading for term in ("current tax", "current tax receivable", "current tax payable")):
+        return 0.9
+    if "deferred tax" in item and "deferred tax" in heading:
+        return 0.9
+    if "tax" in item and "tax" in heading:
+        return 0.82
     return 0.0
 
 
 def _alternative_note_semantically_allowed(line_item: str, note_heading: str, note_section: str = "") -> bool:
     item = _normalise_match_words(line_item)
     heading = _normalise_match_words(note_heading)
+    if "current tax" in item:
+        return any(term in heading for term in ("current tax", "current tax receivable", "current tax payable"))
+    if "deferred tax" in item:
+        return "deferred tax" in heading
+    if "tax" in item:
+        return "tax" in heading
     if any(term in item for term in ("cash", "bank", "cash equivalents")):
         return any(term in heading for term in ("cash", "bank", "cash equivalents"))
     if _is_revenue_line_item(item):
