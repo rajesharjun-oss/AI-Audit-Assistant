@@ -9,3 +9,5 @@ venv/
 outputs/
 uploads/
 *.pdf
+local_test_fixtures/cases/*.json
+local_test_fixtures/generated/

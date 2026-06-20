@@ -17,6 +17,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from export_utils import clean_name_consistency_rows
 from models import CompanyProfile, ReviewOptions
+from report_exports import build_excel_export, exported_file_stem
 from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
 
 st.set_page_config(page_title="AI Audit Assistant", page_icon="✨", layout="wide", initial_sidebar_state="expanded")
@@ -1219,11 +1220,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-export_stem = _export_file_stem(result)
+export_stem = exported_file_stem(result)
 download_cols = st.columns(2)
 download_cols[0].download_button(
     "Download Excel Exception Register",
-    _build_excel_export(result),
+    build_excel_export(result),
     file_name=f"{export_stem}_exception_register.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )

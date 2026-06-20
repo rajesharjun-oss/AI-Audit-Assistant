@@ -422,15 +422,19 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             locs = val_map[selected_key]
             pages = sorted({p for p, _line, _raw, _priority in locs})
             display_val = next((raw for _page, _line, raw, _priority in locs), selected_key)
-            context_summary = " | ".join(
-                f"Page {page}: {_short_context(line, 140)}"
-                for page, line, _raw, _priority in sorted(locs, key=lambda item: item[0])[:6]
+            simple_direct_context = all(
+                KEY_METRICS[metric_name].search(line.strip()) and "->" not in line
+                for _page, line, _raw, _priority in locs
             )
             export_data["key_amounts"].append({
                 "Metric": metric_name,
                 "Amount": f"{display_val:,.0f}",
                 "Pages checked": _format_page_location(pages),
-                "Context": context_summary or "Consistent across detected occurrences.",
+                "Context": (
+                    "Consistent across detected occurrences."
+                    if simple_direct_context
+                    else "; ".join(f"Page {page}: {_short_context(line)}" for page, line, _raw, _priority in locs[:4])
+                ),
                 "Issue": "Consistent"
             })
 

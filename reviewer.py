@@ -495,7 +495,10 @@ def _build_result(
     checks_skipped_list = list(dict.fromkeys(checks_skipped or []))
     check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings, document, passed_check_evidence)
     
-    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    is_company = bool(
+        document
+        and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    )
     if is_company:
         ngo_terms = ["gross operating revenue", "total income", "total expenditure", "surplus", "statement of changes in accumulated fund", "statement of income and expenditure"]
         checks_skipped_list = [c for c in checks_skipped_list if not any(t in c.lower() for t in ngo_terms)]
@@ -535,7 +538,7 @@ def _build_result(
         "notes_heading_candidates": _notes_heading_candidate_rows(document),
         "primary_statement_pages": _format_primary_statement_debug(document),
         "ocr_statement_rows": _format_ocr_statement_rows_debug(document),
-        "note_agreement_results": _filtered_note_agreement_rows(document, findings),
+        "note_agreement_results": _note_agreement_result_rows(document),
         "skipped_table_details": _skipped_table_detail_rows(document),
         "skipped_table_summary": _skipped_table_summary_rows(document),
         "detected_profile": infer_detected_profile(document),
@@ -1161,6 +1164,8 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
         for item in statement_lines:
             current_amount = item.amounts[0] if item.amounts else None
             prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+            if not item.ref and _note_agreement_skip_reason(item):
+                continue
             
             if not item.ref:
                 rows.append(
@@ -1234,6 +1239,8 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     for item in statement_lines:
         current_amount = item.amounts[0] if item.amounts else None
         prior_amount = item.amounts[1] if len(item.amounts) >= 2 else None
+        if not item.ref and _note_agreement_skip_reason(item):
+            continue
         
         if not item.ref:
             rows.append(
@@ -1528,22 +1535,21 @@ def _note_agreement_result_row(
     comment = f"This line item is referenced to Note {item.ref}." if item.ref else "No note number."
     reason_lower = reason.lower()
     export_result = result
-    if result == "Skipped" and ("debug" in reason_lower or "low-confidence" in reason_lower):
-        export_result = "Internal note"
-    elif result == "Review prompt" and "low-confidence heading-only debug result" in reason_lower:
-        export_result = "Internal note"
 
     return {
         "Statement": item.statement_name,
         "Page": str(item.page_number),
         "Line item description": item.line_item.title(),
+        "Line item": item.line_item.title(),
         "Note number": item.ref,
+        "Referenced note": item.ref,
         "Current year amount": _format_decimal_for_export(current_amount),
         "Prior year amount": _format_decimal_for_export(prior_amount),
         "Has note?": has_note,
         "Review required?": review_req,
         "Comment": comment,
         "Review result": export_result,
+        "Result": export_result,
         "Reason": reason,
         "Current year amount found in referenced note?": current_found,
         "Prior year amount found in referenced note?": prior_found,
@@ -1589,7 +1595,10 @@ def _check_result_rows(
                 "Evidence": evidence,
             }
         )
-    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    is_company = bool(
+        document
+        and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    )
     
     for check in checks_skipped:
         result_status = "Skipped because extraction is not reliable"
@@ -2067,7 +2076,11 @@ def _suggest_checklist_areas(lower_text: str) -> str:
 def _requires_ocr(document: PdfDocument) -> bool:
     if not document.pages:
         return True
-    return document.text_chars < 1000 or document.extraction_coverage < 0.25
+    if document.text_pages == 0 or document.extraction_coverage == 0:
+        return True
+    if document.extraction_coverage < 0.25:
+        return True
+    return document.text_chars < 1000 and document.extraction_coverage < 0.5
 
 
 def _extraction_unreliable(document: PdfDocument) -> bool:
@@ -2121,7 +2134,20 @@ def check_primary_statement_consistency(
     findings: list[Finding] = []
     performed: list[str] = []
     skipped: list[str] = []
-    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    classified = _classified_primary_statement_pages(document)
+    income_page = classified.get("Statement of income and expenditure")
+    equity_page = classified.get("Statement of changes in accumulated fund")
+    income_header = "\n".join(income_page.text.splitlines()[:8]).lower() if income_page else ""
+    equity_header = "\n".join(equity_page.text.splitlines()[:8]).lower() if equity_page else ""
+    has_profit_or_loss_heading = bool(
+        income_page and any(marker in income_header for marker in ("statement of profit or loss", "comprehensive income"))
+    )
+    has_equity_heading = bool(equity_page and "changes in equity" in equity_header)
+    is_company = document and (
+        _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+        or has_profit_or_loss_heading
+        or has_equity_heading
+    )
     income_stmt_name = "Statement of profit or loss" if is_company else "Statement of income and expenditure"
     changes_stmt_name = "Statement of changes in equity" if is_company else "Statement of changes in accumulated fund"
     
@@ -2221,6 +2247,10 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                 continue
             table_quality = _classify_table_for_arithmetic(table, page.text)
             if _skip_table_is_not_review_relevant(page, table_quality, primary_pages, notes_start_page):
+                if table_quality["type"] in {"value-added statement", "multi-year summary"}:
+                    skipped_tables.append(
+                        f"Page {page.number}, table {table_index}: {table_quality['type']} ({table_quality['reason']})"
+                    )
                 continue
             if notes_start_page is not None and page.number >= notes_start_page and page.number not in primary_pages:
                 targeted_note_findings = _check_simple_note_table_casting(page, table_index, table, tolerance)
@@ -2257,7 +2287,7 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                 # Suppress generic table math findings on primary statements because statement-specific checks handle them.
                 continue
             
-            if document.table_extraction_confidence < 80:
+            if document.table_extraction_confidence < 80 and not table_quality["can_run_arithmetic"]:
                 skipped_tables.append(f"Page {page.number}, table {table_index}: skipped because overall table extraction confidence is low ({document.table_extraction_confidence}%).")
                 continue
 
@@ -2268,6 +2298,16 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
             findings.extend(table_findings)
     if skipped_tables:
         document.skipped_table_details = list(dict.fromkeys(skipped_tables))
+        findings.append(
+            Finding(
+                "Totals and rounding",
+                "Low",
+                "Table skips",
+                f"{len(document.skipped_table_details)} table(s) skipped for generic arithmetic review.",
+                "; ".join(document.skipped_table_details[:10]),
+                "Review the listed pages manually where table structure is non-standard, low-confidence, or not suitable for generic subtotal casting.",
+            )
+        )
     return findings
 
 
@@ -3360,6 +3400,53 @@ def check_notes_agreement(
                 continue
             findings.append(f)
         return findings
+    note_sections = _note_sections(document)
+    for item in _statement_note_lines(document):
+        if item.ref or _note_agreement_skip_reason(item):
+            continue
+        if _is_disclosure_only_note(item.line_item):
+            continue
+        suggested_ref = _suggest_note_for_unreferenced_line(item, note_sections, headings, tolerance)
+        if suggested_ref:
+            findings.append(
+                Finding(
+                    "Notes agreement",
+                    "Medium",
+                    f"Page {item.page_number} | {item.statement_name}",
+                    f"{_statement_line_item_title(item.line_item)} lacks a note reference. Suggested Note {suggested_ref} may be the related note.",
+                    f"Statement line: {item.line[:160]} | Suggested Note {suggested_ref} based on heading and/or amount agreement.",
+                    "Confirm whether the face statement should include a note reference and update the reference if required.",
+                    metadata={
+                        "statement": item.statement_name,
+                        "line_item": _statement_line_item_title(item.line_item),
+                        "referenced_note": "",
+                        "suggested_note": suggested_ref,
+                        "match_confidence": "Medium",
+                        "reason": f"Suggested Note {suggested_ref}",
+                        "line_key": f"|{item.line}",
+                    },
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "Notes agreement",
+                    "Low",
+                    f"Page {item.page_number} | {item.statement_name}",
+                    f"{_statement_line_item_title(item.line_item)} has no note reference and no matching note was found.",
+                    f"Statement line: {item.line[:160]}",
+                    "Review whether the line item should be note-linked or whether no separate supporting note is expected.",
+                    metadata={
+                        "statement": item.statement_name,
+                        "line_item": _statement_line_item_title(item.line_item),
+                        "referenced_note": "",
+                        "suggested_note": "",
+                        "match_confidence": "Low",
+                        "reason": "No matching note was found.",
+                        "line_key": f"|{item.line}",
+                    },
+                )
+            )
     if statement_refs:
         for ref in sorted(heading_refs - statement_refs, key=_note_sort_key):
             if ref.isdigit() and int(ref) <= 3:
@@ -3372,8 +3459,6 @@ def check_notes_agreement(
                 "Heading": headings[ref],
                 "Comment": "Note exists but was not referenced from the extracted primary statements."
             })
-
-    note_sections = _note_sections(document)
     misref_findings, misreferenced_lines = _check_possible_wrong_note_references(
         _statement_note_lines(document),
         note_sections,
@@ -4359,7 +4444,12 @@ def _check_income_statement_text(
     skipped: list[str] = []
     rows = _statement_rows(page.text)
     
-    is_company = document and _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+    page_header = "\n".join(page.text.splitlines()[:8]).lower()
+    is_company = document and (
+        _detect_entity_type(document.text).lower() in ("private company", "public company", "company")
+        or "statement of profit or loss" in page_header
+        or "comprehensive income" in page_header
+    )
     stmt_name = "Statement of profit or loss" if is_company else "Statement of income and expenditure"
     
     if is_company:
@@ -4376,6 +4466,11 @@ def _check_income_statement_text(
         pbt = _row_amounts_any(rows, ("profit before tax", "loss before tax"))
         tax = _row_amounts_any(rows, ("taxation", "income tax expense", "tax expense"))
         pat = _row_amounts_any(rows, ("profit after tax", "profit for the year", "loss after tax", "loss for the year"))
+        raw_lines = {
+            "profit before tax": _line_amount_for_aliases(page.text, ("loss before taxation", "loss before tax", "profit before taxation", "profit before tax"))[1],
+            "taxation": _line_amount_for_aliases(page.text, ("taxation", "income tax expense", "tax expense", "tax credit"))[1],
+            "profit after tax": _line_amount_for_aliases(page.text, ("loss after taxation", "loss after tax", "profit after taxation", "profit after tax", "loss for the year", "profit for the year"))[1],
+        }
         
         if revenue and direct_expenses and gross_profit:
             _check_vector_equation(findings, page.number, stmt_name, "Revenue plus direct expenses equals gross profit.", [a + b for a, b in zip(revenue, direct_expenses)], gross_profit, tolerance, ocr_review=ocr_review)
@@ -4405,8 +4500,34 @@ def _check_income_statement_text(
             performed.append(f"{stmt_name}: profit before tax checked.")
             
         if pbt and tax and pat:
-            _check_vector_equation(findings, page.number, stmt_name, "Profit before tax plus taxation equals profit after tax.", [a + b for a, b in zip(pbt, tax)], pat, tolerance, ocr_review=ocr_review)
-            performed.append(f"{stmt_name}: profit after tax checked.")
+            if ocr_review and len(pat) < 2 and max(len(pbt), len(tax)) >= 2:
+                corroboration = _ocr_income_corroboration_assessment(
+                    document,
+                    tax[0] if tax else None,
+                    pat[0] if pat else None,
+                    tolerance,
+                )
+                message = "Skipped / OCR conflict - current-year after-tax value not confidently extracted."
+                if corroboration.get("casts") and corroboration.get("after_tax_value") is not None:
+                    message += f" Corroborating lines indicate {_format_accounting_amount(corroboration.get('after_tax_value'))}. Manual confirmation required."
+                skipped.append(message)
+            else:
+                _check_profit_tax_equation(
+                    findings,
+                    page.number,
+                    stmt_name,
+                    pbt,
+                    tax,
+                    pat,
+                    tolerance,
+                    ocr_review=ocr_review,
+                    raw_lines=raw_lines,
+                    document=document,
+                )
+                performed.append(f"{stmt_name}: profit after tax checked.")
+                if ocr_review:
+                    performed.append("Statement of profit or loss: profit/loss after tax checked.")
+                    performed.append("Income statement: revenue, tax, and profit/loss after tax checked")
             
         return findings, performed, skipped
 
@@ -4425,7 +4546,8 @@ def _check_income_statement_text(
             tolerance,
             ocr_review=ocr_review,
         )
-        performed.append("Statement of income and expenditure: income less expenditure checked to surplus.")
+        performed.append("Statement of income and expenditure: total income checked.")
+        performed.append("Statement of income and expenditure: total expenditure checked.")
     else:
         skipped.append("Statement of income and expenditure: skipped because income/expenditure rows were not confidently parsed.")
     return findings, performed, skipped
@@ -5877,11 +5999,41 @@ def _actual_lease_disclosure_present(text: str) -> bool:
 
 def _lease_context_has_actual_evidence(context: str) -> bool:
     context = context.lower()
-    has_lease = any(keyword in context for keyword in ["right-of-use", "lease liability", "lease expense", "maturity", "depreciation of right-of-use", "actual lease arrangement"])
-    has_quant = any(keyword in context for keyword in ["carrying amount", "maturity", "depreciation", "recognised"])
-    if not (has_lease and has_quant):
-        return False
-    return not _lease_context_is_theoretical_policy_only(context)
+    has_lease_term = any(
+        keyword in context
+        for keyword in (
+            "right-of-use",
+            "right of use",
+            "rou asset",
+            "lease liability",
+            "lease expense",
+            "lease maturity",
+            "depreciation of right-of-use",
+            "depreciation of rou",
+            "leased premises",
+            "finance lease",
+            "operating lease",
+        )
+    )
+    has_numeric_or_balance_signal = bool(re.search(r"\b\d{1,3}(?:,\d{3})+\b", context)) or any(
+        keyword in context
+        for keyword in (
+            "balance",
+            "balances",
+            "current",
+            "non-current",
+            "expense",
+            "depreciation",
+            "maturity",
+            "payment",
+            "repayment",
+            "carrying amount",
+            "recognized",
+            "recognised",
+            "commencement date",
+        )
+    )
+    return has_lease_term and has_numeric_or_balance_signal and not _lease_context_is_theoretical_policy_only(context)
 
 
 def _lease_context_is_theoretical_policy_only(context: str) -> bool:
@@ -5896,7 +6048,25 @@ def _lease_context_is_theoretical_policy_only(context: str) -> bool:
     )
     if not any(term in context for term in theoretical_terms):
         return False
-    return not _lease_context_has_actual_evidence(context)
+    if re.search(r"\b\d{1,3}(?:,\d{3})+\b", context):
+        return False
+    if any(
+        keyword in context
+        for keyword in (
+            "balance",
+            "balances",
+            "current lease liability",
+            "non-current lease liability",
+            "lease expense",
+            "depreciation of right-of-use",
+            "depreciation of rou",
+            "maturity",
+            "payment",
+            "commencement date",
+        )
+    ):
+        return False
+    return True
 
 
 def _check_superseded_standards(findings: list[Finding], document: PdfDocument) -> None:
@@ -6638,8 +6808,6 @@ def _augment_note_headings_from_statement_refs(headings: dict[str, tuple[str, in
             inferred = _infer_missing_note_heading_from_statement_ref(item.ref, title, headings, document)
             if inferred:
                 headings[item.ref.upper()] = inferred
-        elif existing[0].lower() in {"staff costs"} and "personnel" in item.line_item.lower():
-            headings[item.ref] = (title, existing[1])
 
 
 def _infer_missing_note_heading_from_statement_ref(
@@ -6854,9 +7022,19 @@ def _rename_statement_for_output(document: PdfDocument, canonical_name: str, pag
 def _statement_note_lines(document: PdfDocument) -> list[StatementNoteLine]:
     items: list[StatementNoteLine] = []
     statements = _classified_primary_statement_pages(document)
-    for canonical_name, page in statements.items():
+    source_pages: list[tuple[str, PdfPage]] = []
+    if statements:
+        for canonical_name, page in statements.items():
+            source_pages.append((canonical_name, page))
+    else:
+        for page in document.pages:
+            if _is_notes_page(page.text) or _is_post_notes_supplement_page(page.text):
+                continue
+            source_pages.append((_statement_name_from_page(page.text), page))
+    for canonical_name, page in source_pages:
         display_name = _rename_statement_for_output(document, canonical_name, page.text)
-        # Do not perform note-reference review on Statement of Changes in Equity
+        if _statement_excluded_from_note_agreement(display_name, page.text):
+            continue
         if "changes in accumulated fund" in canonical_name.lower() or "changes in equity" in canonical_name.lower():
             continue
         cropped_text = _crop_statement_text(page.text, canonical_name)
@@ -6891,7 +7069,7 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     ref_start = note_match.start() if note_match else (implicit_match.start() if implicit_match else len(line))
     ref_end = note_match.end() if note_match else (implicit_match.end() if implicit_match else ref_start)
     label = _clean_statement_line_item(line[:ref_start])
-    if not label or _is_subheading(label):
+    if not label or (_is_subheading(label) and not ref and _normalise_match_words(label) not in {"assets"}):
         return None
     letters_only = re.sub(r"[^a-z]", "", label.lower())
     if label.lower().strip() in {"n n", "nn", "0 0"} or len(letters_only) < 3 or set(letters_only).issubset({"n", "m", "o"}):
@@ -6951,7 +7129,7 @@ def _clean_statement_line_item(text: str) -> str:
     cleaned = re.sub(r"\b[a-z]\b$", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"\b(?:d|dr|draft)\s*$", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
-    if cleaned in {"assets", "liabilities", "equity", "equity and liabilities"}:
+    if cleaned in {"liabilities", "equity", "equity and liabilities"}:
         return ""
     return cleaned
 
@@ -6990,6 +7168,32 @@ def _line_item_not_face_linked(line_item: str, statement_name: str, explicit_ref
     if "cash flow" in statement and re.search(r"\b(total|net|cash generated|cash used|increase|decrease|cash inflow|cash outflow|cash absorbed)\b", raw_label):
         return True
     return False
+
+
+def _suggest_note_for_unreferenced_line(
+    item: StatementNoteLine,
+    note_sections: dict[str, str],
+    headings: dict[str, str],
+    tolerance: Decimal,
+) -> str:
+    best_ref = ""
+    best_score = 0.0
+    for ref, heading in headings.items():
+        if _is_disclosure_only_note(heading):
+            continue
+        section = _get_note_section_with_fallback(ref, note_sections)
+        heading_score = max(_wording_match_score(item.line_item, heading), _semantic_heading_score(item.line_item, heading))
+        amount_score = 0.0
+        if item.amounts:
+            matched = sum(1 for amount in item.amounts if _amount_match_in_section(amount, section, tolerance)["found"])
+            if matched:
+                amount_score = 0.25 + (0.1 * matched)
+        score = heading_score + amount_score
+        if heading_score >= 0.82 or (heading_score >= 0.7 and amount_score > 0):
+            if score > best_score:
+                best_ref = ref
+                best_score = score
+    return best_ref
 
 
 def _check_possible_wrong_note_references(
@@ -7874,7 +8078,7 @@ def _looks_like_primary_statement_line(line: str) -> bool:
         return False
         
     text_only = re.sub(r"[\d\.,\(\)\-\|]", "", lower).strip()
-    exact_rejects = ["assets", "liabilities", "equity", "equity and liabilities", "draft", "liabilities d", "total assets", "total liabilities"]
+    exact_rejects = ["liabilities", "equity", "equity and liabilities", "draft", "liabilities d", "total assets", "total liabilities"]
     if text_only in exact_rejects:
         return False
     # Reject lines that contain only letters N, M, O (common unit/currency artifacts) or are too short.
@@ -7884,9 +8088,12 @@ def _looks_like_primary_statement_line(line: str) -> bool:
     if len(letters_only) < 3 or set(letters_only).issubset({"n", "m", "o"}):
         return False
         
-    if _is_subheading(_clean_statement_line_item(line)):
+    cleaned_item = _clean_statement_line_item(line)
+    if _is_subheading(cleaned_item) and not NOTE_REF_RE.search(line) and _normalise_match_words(cleaned_item) not in {"assets"}:
         return False
-    return not _is_notes_page(line)
+    if "notes to the financial statements" in lower or "notes to financial statements" in lower or lower.count("accounting polic") >= 2:
+        return False
+    return True
 
 
 def _is_disclosure_only_note(title: str) -> bool:
