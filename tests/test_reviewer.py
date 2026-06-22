@@ -4373,3 +4373,147 @@ def test_notes_agreement_matches_negative_statement_amount_to_positive_tax_note_
         and "not found in the related note text" in finding.issue
         for finding in findings
     )
+
+
+def test_parse_statement_note_line_detects_implicit_note_before_dash_placeholders():
+    parsed = reviewer._parse_statement_note_line(
+        "Property, plant and equipment 3 - -",
+        12,
+        "Statement of financial position",
+    )
+
+    assert parsed is not None
+    assert parsed.ref == "3"
+    assert parsed.line_item == "property plant and equipment"
+    assert parsed.amounts == ()
+
+
+def test_notes_agreement_does_not_flag_cash_flow_balance_or_interest_lines_without_note_refs(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of cash flows\n"
+                "Interest income 37,617 586\n"
+                "Cash from financing activities (24,332) (43,639)\n"
+                "Cash and cash equivalents at the beginning of the year 87,815 39,968\n"
+                "Effect of exchange rate movement on cash balances (142,822) -\n",
+                [],
+            ),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n"
+                "8. Cash and cash equivalents\n87,815 39,968\n"
+                "18. Investment income\n37,617 586",
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+
+    findings = check_notes_agreement(document)
+    issues = [f.issue for f in findings]
+
+    assert not any("Interest Income lacks a note reference" in issue for issue in issues)
+    assert not any("Cash From Financing Activities lacks a note reference" in issue for issue in issues)
+    assert not any("Cash And Cash Equivalents At The Beginning Of The Year lacks a note reference" in issue for issue in issues)
+    assert not any("Effect Of Exchange Rate Movement On Cash Balances lacks a note reference" in issue for issue in issues)
+
+
+def test_notes_agreement_skips_cash_flow_adjustment_amount_checks_even_with_explicit_note_refs(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of cash flows\n"
+                "Loss on disposal of fixed asset 3 - 26,383\n"
+                "Depreciation 13 - 30,216\n"
+                "Finance costs 15 - 868\n",
+                [],
+            ),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n"
+                "3. Property, plant and equipment\nCarrying amount 100 90\n"
+                "13. Depreciation expense\n30,216 30,216\n"
+                "15. Finance costs\n868 868",
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+
+    findings = check_notes_agreement(document)
+
+    assert not any(
+        finding.category == "Notes agreement"
+        and "not found in the related note text" in finding.issue
+        for finding in findings
+    )
+
+
+def test_simple_note_text_casting_ignores_page_footer_like_total_lines():
+    page = PdfPage(
+        28,
+        "\n".join(
+            [
+                "14. Operating expenses",
+                "Auditors remuneration 4,677 5,422",
+                "Bank charges - 28",
+                "Professional fees 40,985 49,806",
+                "Office expenses 352 21,487",
+                "Loss on disposal - 6,426",
+                "Restructuring expense 180 1,652",
+                "Fines and penalties 10,113 -",
+                "Security - 503",
+                "Technical service fees 34,418 372,009",
+                "Telecommunication expenses 3,978 3,805",
+                "Transportation and travelling - 11,646",
+                "94,703 472,784",
+                "27",
+                "DRAFT",
+            ],
+        ),
+        [],
+    )
+
+    findings = reviewer._check_simple_note_text_casting(page, Decimal("1"))
+
+    assert not any(f.severity != "Passed" and "Note 14 Operating expenses" in f.location for f in findings)
+
+
+def test_line_item_not_face_linked_covers_profit_before_financing_and_cash_flow_buckets():
+    assert reviewer._line_item_not_face_linked(
+        "Profit before financing and income taxes",
+        "Statement of profit or loss and other comprehensive income",
+        False,
+    )
+    assert reviewer._line_item_not_face_linked(
+        "Cash from financing activities",
+        "Statement of cash flows",
+        False,
+    )
+    assert reviewer._line_item_not_face_linked(
+        "Cash at the beginning of the year",
+        "Statement of cash flows",
+        False,
+    )
+
+
+def test_simple_note_text_casting_skips_reconciliation_style_note_sections():
+    page = PdfPage(
+        37,
+        "\n".join(
+            [
+                "14. Deposit for Shares",
+                "As at 1 January 351,370 439,789",
+                "Movement in the year - (88,419)",
+                "As at 31 December 351,370 351,370",
+            ],
+        ),
+        [],
+    )
+
+    findings = reviewer._check_simple_note_text_casting(page, Decimal("1"))
+
+    assert not findings

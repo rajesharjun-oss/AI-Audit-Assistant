@@ -2481,6 +2481,7 @@ def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
         "property plant and equipment",
         "intangible assets",
         "share capital",
+        "deposit for shares",
         "ordinary shares",
         "number of shares",
         "depreciation",
@@ -2491,12 +2492,30 @@ def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
         "profit loss",
         "profit before tax",
         "loss before tax",
+        "profit before financing",
+        "operating loss",
     )
     if any(term in normalized for term in section_excluded):
         return False
     if any(term in heading_normalized for term in heading_excluded):
         return False
     if any(term in heading_normalized for term in heading_blockers):
+        return False
+    if re.search(r"\b\d+[a-z]\b", " ".join(lines[:40]), flags=re.I):
+        return False
+    if any(
+        marker in normalized
+        for marker in (
+            "as at 1 january",
+            "as at january",
+            "as at 31 december",
+            "opening balance",
+            "closing balance",
+            "minimum lease payment",
+            "balance at beginning",
+            "balance at end",
+        )
+    ):
         return False
     amount_lines = [line for line in lines if _simple_note_amounts_from_line(line)]
     if len(amount_lines) < 3:
@@ -2505,7 +2524,7 @@ def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
         return False
     has_total = any(_looks_like_total(_normalise_match_words(line)) for line in amount_lines)
     has_numeric_total = any(
-        len(_simple_note_amounts_from_line(line)) >= 1
+        len(_simple_note_amounts_from_line(line)) >= 2
         and not re.search(r"[A-Za-z]{3,}", re.sub(NUMBER_RE, " ", line))
         for line in amount_lines[2:]
     )
@@ -2516,6 +2535,8 @@ def _simple_note_amounts_from_line(line: str) -> list[Decimal]:
     line = re.sub(r"^\s*\d+[A-Z]?\.\s*", "", line.strip(), flags=re.I)
     line = re.sub(r"\b\d{1,3}\s+DRAFT\b", "", line, flags=re.I)
     line = re.sub(r"\bDRAFT\b", "", line, flags=re.I).strip()
+    if re.fullmatch(r"\d{1,3}", line):
+        return []
     amounts: list[Decimal] = []
     token_re = re.compile(r"\(?-?\d[\d,]*\)?|(?:(?:^|(?<=\s))-(?=\s|$))")
     for match in token_re.finditer(line):
@@ -2539,6 +2560,8 @@ def _simple_note_amounts_from_line(line: str) -> list[Decimal]:
         amounts.append(-amount if negative else amount)
     if len(amounts) >= 3 and 0 < amounts[0] <= 60 and _line_appears_to_have_note_ref_before_amounts(line):
         amounts = amounts[1:]
+    if len(amounts) == 1 and amounts[0] >= 0 and amounts[0] <= 100 and not re.search(r"[A-Za-z]{3,}", line):
+        return []
     return amounts
 
 
@@ -7038,6 +7061,8 @@ def _statement_note_lines(document: PdfDocument) -> list[StatementNoteLine]:
 def _statement_lines_with_note_refs(document: PdfDocument) -> list[tuple[str, str, Decimal]]:
     lines: list[tuple[str, str, Decimal]] = []
     for item in _statement_note_lines(document):
+        if _note_agreement_skip_reason(item):
+            continue
         if item.amounts:
             lines.append((item.ref, item.line, item.amounts[-1]))
     return lines
@@ -7050,7 +7075,11 @@ def _parse_statement_note_line(line: str, page_number: int, statement_name: str)
     note_match = NOTE_REF_RE.search(line)
     implicit_match = None
     if not explicit_ref:
-        implicit_match = re.search(r"(?<![\.\d])\b(\d{1,2}[A-C]?)\b(?=\s+[-=]?\s*\(?-?\d[\d,\s]*\)?)", line, flags=re.I)
+        implicit_match = re.search(
+            r"(?<![\.\d])\b(\d{1,2}[A-C]?)\b(?=\s+(?:(?:-\s*){1,2}|[-=]?\s*\(?-?\d[\d,\s]*\)?))",
+            line,
+            flags=re.I,
+        )
         if implicit_match and _amounts_in_text(line[: implicit_match.start()]):
             implicit_match = None
     ref = explicit_ref or (implicit_match.group(1).upper() if implicit_match else "")
@@ -7128,9 +7157,42 @@ def _note_agreement_skip_reason(item: StatementNoteLine) -> str:
     statement = item.statement_name.lower()
     if "value added" in statement or "five year" in statement or "financial summary" in statement:
         return "not a face-linked note line"
+    if "cash flow" in statement and _cash_flow_line_not_note_linked(item.line_item):
+        return "not a face-linked note line"
     if _line_item_not_face_linked(item.line_item, item.statement_name, item.explicit_ref):
         return "not a face-linked note line"
     return ""
+
+
+def _cash_flow_line_not_note_linked(line_item: str) -> bool:
+    normalized = _normalise_match_words(line_item)
+    if any(
+        marker in normalized
+        for marker in (
+            "cash operating activities",
+            "cash investing activities",
+            "cash financing activities",
+            "net cash operating activities",
+            "net cash investing activities",
+            "net cash financing activities",
+            "cash at beginning year",
+            "cash and cash equivalents at beginning year",
+            "cash at end year",
+            "cash and cash equivalents at end year",
+            "effect exchange rate movement cash balances",
+            "interest income",
+            "loss disposal fixed asset",
+            "loss on disposal fixed asset",
+            "depreciation",
+            "finance costs",
+            "tax paid",
+            "profit before taxation",
+            "profit before financing income taxes",
+            "profit before financing",
+        )
+    ):
+        return True
+    return False
 
 
 def _line_item_not_face_linked(line_item: str, statement_name: str, explicit_ref: bool = False) -> bool:
@@ -7150,12 +7212,22 @@ def _line_item_not_face_linked(line_item: str, statement_name: str, explicit_ref
         "net cash",
         "cash generated operations",
         "cash used operations",
+        "cash from operating activities",
+        "cash from investing activities",
+        "cash from financing activities",
+        "cash and cash equivalents at the beginning of the year",
+        "cash and cash equivalents at the end of the year",
+        "effect of exchange rate movement on cash balances",
+        "interest income",
         "profit before taxation",
         "loss before taxation",
         "profit loss before taxation",
         "profit before tax",
         "loss before tax",
         "profit loss before tax",
+        "profit before financing and income taxes",
+        "operating profit",
+        "operating loss",
         "taxation",
         "tax expense",
         "income tax expense",
@@ -7177,12 +7249,16 @@ def _line_item_not_face_linked(line_item: str, statement_name: str, explicit_ref
         raw_label,
     ):
         return True
+    if not explicit_ref and "profit before financing" in label:
+        return True
     if not explicit_ref and re.search(r"\btotal comprehensive (income|loss)\b", raw_label):
         return True
     if "cash flow" in statement and re.search(r"\b(total|net|cash generated|cash used|increase|decrease|cash inflow|cash outflow|cash absorbed)\b", raw_label):
         return True
     if "cash flow" in statement and not explicit_ref:
-        if re.search(r"\b(profit|loss|taxation|tax paid|income tax|working capital|receivable(?:s)?|payable(?:s)?|contract liabilities|inventory|loans? and advance(?:s)?|advance(?:s)?|cash movement)\b", raw_label):
+        if re.search(r"\b(profit|loss|taxation|tax paid|income tax|working capital|receivable(?:s)?|payable(?:s)?|contract liabilities|inventory|loans? and advance(?:s)?|advance(?:s)?|cash movement|interest income|cash and cash equivalents at the beginning of the year|cash and cash equivalents at the end of the year|effect of exchange rate movement)\b", raw_label):
+            return True
+        if _cash_flow_line_not_note_linked(line_item):
             return True
     return False
 
