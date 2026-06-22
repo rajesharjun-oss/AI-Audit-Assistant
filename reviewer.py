@@ -2298,16 +2298,6 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
             findings.extend(table_findings)
     if skipped_tables:
         document.skipped_table_details = list(dict.fromkeys(skipped_tables))
-        findings.append(
-            Finding(
-                "Totals and rounding",
-                "Low",
-                "Table skips",
-                f"{len(document.skipped_table_details)} table(s) skipped for generic arithmetic review.",
-                "; ".join(document.skipped_table_details[:10]),
-                "Review the listed pages manually where table structure is non-standard, low-confidence, or not suitable for generic subtotal casting.",
-            )
-        )
     return findings
 
 
@@ -3483,8 +3473,8 @@ def check_notes_agreement(
         section = _get_note_section_with_fallback(ref, note_sections)
         if not section or _is_disclosure_only_note(_get_note_heading_with_fallback(ref, headings)):
             continue
-        note_amounts = _amounts_in_text(section)
-        if note_amounts and not any(abs(note_amount - amount) <= tolerance for note_amount in note_amounts):
+        match_result = _amount_match_in_section(amount, section, tolerance)
+        if not match_result["found"] and _amounts_in_text(section):
             # If Note-linked review found the amount successfully (perhaps using stronger table logic), skip Exception
             if ref.strip() in passed_refs:
                 continue
@@ -7160,13 +7150,40 @@ def _line_item_not_face_linked(line_item: str, statement_name: str, explicit_ref
         "net cash",
         "cash generated operations",
         "cash used operations",
+        "profit before taxation",
+        "loss before taxation",
+        "profit loss before taxation",
+        "profit before tax",
+        "loss before tax",
+        "profit loss before tax",
+        "taxation",
+        "tax expense",
+        "income tax expense",
+        "profit after tax",
+        "loss after tax",
+        "profit loss after tax",
+        "profit for year",
+        "loss for year",
+        "profit loss for year",
+        "total comprehensive income",
+        "total comprehensive loss",
     }
     if label in broad_labels:
         return True
     if raw_label.startswith(("total ", "net cash", "surplus for the year")) and not explicit_ref:
         return True
+    if not explicit_ref and re.search(
+        r"\b(profit|loss|profit/\(loss\)|profit\/loss)\b.*\b(before taxation|before tax|after tax|for the year)\b",
+        raw_label,
+    ):
+        return True
+    if not explicit_ref and re.search(r"\btotal comprehensive (income|loss)\b", raw_label):
+        return True
     if "cash flow" in statement and re.search(r"\b(total|net|cash generated|cash used|increase|decrease|cash inflow|cash outflow|cash absorbed)\b", raw_label):
         return True
+    if "cash flow" in statement and not explicit_ref:
+        if re.search(r"\b(profit|loss|taxation|tax paid|income tax|working capital|receivable(?:s)?|payable(?:s)?|contract liabilities|inventory|loans? and advance(?:s)?|advance(?:s)?|cash movement)\b", raw_label):
+            return True
     return False
 
 

@@ -1139,7 +1139,7 @@ def test_arithmetic_skips_merged_numeric_cells():
 
     findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
 
-    assert any("skipped" in finding.issue.lower() for finding in findings)
+    assert getattr(document, "skipped_table_details", [])
     assert not any("does not agree" in finding.issue.lower() for finding in findings)
 
 
@@ -1163,7 +1163,7 @@ def test_arithmetic_skips_five_year_summary():
 
     findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
 
-    assert any("multi-year summary" in finding.evidence.lower() for finding in findings)
+    assert any("multi-year summary" in detail.lower() for detail in getattr(document, "skipped_table_details", []))
     assert not any("does not agree" in finding.issue.lower() for finding in findings)
 
 
@@ -1187,7 +1187,7 @@ def test_arithmetic_skips_value_added_statement():
 
     findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
 
-    assert any("value-added statement" in finding.evidence.lower() for finding in findings)
+    assert any("value-added statement" in detail.lower() for detail in getattr(document, "skipped_table_details", []))
     assert not any("does not agree" in finding.issue.lower() for finding in findings)
 
 
@@ -1206,11 +1206,11 @@ def test_low_confidence_table_skips_are_grouped():
     )
 
     findings = check_rounding_and_casting(document, tolerance=Decimal("1"))
-    grouped = [finding for finding in findings if "table(s) skipped" in finding.issue.lower()]
+    grouped = getattr(document, "skipped_table_details", [])
 
-    assert len(grouped) == 1
-    assert "Page 1, table 1" in grouped[0].evidence
-    assert "Page 1, table 2" in grouped[0].evidence
+    assert len(grouped) == 2
+    assert any("Page 1, table 1" in detail for detail in grouped)
+    assert any("Page 1, table 2" in detail for detail in grouped)
 
 
 def test_generic_arithmetic_skips_ocr_reconstructed_tables():
@@ -4288,3 +4288,88 @@ def test_notes_agreement_flags_missing_note_reference_when_no_note_found(monkeyp
     assert finding.severity == "Low"
     assert "Assets" in finding.issue
     assert "no matching note was found" in finding.issue
+
+
+def test_notes_agreement_does_not_flag_cash_flow_working_capital_lines_without_note_refs(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of Cash Flows\n"
+                "Profit/(loss) before taxation 125,897 (538)\n"
+                "Loans and advance (5,568,284) -\n"
+                "Other receivables (1,961,318) -\n"
+                "Other payable 3,180,280 538\n"
+                "Total cash movement for the year 2,916,467 -\n"
+                "Cash and cash equivalents at the end of the year 3 2,916,467 -",
+                [],
+            ),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n"
+                "3. Cash and cash equivalents\nTotal 2,916,467\n"
+                "4. Other receivables\nTotal 1,961,318\n"
+                "5. Loans and advances\nTotal 5,568,284\n"
+                "9. Other payables\nTotal 3,180,280",
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+
+    findings = check_notes_agreement(document)
+
+    issues = [f.issue for f in findings]
+    assert not any("Profit/(loss) before taxation lacks a note reference" in issue for issue in issues)
+    assert not any("Loans And Advance lacks a note reference" in issue for issue in issues)
+    assert not any("Other Receivables lacks a note reference" in issue for issue in issues)
+    assert not any("Other Payable lacks a note reference" in issue for issue in issues)
+    assert not any("Cash Movement For The Year lacks a note reference" in issue for issue in issues)
+
+
+def test_skipped_note_tables_do_not_create_findings(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Notes to the financial statements\n17. Operating expenses\nAdvertising 421,366 188,606\nTravel 199,281 148,968\nTotal 1,888,693 1,725,336",
+                [[["Line item", "2025", "2024"], ["Advertising", "421,366", "188,606"], ["Travel", "199,281", "148,968"], ["Total", "1,888,693", "1,725,336"]]],
+            )
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+    monkeypatch.setattr(reviewer, "_notes_start_page", lambda _document: 1)
+    monkeypatch.setattr(reviewer, "_classified_primary_statement_pages", lambda _document: {})
+    monkeypatch.setattr(reviewer, "_check_simple_note_table_casting", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(reviewer, "_check_simple_note_text_casting", lambda *_args, **_kwargs: [])
+    document.skipped_table_details = []
+
+    findings = reviewer.check_totals_and_rounding(document)
+
+    assert getattr(document, "skipped_table_details", [])
+    assert not any("table(s) skipped for generic arithmetic review" in finding.issue for finding in findings)
+
+
+def test_notes_agreement_matches_negative_statement_amount_to_positive_tax_note_total(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of profit or loss\nTaxation 19 (43,722) -", []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n19. Taxation\n"
+                "Major components of the tax expense\n"
+                "Current tax 41,069 -\nDeferred tax 2,653 -\n43,722 -",
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(PdfDocument, "table_extraction_confidence", property(lambda self: 100))
+
+    findings = check_notes_agreement(document)
+
+    assert not any(
+        finding.category == "Notes agreement"
+        and finding.location == "Note 19"
+        and "not found in the related note text" in finding.issue
+        for finding in findings
+    )

@@ -1206,7 +1206,10 @@ elif use_ai_policy_review:
     ai_message = str(result.metrics.get("ai_policy_review_message", "") or "").strip()
     st.markdown('<div class="section-label">AI policy judgement</div>', unsafe_allow_html=True)
     if ai_message:
-        st.warning(f"Status: {ai_status}. {ai_message}")
+        if ai_status == "deferred":
+            st.info(ai_message)
+        else:
+            st.warning(f"Status: {ai_status}. {ai_message}")
     else:
         st.warning(f"Status: {ai_status}. No AI policy observations were returned.")
 

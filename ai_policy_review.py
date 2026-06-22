@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib import error, request
@@ -74,6 +75,7 @@ def run_ai_policy_review(
 
     payload = {
         "model": model,
+        "max_output_tokens": 1200,
         "input": [
             {
                 "role": "system",
@@ -104,13 +106,14 @@ def run_ai_policy_review(
             model=model,
         )
     except Exception as exc:  # pragma: no cover - network/runtime dependent
+        friendly_message = _friendly_ai_error_message(exc)
         return AiPolicyReviewResult(
             findings=[],
             export_rows=[],
             summary="",
-            status="error",
+            status="deferred" if _is_rate_limit_error(exc) else "error",
             model=model,
-            message=f"AI policy and standards judgement could not be completed: {exc}",
+            message=friendly_message,
         )
 
 
@@ -169,21 +172,34 @@ def _build_prompt(
 
 def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     endpoint = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
-    req = request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with request.urlopen(req, timeout=60) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}") from exc
+    last_error: Exception | None = None
+    for attempt in range(3):
+        req = request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=60) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 429 and attempt < 2:
+                retry_after = _retry_after_seconds(exc.headers.get("Retry-After", ""))
+                time.sleep(retry_after if retry_after is not None else (2 + attempt * 3))
+                last_error = RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}")
+                continue
+            raise RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}") from exc
+        except Exception as exc:
+            last_error = exc
+            break
+    if last_error:
+        raise last_error
+    raise RuntimeError("OpenAI API call failed without a specific error.")
 
 
 def _parse_response_json(response_json: dict[str, Any]) -> dict[str, Any]:
@@ -287,15 +303,15 @@ def _policy_context(note_sections: dict[str, str], document: PdfDocument) -> str
         if any(marker in lower[:300] for marker in ("value added statement", "five year financial summary")):
             continue
         if ref in {"1", "2"} or any(keyword in lower for keyword in POLICY_KEYWORDS):
-            note_lines.append(f"Note {ref}\n{clean[:5000]}")
+            note_lines.append(f"Note {ref}\n{clean[:2200]}")
     if note_lines:
-        return "\n\n".join(note_lines[:8])
+        return "\n\n".join(note_lines[:6])
     fallback_pages = []
     for page in document.pages:
         lower = page.text.lower()
         if any(pattern in lower for pattern in NOTES_HEADING_PATTERNS) or "significant accounting policies" in lower:
-            fallback_pages.append(f"Page {page.number}\n{page.text[:5000]}")
-    return "\n\n".join(fallback_pages[:4])
+            fallback_pages.append(f"Page {page.number}\n{page.text[:2200]}")
+    return "\n\n".join(fallback_pages[:3])
 
 
 def _keyword_evidence(text: str) -> str:
@@ -306,12 +322,35 @@ def _keyword_evidence(text: str) -> str:
         if index == -1:
             continue
         start = max(0, index - 80)
-        end = min(len(text), index + 220)
+        end = min(len(text), index + 180)
         snippet = re.sub(r"\s+", " ", text[start:end]).strip()
         snippets.append(f"- {keyword}: {snippet}")
-        if len(snippets) >= 12:
+        if len(snippets) >= 8:
             break
     return "\n".join(snippets) or "- No focused policy snippets were extracted."
+
+
+def _retry_after_seconds(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return max(1, min(int(text), 12))
+    return None
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return "429" in text or "rate limit" in text or "rate exceeded" in text or "too many requests" in text
+
+
+def _friendly_ai_error_message(exc: Exception) -> str:
+    if _is_rate_limit_error(exc):
+        return (
+            "AI policy and standards judgement was deferred because the AI service is busy right now. "
+            "The core deterministic review still completed. Please retry in a minute, ideally one file at a time."
+        )
+    return f"AI policy and standards judgement could not be completed: {exc}"
 
 
 def _sort_note_key(value: str) -> tuple[int, str]:
