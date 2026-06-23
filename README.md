@@ -19,6 +19,8 @@ streamlit run app.py
 
 ## Run from the command line
 
+Basic markdown run:
+
 ```powershell
 python cli.py "C:\path\to\financial_statement.pdf" --company-name "Example Plc" --industry "Technology" --currency NGN --significant-transaction leases --checklist-area "IFRS 16" --output review.md
 ```
@@ -27,6 +29,36 @@ For scanned or signed image-based PDFs, enable local OCR:
 
 ```powershell
 python cli.py "C:\path\to\signed_afs.pdf" --ocr --ocr-max-pages 60 --ocr-dpi 200 --output review.md
+```
+
+For backend verification without the Streamlit uploader, export the standard artifacts directly from the real review pipeline:
+
+```powershell
+python cli.py "C:\path\to\financial_statement.pdf" `
+  --ocr `
+  --ai-policy-review `
+  --export-dir .\scratch\verification_run `
+  --require-ai-available
+```
+
+That command writes:
+
+- Excel exception register
+- Markdown debug report
+- JSON run summary with AI/hybrid statuses
+
+The JSON summary is useful for automated checks because it records:
+
+- findings counts
+- checks performed / passed / skipped
+- AI policy review status
+- AI finding review status
+- generated output file paths
+
+If you want stricter AI verification, you can require a completed AI policy pass:
+
+```powershell
+python cli.py "C:\path\to\financial_statement.pdf" --ai-policy-review --export-dir .\scratch\ai_check --require-ai-policy-completed
 ```
 
 OCR uses local Tesseract. The app renders pages in memory and does not save page images or OCR text unless you explicitly download a review report.
@@ -65,6 +97,7 @@ The bundled checklist is a starter engine, not a full licensed IFRS disclosure c
 - `models.py` contains shared dataclasses for documents, findings, profile inputs, and review options.
 - `extraction.py` handles PDF text extraction, OCR fallback, and OCR table reconstruction.
 - `reviewer.py` coordinates deterministic review checks and report text.
+- `job_runner.py` writes standard backend artifacts and AI verification summaries without the UI.
 - `app.py` provides the Streamlit interface.
 - `cli.py` provides batch review from the command line.
 

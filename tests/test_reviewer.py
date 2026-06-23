@@ -5,7 +5,8 @@ from pathlib import Path
 import openpyxl
 import extraction
 import reviewer
-from ai_finding_review import AiFindingReviewResult
+import ai_finding_review
+from ai_finding_review import AiFindingReviewResult, run_ai_finding_review
 from ai_policy_review import AiPolicyReviewResult
 from cross_page_consistency import _names_look_like_spelling_variants, check_cross_page_consistency
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
@@ -558,6 +559,79 @@ def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sh
     assert any(str(row[2] or "").lower() == "low" for row in rows)
 
 
+def test_ai_finding_review_includes_page_and_note_context_and_can_suppress_medium():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Current assets 1 1,172,176 811,598",
+                        "Total assets 3,548,638 2,926,848",
+                        "10",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "18 Cash and cash equivalents",
+                        "Access Bank Plc 5,518 13,691",
+                        "TOTAL 875,869 605,645",
+                        "28",
+                    ]
+                ),
+                [],
+            ),
+        ],
+        ocr_used=True,
+        ocr_pages=2,
+    )
+    finding = reviewer.Finding(
+        category="Totals and rounding",
+        severity="Medium",
+        location="Page 28 | Note 18 Cash and cash equivalents",
+        issue="Simple note section total does not agree to visible component rows.",
+        evidence="Note 18 Cash and cash equivalents, column 1: reported 875,869, visible sum 175,252, difference 700,617",
+        recommendation="Recalculate the note section.",
+        metadata={"page_reference": "Page 28", "note_reference": "Note 18", "ocr_review": "true"},
+    )
+
+    candidates = ai_finding_review._review_candidates(document, [finding])
+
+    assert len(candidates) == 1
+    assert "18 Cash and cash equivalents" in candidates[0]["note_snippet"]
+
+    result = ai_finding_review._apply_adjudications(
+        [finding],
+        candidates,
+        {
+            "summary": "One ambiguous note-total finding was suppressed as OCR drift.",
+            "adjudications": [
+                {
+                    "finding_id": "F1",
+                    "decision": "suppress",
+                    "revised_severity": "Low",
+                    "status": "likely_false_positive",
+                    "confidence": "High",
+                    "reason": "The page and note snippets show a split-digit extraction pattern rather than a genuine note-total defect.",
+                    "recommended_action": "Do not elevate unless the signed PDF still disagrees after manual recast.",
+                }
+            ],
+        },
+        "gpt-5-mini",
+    )
+
+    assert result.status == "completed"
+    assert result.findings == []
+    assert result.suppressed_count == 1
+    assert result.export_rows[0]["Note snippet"].startswith("18 Cash and cash equivalents")
+
+
 def test_narrative_dates_do_not_trigger_format_findings():
     document = PdfDocument(
         [
@@ -966,6 +1040,12 @@ def test_ocr_statement_amount_parser_normalizes_decimal_thousands_separator():
     assert rows["taxation"].amounts == (Decimal("53127"), Decimal("253124"))
 
 
+def test_simple_note_amount_parser_normalizes_split_digits_and_spaces():
+    assert reviewer._simple_note_amounts_from_line("Annual Public Lecture 2 55 664") == [Decimal("255"), Decimal("664")]
+    assert reviewer._simple_note_amounts_from_line("Account payable 7 1,392 59,081") == [Decimal("71392"), Decimal("59081")]
+    assert reviewer._simple_note_amounts_from_line("Medical 2 2,537 11,280") == [Decimal("22537"), Decimal("11280")]
+
+
 def test_ocr_income_alignment_infers_missing_current_year_after_tax_from_prior_match():
     rows = reviewer._statement_row_parses(
         "\n".join(
@@ -1005,6 +1085,25 @@ def test_ocr_statement_row_parser_does_not_concatenate_two_digit_note_with_reven
     assert rows["revenue"].note_ref == "13"
     assert rows["revenue"].amounts == (Decimal("707189"), Decimal("297041"))
     assert rows["revenue"].correction_applied == "No"
+
+
+def test_statement_row_parser_ignores_implicit_note_refs_on_statement_totals_and_cash_summary_rows():
+    rows = reviewer._statement_row_parses(
+        "\n".join(
+            [
+                "Statement of financial position",
+                "Current assets 1 1,172,176 811,598",
+                "Statement of cash flows",
+                "Total cash movement for the year 7 0,224 (15,461)",
+                "Cash and cash equivalents at the beginning of the year 8 75,869 605,645",
+            ]
+        )
+    )
+
+    assert rows["current assets"].note_ref == ""
+    assert rows["current assets"].amounts == (Decimal("1"), Decimal("1172176"), Decimal("811598"))[-2:]
+    assert rows["total cash movement for the year"].note_ref == ""
+    assert rows["cash at beginning"].note_ref == ""
 
 
 def test_primary_statement_checks_run_from_line_text_when_tables_are_low_confidence():
@@ -4173,6 +4272,18 @@ def test_standard_checklist_specific_triggers_avoid_irrelevant_eps_and_segments(
 
     assert not any("IAS 33" in finding.location for finding in findings)
     assert not any("IFRS 8" in finding.location for finding in findings)
+
+
+def test_eps_note_check_does_not_trigger_from_contingencies_or_steps_word_fragment():
+    findings: list[reviewer.Finding] = []
+
+    reviewer._check_eps_note(
+        findings,
+        "25",
+        "25. Contingencies\nManagement outlined the next steps in resolving the matter.\nNo earnings per claim were presented.",
+    )
+
+    assert findings == []
 
 
 def test_standard_checklist_suppresses_tax_exempt_and_no_subsequent_events():

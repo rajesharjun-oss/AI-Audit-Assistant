@@ -2586,6 +2586,7 @@ def _simple_note_amounts_from_line(line: str) -> list[Decimal]:
     line = re.sub(r"^\s*\d+[A-Z]?\.\s*", "", line.strip(), flags=re.I)
     line = re.sub(r"\b\d{1,3}\s+DRAFT\b", "", line, flags=re.I)
     line = re.sub(r"\bDRAFT\b", "", line, flags=re.I).strip()
+    line = _normalise_statement_number_spacing(line)
     if re.fullmatch(r"\d{1,3}", line):
         return []
     amounts: list[Decimal] = []
@@ -4152,7 +4153,7 @@ def _check_segment_note(findings: list[Finding], ref: str, section: str, toleran
 
 def _check_eps_note(findings: list[Finding], ref: str, section: str) -> None:
     lower = section.lower()
-    if "earnings per share" not in lower and "eps" not in lower:
+    if "earnings per share" not in lower and not re.search(r"\beps\b", lower):
         return
     earnings = _amount_near(section, ("profit attributable", "earnings", "profit for the year"))
     shares = _amount_near(section, ("weighted average", "ordinary shares", "shares"))
@@ -4170,7 +4171,7 @@ def _check_eps_note(findings: list[Finding], ref: str, section: str) -> None:
                     "Recalculate basic and diluted EPS using the final attributable earnings and weighted average share count.",
                 )
             )
-    elif "earnings per share" in lower or "eps" in lower:
+    elif "earnings per share" in lower or re.search(r"\beps\b", lower):
         findings.append(
             Finding(
                 "Notes agreement",
@@ -5194,6 +5195,8 @@ def _detect_statement_row_note_token(line: str) -> tuple[str, int, int]:
         explicit_note = bool(re.match(r"\s*note\b", match.group(0), flags=re.I))
         tail = line[match.end() :]
         label = _canonical_statement_label(_statement_label(line[: match.start()]))
+        if not explicit_note and not _implicit_statement_note_ref_allowed(label):
+            continue
         tail_amounts = _amount_tokens_from_statement_line(tail)
         if (
             not explicit_note
@@ -5205,6 +5208,45 @@ def _detect_statement_row_note_token(line: str) -> tuple[str, int, int]:
         if len(tail_amounts) >= 1:
             return ref, match.start(), match.end()
     return "", len(line), len(line)
+
+
+def _implicit_statement_note_ref_allowed(label: str) -> bool:
+    normalized = _normalise_match_words(label)
+    if not normalized:
+        return False
+    blocked_exact = {
+        "current assets",
+        "non current assets",
+        "non-current assets",
+        "total assets",
+        "equity",
+        "liabilities",
+        "total liabilities",
+        "total equity and liabilities",
+        "total current assets",
+        "total non current assets",
+        "total non-current assets",
+        "cash at beginning",
+        "cash at end",
+        "total cash movement for the year",
+        "net cash generated from used in operating activities",
+        "net cash used in investing activities",
+        "net cash generated from investing activities",
+        "net cash used in financing activities",
+        "net cash generated from financing activities",
+        "cash generated from operations",
+    }
+    if normalized in blocked_exact:
+        return False
+    if normalized.startswith("total "):
+        return False
+    if normalized.startswith("net cash "):
+        return False
+    if normalized.startswith("cash and cash equivalents at the beginning"):
+        return False
+    if normalized.startswith("cash and cash equivalents at the end"):
+        return False
+    return True
 
 
 def _label_prefers_split_leading_digit(label: str) -> bool:
