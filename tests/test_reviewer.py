@@ -487,6 +487,51 @@ def test_ai_policy_review_missing_key_is_reported_as_skipped(monkeypatch):
     assert "OPENAI_API_KEY is not configured" in result.metrics["checks_skipped"]
 
 
+def test_note_heading_regex_accepts_compact_numeric_headings():
+    assert ai_finding_review.NOTE_HEADING_RE.match("3.Cash and cash equivalents")
+    assert reviewer.NOTE_HEADING_RE.match("3.Cash and cash equivalents")
+
+
+def test_ai_finding_review_keeps_explicit_nil_vs_non_zero_note_contradiction():
+    finding = reviewer.Finding(
+        category="Narrative consistency",
+        severity="Medium",
+        location="Page 24 | Note 3",
+        issue="Note 3 states that a balance was nil, but the same note table shows a non-zero amount.",
+        evidence="Cash and cash equivalents at the end of the end of the reporting period was nil. | Note heading: Cash and cash equivalents | Non-zero amount detected in same note: 2,916,467",
+        recommendation="Review the narrative disclosure against the note table and correct the wording or the amount presentation.",
+    )
+    candidates = [{
+        "finding_id": "F1",
+        "index": 0,
+        "category": finding.category,
+        "severity": finding.severity,
+        "page_reference": "Page 24",
+        "note_reference": "Note 3",
+        "issue": finding.issue,
+        "page_snippet": "Page 24: 3. Cash and cash equivalents Cash and cash equivalents at the end of the end of the reporting period was nil.",
+        "note_snippet": "3.Cash and cash equivalents Cash and cash equivalents at the end of the end of the reporting period was nil. 2,916,467 -",
+    }]
+    parsed = {
+        "summary": "test",
+        "adjudications": [{
+            "finding_id": "F1",
+            "decision": "suppress",
+            "revised_severity": "Low",
+            "status": "likely_false_positive",
+            "confidence": "Medium",
+            "reason": "layout mismatch",
+            "recommended_action": "none",
+        }],
+    }
+
+    result = ai_finding_review._apply_adjudications([finding], candidates, parsed, "gpt-5-mini")
+
+    assert len(result.findings) == 1
+    assert result.findings[0].severity == "Medium"
+    assert result.export_rows[0]["AI status"] == "confirmed_exception"
+
+
 def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sheet(monkeypatch):
     document = PdfDocument([
         PdfPage(1, "Statement of financial position\nCash and cash equivalents 100 90", []),

@@ -18,7 +18,7 @@ from extraction import extract_pdf, extract_pdf_with_ocr
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
 YEAR_RE = re.compile(r"\b20\d{2}\b")
 NOTE_REF_RE = re.compile(r"\bnote\s+(\d+[A-Za-z]?)\b|\bnotes?\s+(\d+[A-Za-z]?)\b", re.I)
-NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)(?:\s*\([a-z]\))?\s*[\).:-]?\s+(.{3,100})$", re.I)
+NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)(?:\s*\([a-z]\))?\s*[\).:-]?\s*(.{3,100})$", re.I)
 NORMALIZED_AMOUNT_RE = re.compile(
     r"\(?-?\d{1,3}(?:\s*,\s*\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?",
     re.M,

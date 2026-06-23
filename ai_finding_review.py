@@ -24,7 +24,7 @@ REVIEWABLE_CATEGORIES = {
 }
 SKIPPED_CATEGORIES = {"Extraction quality", "Document scope", "AI policy judgement"}
 MAX_REVIEW_FINDINGS = 24
-NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)(?:\s*\([a-z]\))?\s*[\).:-]?\s+(.{3,100})$", re.I)
+NOTE_HEADING_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)(?:\s*\([a-z]\))?\s*[\).:-]?\s*(.{3,100})$", re.I)
 
 
 @dataclass(frozen=True)
@@ -229,6 +229,12 @@ def _apply_adjudications(
         action = str(adjudication.get("recommended_action", "") or "").strip()
         original = updated_findings[candidate["index"]]
         metadata = dict(original.metadata or {})
+        if _has_strong_narrative_contradiction_evidence(original):
+            decision = "keep"
+            status = "confirmed_exception"
+            confidence = "High" if confidence != "Low" else confidence
+            if not reason:
+                reason = "The finding is supported by an explicit nil-style narrative and a non-zero amount in the same note evidence."
         metadata.update(
             {
                 "ai_review_status": status,
@@ -299,7 +305,22 @@ def _apply_adjudications(
     )
 
 
+def _has_strong_narrative_contradiction_evidence(finding: Finding) -> bool:
+    if finding.category != "Narrative consistency":
+        return False
+    evidence = str(finding.evidence or "").lower()
+    issue = str(finding.issue or "").lower()
+    return (
+        "nil" in issue
+        and "non-zero" in issue
+        and "nil" in evidence
+        and "non-zero amount detected in same note" in evidence
+    )
+
+
 def _can_suppress_finding(finding: Finding, confidence: str) -> bool:
+    if _has_strong_narrative_contradiction_evidence(finding):
+        return False
     if finding.severity == "Low":
         return True
     if finding.severity == "Medium" and confidence == "High":
