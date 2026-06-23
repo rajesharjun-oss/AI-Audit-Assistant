@@ -1256,43 +1256,6 @@ download_cols[1].download_button(
     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 )
 
-with st.expander("Notes detected (debug)", expanded=False):
-    note_rows = _note_heading_rows(result)
-    if note_rows:
-        st.dataframe(pd.DataFrame(note_rows), use_container_width=True, hide_index=True)
-    else:
-        st.write("No note headings detected.")
-
-with st.expander("OCR statement rows (debug)", expanded=False):
-    ocr_rows = _ocr_statement_row_rows(result)
-    st.dataframe(pd.DataFrame(ocr_rows), use_container_width=True, hide_index=True)
-
-with st.expander("Note validation debug", expanded=False):
-    st.json(
-        {
-            "cautious_note_validation_enabled": result.metrics.get("cautious_note_validation_enabled", False),
-            "note_validation_mode": result.metrics.get("note_validation_mode", "skipped"),
-            "note_reference_rows_detected": result.metrics.get("note_reference_rows_detected", 0),
-            "note_headings_detected": result.metrics.get("note_headings_detected", 0),
-            "notes_section_start_page": result.metrics.get("notes_section_start_page", "Not detected"),
-            "note_reference_findings": result.metrics.get("note_reference_findings", 0),
-            "ocr_text_coverage": result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%")),
-            "statement_structure_confidence": result.metrics.get("statement_structure_confidence", "0%"),
-            "note_structure_confidence": result.metrics.get("note_structure_confidence", "0%"),
-            "table_arithmetic_confidence": result.metrics.get("table_arithmetic_confidence", "0%"),
-            "primary_statement_pages": result.metrics.get("primary_statement_pages", "No primary statement pages detected."),
-        }
-    )
-
-with st.expander("Developer/debug Markdown export", expanded=False):
-    markdown_report = findings_to_markdown(result)
-    st.download_button(
-        "Download Markdown Developer Report",
-        markdown_report,
-        file_name=f"{export_stem}_review_debug.md",
-        mime="text/markdown",
-    )
-
 status_cols = st.columns(2)
 with status_cols[0]:
     with st.expander("Checks performed", expanded=True):
@@ -1302,17 +1265,54 @@ with status_cols[0]:
         st.write(str(result.metrics.get("checks_performed", "No deterministic checks completed.")))
 with status_cols[1]:
     with st.expander("Checks skipped", expanded=False):
-        st.write(str(result.metrics.get("checks_skipped", "No major checks skipped.")))
+        skipped_text = str(result.metrics.get("checks_skipped", "No major checks skipped."))
+        if skipped_text.strip() == "No major checks skipped.":
+            st.success(skipped_text)
+        else:
+            st.write(skipped_text)
 
 if not result.findings:
     st.success("No issues were detected by the automated checks.")
+    with st.expander("Developer and debug details", expanded=False):
+        note_rows = _note_heading_rows(result)
+        if note_rows:
+            st.markdown("**Notes detected**")
+            st.dataframe(pd.DataFrame(note_rows), use_container_width=True, hide_index=True)
+        ocr_rows = _ocr_statement_row_rows(result)
+        st.markdown("**OCR statement rows**")
+        st.dataframe(pd.DataFrame(ocr_rows), use_container_width=True, hide_index=True)
+        st.markdown("**Note validation debug**")
+        st.json(
+            {
+                "cautious_note_validation_enabled": result.metrics.get("cautious_note_validation_enabled", False),
+                "note_validation_mode": result.metrics.get("note_validation_mode", "skipped"),
+                "note_reference_rows_detected": result.metrics.get("note_reference_rows_detected", 0),
+                "note_headings_detected": result.metrics.get("note_headings_detected", 0),
+                "notes_section_start_page": result.metrics.get("notes_section_start_page", "Not detected"),
+                "note_reference_findings": result.metrics.get("note_reference_findings", 0),
+                "ocr_text_coverage": result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%")),
+                "statement_structure_confidence": result.metrics.get("statement_structure_confidence", "0%"),
+                "note_structure_confidence": result.metrics.get("note_structure_confidence", "0%"),
+                "table_arithmetic_confidence": result.metrics.get("table_arithmetic_confidence", "0%"),
+                "primary_statement_pages": result.metrics.get("primary_statement_pages", "No primary statement pages detected."),
+            }
+        )
+        markdown_report = findings_to_markdown(result)
+        st.download_button(
+            "Download Markdown Developer Report",
+            markdown_report,
+            file_name=f"{export_stem}_review_debug.md",
+            mime="text/markdown",
+        )
     st.stop()
 
 severity_order = ["High", "Medium", "Low"]
+st.markdown('<div class="section-label">Findings</div>', unsafe_allow_html=True)
 filter_cols = st.columns([1.4, 1])
 category_filter = filter_cols[0].multiselect(
     "Category",
     sorted({finding.category for finding in result.findings}),
+    placeholder="All categories",
 )
 severity_filter = filter_cols[1].multiselect("Severity", severity_order, default=severity_order)
 
@@ -1335,17 +1335,55 @@ rows = [
     }
     for finding in filtered
 ]
-st.markdown('<div class="section-label">Exception register</div>', unsafe_allow_html=True)
 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-for finding in filtered:
-    page_ref = _page_reference_for_finding(finding, result) or finding.location
-    note_ref = _note_reference_for_finding(finding, result)
-    with st.expander(f"{finding.severity}: {page_ref} - {finding.issue}", expanded=finding.severity == "High"):
-        st.write(f"**Category:** {finding.category}")
-        st.write(f"**Page reference:** {page_ref}")
-        if note_ref:
-            st.write(f"**Note reference:** {note_ref}")
-        st.write(f"**Location:** {_translate_page_tokens(finding.location, result)}")
-        st.write(f"**Evidence:** {_translate_page_tokens(finding.evidence, result)}")
-        st.write(f"**Recommendation:** {finding.recommendation}")
+with st.expander("Finding details", expanded=False):
+    for finding in filtered:
+        page_ref = _page_reference_for_finding(finding, result) or finding.location
+        note_ref = _note_reference_for_finding(finding, result)
+        with st.expander(f"{finding.severity}: {page_ref} - {finding.issue}", expanded=False):
+            st.write(f"**Category:** {finding.category}")
+            st.write(f"**Page reference:** {page_ref}")
+            if note_ref:
+                st.write(f"**Note reference:** {note_ref}")
+            st.write(f"**Location:** {_translate_page_tokens(finding.location, result)}")
+            st.write(f"**Evidence:** {_translate_page_tokens(finding.evidence, result)}")
+            st.write(f"**Recommendation:** {finding.recommendation}")
+
+with st.expander("Developer and debug details", expanded=False):
+    note_rows = _note_heading_rows(result)
+    if note_rows:
+        st.markdown("**Notes detected**")
+        st.dataframe(pd.DataFrame(note_rows), use_container_width=True, hide_index=True)
+    else:
+        st.markdown("**Notes detected**")
+        st.write("No note headings detected.")
+
+    st.markdown("**OCR statement rows**")
+    ocr_rows = _ocr_statement_row_rows(result)
+    st.dataframe(pd.DataFrame(ocr_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("**Note validation debug**")
+    st.json(
+        {
+            "cautious_note_validation_enabled": result.metrics.get("cautious_note_validation_enabled", False),
+            "note_validation_mode": result.metrics.get("note_validation_mode", "skipped"),
+            "note_reference_rows_detected": result.metrics.get("note_reference_rows_detected", 0),
+            "note_headings_detected": result.metrics.get("note_headings_detected", 0),
+            "notes_section_start_page": result.metrics.get("notes_section_start_page", "Not detected"),
+            "note_reference_findings": result.metrics.get("note_reference_findings", 0),
+            "ocr_text_coverage": result.metrics.get("ocr_text_coverage", result.metrics.get("extraction_coverage", "0%")),
+            "statement_structure_confidence": result.metrics.get("statement_structure_confidence", "0%"),
+            "note_structure_confidence": result.metrics.get("note_structure_confidence", "0%"),
+            "table_arithmetic_confidence": result.metrics.get("table_arithmetic_confidence", "0%"),
+            "primary_statement_pages": result.metrics.get("primary_statement_pages", "No primary statement pages detected."),
+        }
+    )
+
+    markdown_report = findings_to_markdown(result)
+    st.download_button(
+        "Download Markdown Developer Report",
+        markdown_report,
+        file_name=f"{export_stem}_review_debug.md",
+        mime="text/markdown",
+    )
