@@ -203,15 +203,7 @@ def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_response_json(response_json: dict[str, Any]) -> dict[str, Any]:
-    text = ""
-    if isinstance(response_json.get("output_text"), str):
-        text = response_json["output_text"]
-    if not text:
-        for item in response_json.get("output", []) or []:
-            for content in item.get("content", []) or []:
-                if content.get("type") == "output_text" and isinstance(content.get("text"), str):
-                    text += content["text"]
-    text = text.strip()
+    text = _extract_response_text(response_json).strip()
     if not text:
         raise RuntimeError("OpenAI response did not contain text output.")
     try:
@@ -221,6 +213,51 @@ def _parse_response_json(response_json: dict[str, Any]) -> dict[str, Any]:
         if not match:
             raise RuntimeError("OpenAI response was not valid JSON.")
         return json.loads(match.group(0))
+
+
+def _extract_response_text(response_json: dict[str, Any]) -> str:
+    collected: list[str] = []
+    _append_text_fragments(collected, response_json.get("output_text"))
+    for item in response_json.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        _append_text_fragments(collected, item.get("content"))
+    if not collected:
+        for key in ("text", "content", "output"):
+            _append_text_fragments(collected, response_json.get(key))
+    return "".join(fragment for fragment in collected if fragment)
+
+
+def _append_text_fragments(collected: list[str], value: Any) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        collected.append(value)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _append_text_fragments(collected, item)
+        return
+    if not isinstance(value, dict):
+        return
+
+    content_type = str(value.get("type", "") or "").strip().lower()
+    if content_type in {"output_text", "text", "input_text"}:
+        text_value = value.get("text")
+        if isinstance(text_value, str):
+            collected.append(text_value)
+            return
+        if isinstance(text_value, dict):
+            nested = text_value.get("value")
+            if isinstance(nested, str):
+                collected.append(nested)
+                return
+    if "value" in value and isinstance(value.get("value"), str):
+        collected.append(str(value["value"]))
+    for key in ("text", "content", "output", "value"):
+        nested = value.get(key)
+        if nested is not None and nested is not value:
+            _append_text_fragments(collected, nested)
 
 
 def _rows_to_outputs(observations: list[dict[str, Any]]) -> tuple[list[Finding], list[dict[str, str]]]:

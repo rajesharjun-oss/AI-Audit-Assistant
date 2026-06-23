@@ -7,7 +7,7 @@ import extraction
 import reviewer
 import ai_finding_review
 from ai_finding_review import AiFindingReviewResult, run_ai_finding_review
-from ai_policy_review import AiPolicyReviewResult
+from ai_policy_review import AiPolicyReviewResult, _parse_response_json
 from cross_page_consistency import _names_look_like_spelling_variants, check_cross_page_consistency
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
 from report_exports import build_excel_export
@@ -557,6 +557,28 @@ def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sh
     rows = list(ai_sheet.iter_rows(min_row=2, values_only=True))
     assert rows
     assert any(str(row[2] or "").lower() == "low" for row in rows)
+
+
+def test_ai_response_parser_accepts_nested_text_value_payload():
+    payload = {
+        "output": [
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "value": '{"summary":"ok","observations":[{"title":"Policy context","status":"review_prompt"}]}'
+                        },
+                    }
+                ]
+            }
+        ]
+    }
+
+    parsed = _parse_response_json(payload)
+
+    assert parsed["summary"] == "ok"
+    assert parsed["observations"][0]["title"] == "Policy context"
 
 
 def test_ai_finding_review_includes_page_and_note_context_and_can_suppress_medium():
