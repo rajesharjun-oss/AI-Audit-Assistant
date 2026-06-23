@@ -10,6 +10,7 @@ from pathlib import Path
 from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage, ReviewOptions, ReviewResult
 from cross_page_consistency import check_cross_page_consistency
 from policy_reviewer import review_notes_1_and_2
+from ai_finding_review import run_ai_finding_review
 from ai_policy_review import run_ai_policy_review
 from extraction import extract_pdf, extract_pdf_with_ocr
 
@@ -351,6 +352,13 @@ def review_pdf(
     ai_policy_status = "disabled"
     ai_policy_model = options.ai_model
     ai_policy_message = ""
+    ai_finding_export: list[dict[str, str]] = []
+    ai_finding_summary = ""
+    ai_finding_status = "disabled"
+    ai_finding_model = options.ai_model
+    ai_finding_message = ""
+    ai_finding_suppressed = 0
+    ai_finding_reviewed = 0
     if options.use_ai_policy_review:
         ai_review = run_ai_policy_review(
             document,
@@ -381,6 +389,28 @@ def review_pdf(
         f for f in findings
         if not (f.category == "Notes agreement" and f.metadata and f.metadata.get("match_confidence") == "Low")
     ]
+    if options.use_ai_policy_review:
+        ai_finding_review = run_ai_finding_review(
+            document,
+            profile,
+            findings,
+            model=options.ai_model,
+        )
+        findings = ai_finding_review.findings
+        ai_finding_export = ai_finding_review.export_rows
+        ai_finding_summary = ai_finding_review.summary
+        ai_finding_status = ai_finding_review.status
+        ai_finding_model = ai_finding_review.model
+        ai_finding_message = ai_finding_review.message
+        ai_finding_suppressed = ai_finding_review.suppressed_count
+        ai_finding_reviewed = ai_finding_review.reviewed_count
+        if ai_finding_review.status == "completed":
+            checks_performed.append(
+                f"AI finding review completed using {ai_finding_review.model} on {ai_finding_review.reviewed_count} weak finding(s); "
+                f"{ai_finding_review.suppressed_count} low-confidence finding(s) were suppressed."
+            )
+        elif ai_finding_review.message:
+            checks_skipped.append(ai_finding_review.message)
     return _build_result(
         document,
         findings,
@@ -394,6 +424,13 @@ def review_pdf(
         ai_policy_model,
         ai_policy_summary,
         ai_policy_message,
+        ai_finding_export,
+        ai_finding_status,
+        ai_finding_model,
+        ai_finding_summary,
+        ai_finding_message,
+        ai_finding_reviewed,
+        ai_finding_suppressed,
     )
 
 
@@ -473,6 +510,13 @@ def _build_result(
     ai_policy_model: str = "",
     ai_policy_summary: str = "",
     ai_policy_message: str = "",
+    ai_finding_export: list[dict] | None = None,
+    ai_finding_status: str = "disabled",
+    ai_finding_model: str = "",
+    ai_finding_summary: str = "",
+    ai_finding_message: str = "",
+    ai_finding_reviewed: int = 0,
+    ai_finding_suppressed: int = 0,
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     
@@ -552,6 +596,13 @@ def _build_result(
         "ai_policy_review_model": ai_policy_model,
         "ai_policy_review_summary": ai_policy_summary,
         "ai_policy_review_message": ai_policy_message,
+        "ai_finding_export": ai_finding_export or [],
+        "ai_finding_review_status": ai_finding_status,
+        "ai_finding_review_model": ai_finding_model,
+        "ai_finding_review_summary": ai_finding_summary,
+        "ai_finding_review_message": ai_finding_message,
+        "ai_finding_reviewed": ai_finding_reviewed,
+        "ai_finding_suppressed": ai_finding_suppressed,
         "checks_performed_count": len(checks_performed_list),
         "checks_passed_count": sum(1 for row in check_result_rows if row.get("Result") == "Passed"),
         "checks_skipped_count": len(checks_skipped_list),
@@ -3670,8 +3721,11 @@ def findings_to_markdown(result: ReviewResult) -> str:
         "",
     ]
     ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
+    ai_finding_summary = str(result.metrics.get("ai_finding_review_summary", "") or "").strip()
     if ai_summary:
         lines.extend(["## AI Policy Judgement", "", ai_summary, ""])
+    if ai_finding_summary:
+        lines.extend(["## AI Finding Review", "", ai_finding_summary, ""])
     if not result.findings:
         lines.append("No issues were detected by the automated checks.")
         return "\n".join(lines)
@@ -3693,11 +3747,18 @@ def build_ai_review_memo(result: ReviewResult) -> str:
     assurance = str(result.metrics.get("positive_assurance", ""))
     ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
     ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
+    ai_finding_summary = str(result.metrics.get("ai_finding_review_summary", "") or "").strip()
+    ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
     scope_intro = ""
     if result.metrics.get("document_scope") == "Limited-scope statement extract":
         scope_intro = "Limited-scope review performed on Statement of Financial Position only. "
     if not result.findings:
-        ai_text = f" AI policy judgement: {ai_summary}" if ai_summary and ai_status == "completed" else ""
+        ai_parts = []
+        if ai_summary and ai_status == "completed":
+            ai_parts.append(f"AI policy judgement: {ai_summary}")
+        if ai_finding_summary and ai_finding_status == "completed":
+            ai_parts.append(f"AI finding review: {ai_finding_summary}")
+        ai_text = f" {' ' .join(ai_parts)}" if ai_parts else ""
         return (
             f"AI review memo: {scope_intro}{assurance or 'No automated exceptions were detected.'} Perform a final manual review of scanned pages, "
             f"judgemental disclosures, and any areas where PDF extraction may have missed tables.{ai_text}"
@@ -3734,6 +3795,8 @@ def build_ai_review_memo(result: ReviewResult) -> str:
         ai_text = f" AI policy judgement: {ai_summary}"
     elif ai_status in {"unavailable", "error", "skipped"}:
         ai_text = " AI policy judgement was not completed, so policy/context conclusions remain based on deterministic checks only."
+    if ai_finding_status == "completed" and ai_finding_summary:
+        ai_text += f" AI finding review: {ai_finding_summary}"
     return (
         "AI review memo: "
         f"{scope_intro}"

@@ -1078,7 +1078,7 @@ with st.container(border=True):
             ),
         )
         use_ai_policy_review = st.checkbox(
-            "Enable AI policy and standards judgement",
+            "Enable AI policy judgement and review assist",
             value=True,
             help=(
                 "Runs an optional AI review over accounting policies and related disclosures to assess "
@@ -1212,6 +1212,24 @@ elif use_ai_policy_review:
             st.warning(f"Status: {ai_status}. {ai_message}")
     else:
         st.warning(f"Status: {ai_status}. No AI policy observations were returned.")
+
+if result.metrics.get("ai_finding_review_status") == "completed":
+    ai_finding_summary = str(result.metrics.get("ai_finding_review_summary", "") or "").strip()
+    if ai_finding_summary:
+        st.markdown('<div class="section-label">AI finding review</div>', unsafe_allow_html=True)
+        st.info(ai_finding_summary)
+elif use_ai_policy_review:
+    ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
+    ai_finding_message = str(result.metrics.get("ai_finding_review_message", "") or "").strip()
+    if ai_finding_status != "disabled":
+        st.markdown('<div class="section-label">AI finding review</div>', unsafe_allow_html=True)
+        if ai_finding_message:
+            if ai_finding_status == "deferred":
+                st.info(ai_finding_message)
+            else:
+                st.warning(f"Status: {ai_finding_status}. {ai_finding_message}")
+        else:
+            st.info(f"Status: {ai_finding_status}.")
 
 st.markdown(
     f"""

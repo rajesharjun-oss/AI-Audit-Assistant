@@ -45,6 +45,11 @@ def build_excel_export(result) -> bytes:
         {"Metric": "AI policy review status", "Value": result.metrics.get("ai_policy_review_status", "disabled")},
         {"Metric": "AI policy review message", "Value": result.metrics.get("ai_policy_review_message", "")},
         {"Metric": "AI policy review summary", "Value": result.metrics.get("ai_policy_review_summary", "")},
+        {"Metric": "AI finding review status", "Value": result.metrics.get("ai_finding_review_status", "disabled")},
+        {"Metric": "AI finding review message", "Value": result.metrics.get("ai_finding_review_message", "")},
+        {"Metric": "AI finding review summary", "Value": result.metrics.get("ai_finding_review_summary", "")},
+        {"Metric": "AI finding review count", "Value": result.metrics.get("ai_finding_reviewed", 0)},
+        {"Metric": "AI finding review suppressed", "Value": result.metrics.get("ai_finding_suppressed", 0)},
     ]
     checks_performed = [{"Check performed": item} for item in metric_lines(result.metrics.get("checks_performed"), "No deterministic checks completed.")]
     checks_skipped = checks_skipped_rows(result) or [{"Check area": "None", "Reason skipped": "No major checks skipped."}]
@@ -69,6 +74,18 @@ def build_excel_export(result) -> bytes:
         }.get(ai_status, "AI policy review returned no rows.")
         ai_policy_rows = result.metrics.get("ai_policy_export", []) or [{"Title": ai_default_title, "Status": ai_status, "Message": ai_message}]
         pd.DataFrame(ai_policy_rows).to_excel(writer, sheet_name="AI policy judgement", index=False)
+        ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
+        ai_finding_message = str(result.metrics.get("ai_finding_review_message", "") or "").strip()
+        ai_finding_default_title = {
+            "disabled": "AI finding review not enabled.",
+            "unavailable": "AI finding review was enabled but is unavailable in this environment.",
+            "skipped": "AI finding review was enabled but no weak deterministic findings were eligible.",
+            "error": "AI finding review was enabled but failed during execution.",
+            "deferred": "AI finding review was deferred due to API availability or rate limiting.",
+            "completed": "AI finding review completed but returned no adjudication rows.",
+        }.get(ai_finding_status, "AI finding review returned no rows.")
+        ai_finding_rows = result.metrics.get("ai_finding_export", []) or [{"Finding ID": "", "Issue": ai_finding_default_title, "AI status": ai_finding_status, "Reason": ai_finding_message}]
+        pd.DataFrame(ai_finding_rows).to_excel(writer, sheet_name="AI finding review", index=False)
         exception_rows = finding_rows(result) or [
             {
                 "ID": "",
@@ -90,6 +107,9 @@ def build_excel_export(result) -> bytes:
                 "Amount found in note": "",
                 "Alternative note found": "",
                 "Amount match confidence": "",
+                "AI review status": "",
+                "AI review confidence": "",
+                "AI review reason": "",
                 "Location": "",
                 "Issue": "No automated findings were identified.",
                 "Evidence": "",
@@ -172,6 +192,7 @@ def build_excel_export(result) -> bytes:
         format_excel_table_sheet(writer.book["OCR statement rows"], "OCRStatementRows")
         format_excel_table_sheet(writer.book["Notes 1 and 2 policy review"], "PolicyReview")
         format_excel_table_sheet(writer.book["AI policy judgement"], "AIPolicyJudgement")
+        format_excel_table_sheet(writer.book["AI finding review"], "AIFindingReview")
         format_excel_table_sheet(writer.book["Unreferenced notes"], "UnreferencedNotes")
         format_excel_table_sheet(writer.book["Key amount consistency"], "AmountConsistency")
         format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
@@ -215,6 +236,9 @@ def finding_rows(result) -> list[dict[str, str]]:
             "Amount found in note": metadata.get("amount_found_in_note", ""),
             "Alternative note found": metadata.get("alternative_note_found", ""),
             "Amount match confidence": metadata.get("amount_match_confidence", ""),
+            "AI review status": metadata.get("ai_review_status", ""),
+            "AI review confidence": metadata.get("ai_review_confidence", ""),
+            "AI review reason": metadata.get("ai_review_reason", ""),
             "Location": translate_page_tokens(finding.location, result),
             "Issue": finding.issue,
             "Evidence": translate_page_tokens(finding.evidence, result),
@@ -415,6 +439,8 @@ def parse_skipped_check(item: str) -> dict[str, str]:
 
 
 def finding_confidence(finding, result) -> str:
+    if finding.metadata and finding.metadata.get("ai_review_confidence"):
+        return f"AI-reviewed / {finding.metadata['ai_review_confidence']}"
     if finding.metadata and finding.metadata.get("match_confidence"):
         return f"Review prompt / {finding.metadata['match_confidence']}"
     if finding.category == "Extraction quality":

@@ -1,11 +1,15 @@
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 
+import openpyxl
 import extraction
 import reviewer
+from ai_finding_review import AiFindingReviewResult
 from ai_policy_review import AiPolicyReviewResult
 from cross_page_consistency import _names_look_like_spelling_variants, check_cross_page_consistency
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
+from report_exports import build_excel_export
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
     _note_headings,
@@ -480,6 +484,78 @@ def test_ai_policy_review_missing_key_is_reported_as_skipped(monkeypatch):
 
     assert result.metrics["ai_policy_review_status"] == "unavailable"
     assert "OPENAI_API_KEY is not configured" in result.metrics["checks_skipped"]
+
+
+def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sheet(monkeypatch):
+    document = PdfDocument([
+        PdfPage(1, "Statement of financial position\nCash and cash equivalents 100 90", []),
+        PdfPage(2, "Notes to the financial statements\n1. Significant accounting policies", []),
+    ])
+    low_finding = reviewer.Finding(
+        category="Formatting",
+        severity="Low",
+        location="Page 1",
+        issue="Possible formatting inconsistency detected in a weak text fragment.",
+        evidence="Weak fragment only.",
+        recommendation="Review manually.",
+    )
+
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+    monkeypatch.setattr(reviewer, "check_extraction_quality", lambda _document: [])
+    monkeypatch.setattr(reviewer, "check_primary_statement_consistency", lambda _document: ([], [], []))
+    monkeypatch.setattr(reviewer, "check_totals_and_rounding", lambda _document: [])
+    monkeypatch.setattr(reviewer, "check_formatting", lambda _document, _profile: [low_finding])
+    monkeypatch.setattr(reviewer, "check_notes_agreement", lambda _document, cautious_low_confidence=False: [])
+    monkeypatch.setattr(reviewer, "_check_note_contradictions", lambda _document: [])
+    monkeypatch.setattr(reviewer, "review_notes_1_and_2", lambda *args, **kwargs: ([], []))
+    monkeypatch.setattr(reviewer, "check_cross_page_consistency", lambda _document: ([], {}))
+    monkeypatch.setattr(
+        reviewer,
+        "run_ai_policy_review",
+        lambda *args, **kwargs: AiPolicyReviewResult([], [], "", "skipped", "gpt-5-mini", "AI policy skipped."),
+    )
+    monkeypatch.setattr(
+        reviewer,
+        "run_ai_finding_review",
+        lambda *args, **kwargs: AiFindingReviewResult(
+            findings=[],
+            export_rows=[
+                {
+                    "Finding ID": "F1",
+                    "Category": "Formatting",
+                    "Original severity": "Low",
+                    "Decision": "Suppress",
+                    "Revised severity": "Low",
+                    "AI status": "likely_false_positive",
+                    "AI confidence": "High",
+                    "Page reference": "Page 1",
+                    "Note reference": "",
+                    "Issue": low_finding.issue,
+                    "Reason": "The evidence looks like extraction noise rather than a report defect.",
+                    "Recommended action": "Do not elevate unless corroborated by the source PDF.",
+                }
+            ],
+            summary="One weak formatting finding was suppressed as a likely false positive.",
+            status="completed",
+            model="gpt-5-mini",
+            reviewed_count=1,
+            suppressed_count=1,
+        ),
+    )
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_policy_review=True))
+
+    assert result.findings == []
+    assert result.metrics["ai_finding_review_status"] == "completed"
+    assert result.metrics["ai_finding_suppressed"] == 1
+    assert "AI finding review completed using gpt-5-mini on 1 weak finding(s); 1 low-confidence finding(s) were suppressed." in result.metrics["checks_performed"]
+
+    workbook = openpyxl.load_workbook(BytesIO(build_excel_export(result)), data_only=True)
+    assert "AI finding review" in workbook.sheetnames
+    ai_sheet = workbook["AI finding review"]
+    rows = list(ai_sheet.iter_rows(min_row=2, values_only=True))
+    assert rows
+    assert any(str(row[2] or "").lower() == "low" for row in rows)
 
 
 def test_narrative_dates_do_not_trigger_format_findings():
