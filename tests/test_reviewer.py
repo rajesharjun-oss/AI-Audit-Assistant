@@ -3142,6 +3142,32 @@ def test_excel_export_wires_notes_heading_candidates_sheet():
     assert 'writer.book["Notes heading candidates"]' in app_source
 
 
+def test_ai_finding_review_normalizes_physical_pages_to_printed_pages():
+    document = PdfDocument(
+        [
+            PdfPage(15, "Statement of Changes in Equity\n14\nDRAFT", []),
+            PdfPage(16, "Notes to the Financial Statements\n1.Material accounting policies\n15\nDRAFT", []),
+        ]
+    )
+    finding = reviewer.Finding(
+        category="Presentation",
+        severity="Medium",
+        location="Page 15 | Statement of cash flows",
+        issue="Statement of cash flows page carries incorrect 'Statement of Changes in Equity' heading.",
+        evidence="The cash flow statement appears to be presented under a 'Statement of Changes in Equity' title.",
+        recommendation="Update the heading.",
+    )
+
+    result = ai_finding_review.run_ai_finding_review(document, CompanyProfile(), [finding], model="gpt-5-mini")
+
+    # no api key path should short-circuit before this point in normal runs, so inspect candidate helpers directly
+    page_ref = ai_finding_review._finding_page_reference(document, finding, {})
+    snippet = ai_finding_review._page_snippet(document, [15], ["statement", "cash", "flows"], "")
+
+    assert page_ref == "Page 14"
+    assert snippet.startswith("Page 14:")
+
+
 def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monkeypatch):
     document = PdfDocument(
         [
@@ -4726,3 +4752,4 @@ def test_simple_note_text_casting_skips_reconciliation_style_note_sections():
     findings = reviewer._check_simple_note_text_casting(page, Decimal("1"))
 
     assert not findings
+

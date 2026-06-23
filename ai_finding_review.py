@@ -114,7 +114,7 @@ def _review_candidates(document: PdfDocument, findings: list[Finding]) -> list[d
         if not _finding_is_ai_reviewable(document, finding):
             continue
         metadata = dict(finding.metadata or {})
-        page_reference = _finding_page_reference(finding, metadata)
+        page_reference = _finding_page_reference(document, finding, metadata)
         note_reference = _finding_note_reference(finding, metadata)
         page_numbers = _candidate_page_numbers(document, page_reference)
         line_item = metadata.get("line_item", "")
@@ -310,15 +310,15 @@ def _can_suppress_finding(finding: Finding, confidence: str) -> bool:
     return False
 
 
-def _finding_page_reference(finding: Finding, metadata: dict[str, Any]) -> str:
+def _finding_page_reference(document: PdfDocument, finding: Finding, metadata: dict[str, Any]) -> str:
     for key in ("page_reference", "page", "pages"):
         value = str(metadata.get(key, "") or "").strip()
         if value:
-            return value
+            return _normalize_page_reference(document, value)
     match = re.search(r"Pages?\s+[0-9,\- ]+", finding.location)
     if match:
-        return match.group(0).strip()
-    return finding.location if "Page" in finding.location else ""
+        return _normalize_page_reference(document, match.group(0).strip())
+    return _normalize_page_reference(document, finding.location) if "Page" in finding.location else ""
 
 
 def _finding_note_reference(finding: Finding, metadata: dict[str, Any]) -> str:
@@ -368,6 +368,37 @@ def _reviewer_to_physical_page_map(document: PdfDocument) -> dict[int, int]:
     return mapping
 
 
+def _physical_to_reviewer_page_map(document: PdfDocument) -> dict[int, int]:
+    return {physical: reviewer for reviewer, physical in _reviewer_to_physical_page_map(document).items()}
+
+
+def _normalize_page_reference(document: PdfDocument, text: str) -> str:
+    if not text:
+        return ""
+    raw = str(text).strip()
+    physical_to_reviewer = _physical_to_reviewer_page_map(document)
+    reviewer_to_physical = _reviewer_to_physical_page_map(document)
+
+    def repl(match: re.Match) -> str:
+        prefix = match.group(1)
+        body = match.group(2)
+        translated: list[str] = []
+        for token in re.split(r"(\D+)", body):
+            if token.isdigit():
+                page_number = int(token)
+                if page_number in physical_to_reviewer:
+                    translated.append(str(physical_to_reviewer[page_number]))
+                elif page_number in reviewer_to_physical:
+                    translated.append(str(page_number))
+                else:
+                    translated.append(str(page_number))
+            else:
+                translated.append(token)
+        return prefix + "".join(translated)
+
+    return re.sub(r"\b(Pages?\s+)([\d,\-\sand]+)", repl, raw, flags=re.I)
+
+
 def _printed_footer_page_number(text: str) -> int | None:
     if not text:
         return None
@@ -415,7 +446,8 @@ def _page_snippet(document: PdfDocument, page_numbers: list[int], keywords: list
         snippet_lines = matched[:6] if matched else lines[:6]
         snippet = " ".join(snippet_lines)
         if snippet:
-            collected.append(f"Page {number}: {snippet[:700]}")
+            label = _physical_to_reviewer_page_map(document).get(number, number)
+            collected.append(f"Page {label}: {snippet[:700]}")
     return " | ".join(collected)
 
 
