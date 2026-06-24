@@ -18,6 +18,7 @@ from reviewer import (
     _amounts_from_statement_line,
     _simple_note_amounts_from_line,
     _line_amount_for_aliases,
+    _parse_ocr_statement_row,
     check_formatting,
     check_extraction_quality,
     check_notes_agreement,
@@ -1342,6 +1343,35 @@ def test_ocr_cash_beginning_and_end_rows_are_parsed():
     assert any("opening plus movement checked to closing" in item for item in performed)
 
 
+def test_cash_flow_statement_keeps_clean_row_parse_over_noisier_statement_note_line_parse():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of cash flows",
+                        "Net cash inflow from operating activities (a+b) 3 40,664 3 68,868",
+                        "Net cash absorbed in investing activities ( 70,440) ( 103,685)",
+                        "Net cash inflow from financing activities - ( 16,128)",
+                        "Net increase in cash and cash equivalents 2 70,224 2 49,055",
+                        "Cash and cash equivalents at the beginning of the year 6 05,645 3 56,590",
+                        "Cash and cash equivalents as at the end of the year 18 8 75,869 6 05,645",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    findings, performed, skipped = check_primary_statement_consistency(document)
+
+    assert not any("Operating, investing, and financing cash flows agree to net increase in cash" in f.issue for f in findings)
+    assert not any("Opening cash plus total movement" in f.issue for f in findings)
+    assert any("Statement of cash flows: net cash increase checked." == item for item in performed)
+    assert any("Statement of cash flows: opening plus movement checked to closing." == item for item in performed)
+
+
 def test_cash_flow_statement_checks_net_movement_when_investing_section_is_absent_but_zero():
     document = PdfDocument(
         [
@@ -1685,6 +1715,86 @@ def test_wrong_note_reference_check_respects_low_confidence_gate():
 
     assert not any("possible wrong note reference" in finding.issue.lower() for finding in normal_findings)
     assert not any("possible wrong note reference" in finding.issue.lower() for finding in cautious_findings)
+
+
+def test_cash_flow_wrong_note_reference_requires_unmistakably_stronger_alternative():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of cash flows\nImpairment losses and reversals 5A 16,228", []),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "5 Financial assets",
+                        "See note 6A for movement in expected credit loss allowance.",
+                        "5A Financial assets at amortised cost",
+                        "Gross balance 100,000 90,000",
+                        "6 Trade and other receivables",
+                        "6A Movement in credit loss allowances",
+                        "Reversal recognised 16,228 0",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    assert not any("possible wrong note reference" in finding.issue.lower() for finding in findings)
+
+
+def test_cash_flow_subnote_amount_gap_is_not_elevated_as_hard_exception():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of cash flows\nImpairment losses and reversals 5A 16,228", []),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "5 Financial assets",
+                        "5A Financial assets at amortised cost",
+                        "Gross balance 100,000 90,000",
+                        "6 Trade and other receivables",
+                        "6A Movement in credit loss allowances",
+                        "Reversal recognised 16,228 0",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    assert not any(
+        finding.category == "Notes agreement"
+        and "not found in the related note text" in finding.issue.lower()
+        for finding in findings
+    )
+
+
+def test_simple_note_text_casting_skips_breakdown_sections():
+    page = PdfPage(
+        33,
+        "\n".join(
+            [
+                "17. Other operating gains/(losses)",
+                "Net foreign exchange gains/(losses) 87,178 (385,317)",
+                "Breakdown of realized and unrealized exchange difference",
+                "Realized exchange gains/(losses) 52,003 (16,162)",
+                "Unrealized exchange gains/(losses) 35,175 (369,155)",
+                "87,178 (385,317)",
+            ]
+        ),
+        [],
+    )
+
+    findings = reviewer._check_simple_note_text_casting(page, Decimal("1"))
+
+    assert not any("simple note section total does not agree" in finding.issue.lower() for finding in findings)
 
 
 def test_cautious_note_reference_validation_uses_detected_headings_when_sections_are_weak():
@@ -3789,6 +3899,14 @@ def test_detected_profile_does_not_suggest_ifrs_16_from_generic_new_standards_te
     profile = infer_detected_profile(document)
 
     assert "IFRS 16" not in profile["Suggested checklist areas"]
+
+
+def test_cash_flow_net_increase_row_is_not_misread_as_note_reference_split_digit():
+    row = _parse_ocr_statement_row("Net increase in cash and cash equivalents 2 70,224 2 49,055")
+
+    assert row is not None
+    assert row.note_ref == ""
+    assert row.amounts == (Decimal("270224"), Decimal("249055"))
 
 
 def test_ocr_sfp_statement_specific_checks_run_only_on_confident_rows():

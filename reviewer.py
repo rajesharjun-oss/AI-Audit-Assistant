@@ -1857,22 +1857,61 @@ def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
 
 
 def _detect_company_name(document: PdfDocument) -> str:
-    first_pages = "\n".join(page.text for page in document.pages[:5])
     legal_name_patterns = (
         r"[A-Z][A-Za-z&,.()' -]{8,120}\s+(?:Limited|Ltd|PLC|Plc|Incorporated|Inc\.?|Corporation|Company)\b",
         r"[A-Z][A-Za-z&,.()' -]{8,120}\s+(?:Institute|Council|Association|Society|Body)\s+of\s+[A-Z][A-Za-z&,.()' -]{3,80}\b",
         r"[A-Z][A-Za-z&,.()' -]{8,120}\s+of\s+[A-Z][A-Za-z&,.()' -]{3,80}\b",
     )
-    for pattern in legal_name_patterns:
-        match = re.search(pattern, first_pages, flags=re.I)
-        if match:
-            return _clean_detected_company_name(re.sub(r"\s+", " ", match.group(0)).strip(" -.,"))
+    candidates: list[tuple[str, int, int]] = []
+    candidate_seen: set[tuple[str, int]] = set()
+    for page_index, page in enumerate(document.pages[:5]):
+        raw_lines = page.text.splitlines()
+        normalized_lines = [re.sub(r"\s+", " ", line).strip(" -.,") for line in raw_lines if line.strip()]
+        titleish_windows: list[str] = []
+        window_lines = normalized_lines[:20]
+        for index, line in enumerate(window_lines):
+            titleish_windows.append(line)
+            if index + 1 < len(window_lines):
+                combined = f"{line} {window_lines[index + 1]}".strip()
+                if len(combined) <= 160:
+                    titleish_windows.append(combined)
+        for position, candidate_text in enumerate(titleish_windows):
+            if not _company_name_candidate_allowed(candidate_text):
+                continue
+            for legal_pattern in legal_name_patterns:
+                match = re.search(legal_pattern, candidate_text, flags=re.I)
+                if not match:
+                    continue
+                candidate = _clean_detected_company_name(re.sub(r"\s+", " ", match.group(0)).strip(" -.,"))
+                if not candidate or not _company_name_candidate_allowed(candidate):
+                    continue
+                key = (candidate, page_index)
+                if key in candidate_seen:
+                    continue
+                candidate_seen.add(key)
+                score = _company_name_candidate_score(candidate, page_index, position)
+                candidates.append((candidate, score, page_index))
+            if re.search(r"\b(limited|ltd|plc|incorporated|institute|company|corporation|council|association|society|body)\b", candidate_text, re.I):
+                candidate = _clean_detected_company_name(candidate_text)
+                if candidate and _company_name_candidate_allowed(candidate):
+                    key = (candidate, page_index)
+                    if key not in candidate_seen:
+                        candidate_seen.add(key)
+                        score = _company_name_candidate_score(candidate, page_index, position)
+                        candidates.append((candidate, score, page_index))
+    if candidates:
+        grouped: dict[str, tuple[int, int]] = {}
+        for candidate, score, page_index in candidates:
+            total_score, first_page = grouped.get(candidate, (0, page_index))
+            grouped[candidate] = (total_score + score, min(first_page, page_index))
+        best = sorted(grouped.items(), key=lambda item: (-item[1][0], item[1][1], -len(item[0])))[0][0]
+        return best
     for page in document.pages[:3]:
         for line in page.text.splitlines()[:12]:
             clean = re.sub(r"\s+", " ", line).strip(" -")
             if not clean or len(clean) < 5:
                 continue
-            if re.search(r"financial statements|annual report|statement of|notes to", clean, re.I):
+            if not _company_name_candidate_allowed(clean):
                 continue
             if clean.isupper() or re.search(r"\b(limited|ltd|plc|incorporated|institute|company|corporation)\b", clean, re.I):
                 return _clean_detected_company_name(clean)
@@ -1883,6 +1922,58 @@ def _clean_detected_company_name(name: str) -> str:
     cleaned = re.sub(r"\s+", " ", name).strip(" -.,")
     cleaned = re.sub(r"^(?:fl|fi|f1|l|i)\s+(?=[A-Z])", "", cleaned, flags=re.I)
     return _title_preserving_acronyms(cleaned) if cleaned.isupper() else cleaned
+
+
+def _company_name_candidate_allowed(text: str) -> bool:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip(" -.,")
+    lower = clean.lower()
+    if not clean or len(clean) < 5:
+        return False
+    if len(re.findall(r"\d", clean)) > 2:
+        return False
+    excluded = (
+        "financial statements",
+        "annual report",
+        "statement of",
+        "notes to",
+        "table of contents",
+        "corporate information",
+        "independent auditor",
+        "directors' report",
+        "directors report",
+        "year ended",
+        "for the year ended",
+        "together with",
+        "contents",
+        "page",
+        "draft",
+    )
+    if any(marker in lower for marker in excluded):
+        return False
+    if len(clean.split()) > 14:
+        return False
+    return True
+
+
+def _company_name_candidate_score(candidate: str, page_index: int, position: int) -> int:
+    lower = candidate.lower()
+    score = 0
+    if re.search(r"\b(limited|ltd|plc|incorporated|inc\.?|corporation|company)\b", lower):
+        score += 12
+    if re.search(r"\b(institute|council|association|society|body)\b", lower):
+        score += 10
+    if " of " in lower:
+        score += 4
+    word_count = len(candidate.split())
+    if 2 <= word_count <= 8:
+        score += 4
+    if page_index == 0:
+        score += 6
+    elif page_index == 1:
+        score += 3
+    score += max(0, 6 - min(position, 6))
+    score += min(10, len(candidate) // 12)
+    return score
 
 
 def _title_preserving_acronyms(text: str) -> str:
@@ -2107,17 +2198,17 @@ def _detect_major_balances(lower: str) -> str:
 
 def _suggest_checklist_areas(lower_text: str) -> str:
     areas = []
-    if re.search(r"(?:revenue|turnover|sales)", lower_text):
+    if re.search(r"\b(?:revenue|turnover|sales)\b", lower_text):
         areas.append("IFRS 15 (Revenue)")
-    if re.search(r"(?:lease|right of use|right-of-use|lease liabilities)", lower_text):
+    if _actual_lease_disclosure_present(lower_text):
         areas.append("IFRS 16 (Leases)")
-    if re.search(r"(?:expected credit loss|ecl|impairment of financial|financial assets)", lower_text):
+    if re.search(r"\b(?:expected credit loss|ecl|impairment of financial|financial assets)\b", lower_text):
         areas.append("IFRS 9 (Financial Instruments)")
-    if re.search(r"(?:intangible assets?|goodwill|amortisation)", lower_text):
+    if re.search(r"\b(?:intangible assets?|goodwill|amortisation)\b", lower_text):
         areas.append("IAS 38 (Intangible Assets)")
-    if re.search(r"(?:investment propert(?:y|ies))", lower_text):
+    if re.search(r"\b(?:investment propert(?:y|ies))\b", lower_text):
         areas.append("IAS 40 (Investment Property)")
-    if re.search(r"(?:deferred tax|income tax expense|taxation)", lower_text):
+    if re.search(r"\b(?:deferred tax|income tax expense|taxation)\b", lower_text):
         areas.append("IAS 12 (Income Taxes)")
     return ", ".join(areas) if areas else "None"
 
@@ -2525,6 +2616,7 @@ def _simple_note_text_section_castable(heading: str, lines: list[str]) -> bool:
         "financial instruments",
         "reconciliation",
         "movement in",
+        "breakdown",
         "deferred tax",
         "taxation",
     )
@@ -3542,7 +3634,14 @@ def check_notes_agreement(
         if ref_match and ref_match.group(1).strip() in passed_refs:
             continue
         findings.append(f)
-    for ref, line, amount in _statement_lines_with_note_refs(document):
+    for item in _statement_note_lines(document):
+        ref = item.ref
+        line = item.line
+        if _note_agreement_skip_reason(item):
+            continue
+        if not ref or not item.amounts:
+            continue
+        amount = item.amounts[-1]
         if (ref, line) in misreferenced_lines:
             continue
         section = _get_note_section_with_fallback(ref, note_sections)
@@ -3586,7 +3685,9 @@ def check_notes_agreement(
                                 break
                     if found_in_related:
                         continue
-                
+            if "cash flow" in (item.statement_name or "").lower() and re.search(r'[A-Za-z]$', ref):
+                continue
+
             findings.append(
                 Finding(
                     "Notes agreement",
@@ -4967,7 +5068,7 @@ def _check_cash_flow_text(
     if document:
         lines = _statement_note_lines(document)
         for item in lines:
-            if "cash flow" in item.statement_name.lower() or item.line_item not in rows:
+            if item.line_item not in rows:
                 rows[item.line_item] = list(item.amounts)
     
     op_aliases = [
@@ -4989,10 +5090,12 @@ def _check_cash_flow_text(
         "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents", "net cash movement"
     ]
     open_aliases = [
+        "cash at beginning",
         "cash at the beginning of the year", "cash and cash equivalents at beginning of year", 
         "cash at beginning of year", "opening cash", "cash and cash equivalents at the beginning of the year"
     ]
     close_aliases = [
+        "cash at end",
         "total cash at end of the year", "cash at end of the year", 
         "cash and cash equivalents at end of year", "closing cash", "cash and cash equivalents at the end of the year"
     ]
@@ -5215,26 +5318,31 @@ def _implicit_statement_note_ref_allowed(label: str) -> bool:
     if not normalized:
         return False
     blocked_exact = {
-        "current assets",
-        "non current assets",
-        "non-current assets",
-        "total assets",
-        "equity",
-        "liabilities",
-        "total liabilities",
-        "total equity and liabilities",
-        "total current assets",
-        "total non current assets",
-        "total non-current assets",
-        "cash at beginning",
-        "cash at end",
-        "total cash movement for the year",
-        "net cash generated from used in operating activities",
-        "net cash used in investing activities",
-        "net cash generated from investing activities",
-        "net cash used in financing activities",
-        "net cash generated from financing activities",
-        "cash generated from operations",
+        _normalise_match_words(value)
+        for value in {
+            "current assets",
+            "non current assets",
+            "non-current assets",
+            "total assets",
+            "equity",
+            "liabilities",
+            "total liabilities",
+            "total equity and liabilities",
+            "total current assets",
+            "total non current assets",
+            "total non-current assets",
+            "cash at beginning",
+            "cash at end",
+            "total cash movement for the year",
+            "net increase in cash and cash equivalents",
+            "net decrease in cash and cash equivalents",
+            "net cash generated from used in operating activities",
+            "net cash used in investing activities",
+            "net cash generated from investing activities",
+            "net cash used in financing activities",
+            "net cash generated from financing activities",
+            "cash generated from operations",
+        }
     }
     if normalized in blocked_exact:
         return False
@@ -7448,6 +7556,15 @@ def _check_possible_wrong_note_references(
         if (best_match["amount"] and not referenced_match["amount"]) or (
             best_heading_score > referenced_heading_score + 0.3 and best_match["wording"] and not referenced_match["amount"]
         ):
+            if _should_skip_cash_flow_alternative_note_prompt(
+                item,
+                best_ref,
+                best_match,
+                best_heading_score,
+                referenced_heading_score,
+                note_sections,
+            ):
+                continue
             confidence = "High" if best_match["wording"] and best_match["amount"] else "Medium" if best_match["amount"] else "Low"
             if best_ref and item.ref and best_ref.startswith(item.ref) and len(best_ref) > len(item.ref):
                 confidence = "Low"
@@ -7460,6 +7577,64 @@ def _check_possible_wrong_note_references(
             
     return findings, flagged
 
+
+
+
+def _should_skip_cash_flow_alternative_note_prompt(
+    item: StatementNoteLine,
+    suggested_ref: str,
+    match: dict[str, bool],
+    suggested_heading_score: float,
+    referenced_heading_score: float,
+    note_sections: dict[str, str],
+) -> bool:
+    statement_name = (item.statement_name or '').lower()
+    if 'cash flow' not in statement_name:
+        return False
+    if not suggested_ref:
+        return False
+    if _notes_are_related_for_reference_review(item.ref, suggested_ref, note_sections):
+        return True
+    if not (match.get('wording') and match.get('amount')):
+        return True
+    if suggested_heading_score < 0.92:
+        return True
+    if suggested_heading_score <= referenced_heading_score + 0.18:
+        return True
+    return False
+
+
+
+def _notes_are_related_for_reference_review(
+    referenced_ref: str,
+    suggested_ref: str,
+    note_sections: dict[str, str],
+) -> bool:
+    if not referenced_ref or not suggested_ref:
+        return False
+    ref = referenced_ref.upper().strip()
+    suggested = suggested_ref.upper().strip()
+    ref_root = re.sub(r'[A-Z]+$', '', ref)
+    suggested_root = re.sub(r'[A-Z]+$', '', suggested)
+    if ref_root and ref_root == suggested_root:
+        return True
+    related_sections = [
+        note_sections.get(ref, ''),
+        note_sections.get(ref_root, ''),
+        note_sections.get(suggested, ''),
+        note_sections.get(suggested_root, ''),
+    ]
+    for section in related_sections:
+        if not section:
+            continue
+        refs_in_section = _refs_in_text(section)
+        if ref in refs_in_section and suggested in refs_in_section:
+            return True
+        if suggested in refs_in_section and (ref == ref_root or ref_root in refs_in_section):
+            return True
+        if ref in refs_in_section and (suggested == suggested_root or suggested_root in refs_in_section):
+            return True
+    return False
 
 
 
@@ -7610,6 +7785,8 @@ def _note_heading_allows_signless_amount_match(note_heading: str, note_section: 
         "payable" in combined and "receivable" in combined
     ) or (
         "asset" in combined and "liabilit" in combined
+    ) or (
+        "taxation" in combined or "deferred tax" in combined or "tax expense" in combined
     )
 
 

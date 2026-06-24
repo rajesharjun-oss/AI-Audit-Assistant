@@ -146,6 +146,18 @@ def _spelling_issue_for_line(line: str) -> str:
     return ""
 
 
+def _metric_page_is_excluded(page_text: str) -> bool:
+    lower = page_text.lower()
+    excluded_markers = (
+        "value added statement",
+        "five year financial summary",
+        "five-year financial summary",
+        "5 year financial summary",
+        "financial summary",
+    )
+    return any(marker in lower for marker in excluded_markers)
+
+
 def _metric_line_is_comparable(metric_name: str, line: str) -> bool:
     lower = re.sub(r"\s+", " ", line.lower()).strip()
     if metric_name == "Revenue":
@@ -322,6 +334,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             # Try to match key metrics
             for metric_name, pattern in KEY_METRICS.items():
                 if pattern.match(line):
+                    if _metric_page_is_excluded(text):
+                        continue
                     if not _metric_line_is_comparable(metric_name, line):
                         continue
                     if metric_name == "Taxation" and "income tax expense" in line.lower() and not re.search(r"\d", line):
