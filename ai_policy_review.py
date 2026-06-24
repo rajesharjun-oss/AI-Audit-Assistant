@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +18,10 @@ NOTES_HEADING_PATTERNS = (
     "notes forming part of the financial statements",
     "notes to the accounts",
 )
+
+AI_RATE_LIMIT_COOLDOWN_SECONDS = max(30, int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "60")))
+_AI_RATE_LIMIT_UNTIL: float = 0.0
+_AI_RATE_LIMIT_LOCK = threading.Lock()
 
 POLICY_KEYWORDS = (
     "significant accounting policies",
@@ -171,6 +176,10 @@ def _build_prompt(
 
 
 def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    blocked_remaining = _rate_limit_wait_seconds()
+    if blocked_remaining > 0:
+        raise RuntimeError(f"OpenAI request is in cooldown; try again in {blocked_remaining} second(s).")
+
     endpoint = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
     last_error: Exception | None = None
     for attempt in range(3):
@@ -193,6 +202,11 @@ def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
                 time.sleep(retry_after if retry_after is not None else (2 + attempt * 3))
                 last_error = RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}")
                 continue
+            if exc.code == 429:
+                block_seconds = _retry_after_seconds(exc.headers.get("Retry-After", ""))
+                if block_seconds is None:
+                    block_seconds = AI_RATE_LIMIT_COOLDOWN_SECONDS
+                _set_rate_limit_block(block_seconds)
             raise RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}") from exc
         except Exception as exc:
             last_error = exc
@@ -376,6 +390,25 @@ def _retry_after_seconds(value: str) -> int | None:
     return None
 
 
+def _rate_limit_wait_seconds() -> int:
+    now = time.time()
+    with _AI_RATE_LIMIT_LOCK:
+        if _AI_RATE_LIMIT_UNTIL <= now:
+            return 0
+        return max(1, int((_AI_RATE_LIMIT_UNTIL - now) + 0.5))
+
+
+def _set_rate_limit_block(wait_seconds: int) -> None:
+    wait = max(1, int(wait_seconds))
+    with _AI_RATE_LIMIT_LOCK:
+        global _AI_RATE_LIMIT_UNTIL
+        _AI_RATE_LIMIT_UNTIL = max(_AI_RATE_LIMIT_UNTIL, time.time() + max(wait, AI_RATE_LIMIT_COOLDOWN_SECONDS))
+
+
+def _is_rate_limit_blocked() -> bool:
+    return _rate_limit_wait_seconds() > 0
+
+
 def _is_rate_limit_error(exc: Exception) -> bool:
     text = str(exc or "").lower()
     return "429" in text or "rate limit" in text or "rate exceeded" in text or "too many requests" in text
@@ -383,11 +416,13 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 def _friendly_ai_error_message(exc: Exception) -> str:
     if _is_rate_limit_error(exc):
+        wait_seconds = _rate_limit_wait_seconds()
+        wait_text = f" (wait {wait_seconds} second(s) if continuing immediately)." if wait_seconds > 0 else " (a short delay may be required)."
         return (
-            "AI policy and standards judgement was deferred because the AI service is busy right now. "
-            "The core deterministic review still completed. Please retry in a minute, ideally one file at a time."
+            "AI review was deferred because the AI service is busy right now. "
+            f"The core deterministic review still completed. Please retry after refreshing and waiting a moment{wait_text}"
         )
-    return f"AI policy and standards judgement could not be completed: {exc}"
+    return f"AI review could not be completed: {exc}"
 
 
 def _sort_note_key(value: str) -> tuple[int, str]:

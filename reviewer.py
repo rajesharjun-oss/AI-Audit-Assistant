@@ -11,7 +11,7 @@ from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage,
 from cross_page_consistency import check_cross_page_consistency
 from policy_reviewer import review_notes_1_and_2
 from ai_finding_review import run_ai_finding_review
-from ai_policy_review import run_ai_policy_review
+from ai_policy_review import run_ai_policy_review, _is_rate_limit_error
 from extraction import extract_pdf, extract_pdf_with_ocr
 
 
@@ -359,6 +359,7 @@ def review_pdf(
     ai_finding_message = ""
     ai_finding_suppressed = 0
     ai_finding_reviewed = 0
+    ai_policy_rate_limited = False
     if options.use_ai_policy_review:
         ai_review = run_ai_policy_review(
             document,
@@ -375,8 +376,11 @@ def review_pdf(
         if ai_review.status == "completed":
             findings.extend(ai_review.findings)
             checks_performed.append(f"AI policy and standards judgement completed using {ai_review.model}.")
-        elif ai_review.message:
-            checks_skipped.append(ai_review.message)
+            ai_policy_rate_limited = False
+        else:
+            if ai_review.message:
+                checks_skipped.append(ai_review.message)
+            ai_policy_rate_limited = ai_review.status == "deferred" and _is_rate_limit_error(Exception(ai_review.message or ""))
     if getattr(document, "skipped_table_details", None):
         checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables; details are listed in Skipped table details.")
     
@@ -389,7 +393,7 @@ def review_pdf(
         f for f in findings
         if not (f.category == "Notes agreement" and f.metadata and f.metadata.get("match_confidence") == "Low")
     ]
-    if options.use_ai_policy_review:
+    if options.use_ai_policy_review and not ai_policy_rate_limited:
         ai_finding_review = run_ai_finding_review(
             document,
             profile,
@@ -411,6 +415,9 @@ def review_pdf(
             )
         elif ai_finding_review.message:
             checks_skipped.append(ai_finding_review.message)
+    elif options.use_ai_policy_review and ai_policy_rate_limited:
+        ai_finding_status = "skipped"
+        ai_finding_message = "AI finding review was skipped because the AI service is in cooldown after a rate-limit response."
     return _build_result(
         document,
         findings,
