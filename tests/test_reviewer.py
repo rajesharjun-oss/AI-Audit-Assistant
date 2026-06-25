@@ -6,6 +6,7 @@ import openpyxl
 import extraction
 import reviewer
 import ai_finding_review
+import ai_policy_review
 from ai_finding_review import AiFindingReviewResult, run_ai_finding_review
 from ai_policy_review import AiPolicyReviewResult, _parse_response_json
 from cross_page_consistency import _names_look_like_spelling_variants, check_cross_page_consistency
@@ -533,6 +534,107 @@ def test_ai_finding_review_keeps_explicit_nil_vs_non_zero_note_contradiction():
     assert len(result.findings) == 1
     assert result.findings[0].severity == "Medium"
     assert result.export_rows[0]["AI status"] == "confirmed_exception"
+
+
+def test_ai_finding_review_does_not_suppress_confirmed_note_mismatch():
+    finding = reviewer.Finding(
+        category="Notes agreement",
+        severity="Medium",
+        location="Page 37 | Note 11",
+        issue="Amount not located in referenced note for Current tax payable A.",
+        evidence="Referenced note: Note 11. Current-year amount 30,105 was not found in the note section.",
+        recommendation="Review the note reference and the related tax disclosure.",
+        metadata={"note_reference": "Note 11", "page_reference": "Page 37"},
+    )
+    candidates = [{
+        "finding_id": "F1",
+        "index": 0,
+        "category": finding.category,
+        "severity": finding.severity,
+        "page_reference": "Page 37",
+        "note_reference": "Note 11",
+        "issue": finding.issue,
+        "page_snippet": "Current tax payable A 11 30,105 -",
+        "note_snippet": "Note 11 Going concern The company has adequate support.",
+    }]
+    parsed = {
+        "summary": "test",
+        "adjudications": [{
+            "finding_id": "F1",
+            "decision": "suppress",
+            "revised_severity": "Low",
+            "status": "likely_false_positive",
+            "confidence": "High",
+            "reason": "Note 11 only contains going concern wording and does not contain the tax amount, so this is a note linking issue.",
+            "recommended_action": "Check the tax note reference.",
+        }],
+    }
+
+    result = ai_finding_review._apply_adjudications([finding], candidates, parsed, "gpt-4.1")
+
+    assert len(result.findings) == 1
+    assert result.suppressed_count == 0
+    assert result.findings[0].severity == "Medium"
+    assert result.export_rows[0]["Decision"] != "Suppress"
+    assert result.export_rows[0]["AI status"] == "confirmed_exception"
+
+
+def test_ai_policy_evidence_rows_are_page_and_topic_specific():
+    document = PdfDocument([
+        PdfPage(1, "Statement of profit or loss Revenue 100", []),
+        PdfPage(2, "Notes to the financial statements\n1. Significant accounting policies\nRevenue from contracts with customers is recognised over time.", []),
+        PdfPage(3, "5. Property, plant and equipment\nPlant and equipment are depreciated over useful lives.", []),
+    ])
+    rows = ai_policy_review._policy_evidence_rows(
+        {
+            "1": "1. Significant accounting policies\nRevenue from contracts with customers is recognised over time.",
+            "5": "5. Property, plant and equipment\nPlant and equipment are depreciated over useful lives.",
+        },
+        document,
+        {"revenue": True, "ppe": True, "leases": True},
+    )
+
+    assert rows[0]["Page reference"] == "Page 2"
+    assert rows[0]["Detected topics"] == "revenue"
+    assert rows[1]["Page reference"] == "Page 3"
+    assert "ppe" in rows[1]["Detected topics"]
+    assert "leases" not in rows[0]["Detected topics"]
+
+
+def test_ai_policy_rows_downgrade_weak_consolidation_and_generic_lease_observations():
+    findings, export_rows = ai_policy_review._rows_to_outputs([
+        {
+            "title": "Consolidation policy",
+            "dimension": "policy_relevance",
+            "standard_or_topic": "IFRS 10 consolidation",
+            "severity": "High",
+            "confidence": "High",
+            "status": "exception",
+            "issue": "Consolidation policy may be missing based on related party sister company wording.",
+            "rationale": "Evidence only refers to related parties and sister companies.",
+            "recommendation": "Review group structure.",
+            "page_reference": "Page 28",
+            "note_reference": "Note 20",
+            "evidence_snippet": "Related party balances with a sister company were disclosed.",
+        },
+        {
+            "title": "Lease policy",
+            "dimension": "standard_context",
+            "standard_or_topic": "IFRS 16",
+            "severity": "Medium",
+            "confidence": "Medium",
+            "status": "review_prompt",
+            "issue": "Generic IFRS 16 amendment text mentions recognition of a lease asset and lease liability.",
+            "rationale": "The wording appears in a new standards/amendments section, not an actual balance note.",
+            "recommendation": "Do not elevate unless a lease balance exists.",
+            "page_reference": "Page 12",
+            "note_reference": "Note 2",
+            "evidence_snippet": "New standards amendments refer to recognition of a lease asset and lease liability.",
+        },
+    ])
+
+    assert [finding.severity for finding in findings] == ["Low", "Low"]
+    assert [row["Confidence"] for row in export_rows] == ["Low", "Low"]
 
 
 def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sheet(monkeypatch):

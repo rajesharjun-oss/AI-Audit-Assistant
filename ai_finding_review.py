@@ -262,6 +262,14 @@ def _apply_adjudications(
             confidence = "High" if confidence != "Low" else confidence
             if not reason:
                 reason = "The finding is supported by an explicit nil-style narrative and a non-zero amount in the same note evidence."
+        if decision == "suppress" and _suppression_conflicts_with_note_evidence(original, candidate, reason):
+            decision = "downgrade" if original.severity == "High" else "keep"
+            status = "confirmed_exception" if original.severity in {"High", "Medium"} else "review_prompt"
+            confidence = "Medium" if confidence == "Low" else confidence
+            reason = (
+                reason
+                or "The AI response describes a note/reference mismatch, so the finding is retained for reviewer follow-up."
+            )
         metadata.update(
             {
                 "ai_review_status": status,
@@ -357,6 +365,57 @@ def _can_suppress_finding(finding: Finding, confidence: str) -> bool:
         metadata = finding.metadata or {}
         return bool(metadata.get("ocr_review"))
     return False
+
+
+
+
+def _suppression_conflicts_with_note_evidence(finding: Finding, candidate: dict[str, Any], reason: str) -> bool:
+    if finding.category != "Notes agreement":
+        return False
+    combined = " ".join(
+        str(value or "")
+        for value in (
+            finding.issue,
+            finding.evidence,
+            finding.recommendation,
+            candidate.get("issue"),
+            candidate.get("note_reference"),
+            candidate.get("note_snippet"),
+            reason,
+        )
+    ).lower()
+    note_context = any(term in combined for term in ("note", "referenced", "reference", "heading"))
+    mismatch_context = any(
+        term in combined
+        for term in (
+            "not found",
+            "not located",
+            "does not contain",
+            "doesn't contain",
+            "no amount",
+            "no mention",
+            "only contains",
+            "wrong note",
+            "mismatch",
+            "stronger match",
+            "appears in another note",
+            "linking issue",
+            "reference issue",
+        )
+    )
+    extraction_noise = any(
+        term in combined
+        for term in (
+            "ocr drift",
+            "split-digit",
+            "split digit",
+            "layout noise",
+            "extraction noise",
+            "table extraction",
+            "merged cell",
+        )
+    )
+    return note_context and mismatch_context and not extraction_noise
 
 
 def _finding_page_reference(document: PdfDocument, finding: Finding, metadata: dict[str, Any]) -> str:

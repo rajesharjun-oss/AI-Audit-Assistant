@@ -75,6 +75,24 @@ The checks are intentionally transparent and conservative:
 - low-text PDFs are routed through an OCR fallback when enabled; otherwise the app raises an extraction-quality finding instead of producing misleading accounting exceptions.
 - OCR table reconstruction uses word positions and line-level numeric patterns to rebuild candidate rows such as `Revenue | 10,000 | 8,000`, allowing totals and cross-footing checks to run on scanned statements where OCR quality is sufficient.
 - extraction confidence scores combine text coverage, OCR status, unreadable placeholders, and suspicious merged numeric cells. Low-confidence extraction stops deterministic audit checks and raises extraction-quality findings instead of producing unreliable exceptions.
+- findings are evidence-gated before export: weak review prompts remain visible in `Review prompts not elevated`, but they do not inflate the Exception register unless page/note evidence and confidence are sufficient.
+- optional AI review is used as an adjudicator over evidence packs for policy/disclosure judgement and likely false-positive review; it should not be treated as the source of truth without deterministic evidence.
+
+## Regression tests
+
+Run the reusable safety net before pushing changes:
+
+```powershell
+python -m pytest tests\test_pipeline_regression.py tests\test_synthetic_regression_fixtures.py tests\test_quality_gates.py tests\test_job_runner.py -q
+```
+
+or use:
+
+```powershell
+.\run_regression_tests.ps1
+```
+
+The tests cover local PDF cases when available, generic synthetic financial-statement patterns, workbook export creation, and evidence-gating rules that prevent low-confidence prompts from becoming exception-register findings.
 
 ## Extraction confidence
 

@@ -189,17 +189,18 @@ def _policy_evidence_rows(
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for ref, text in sorted(note_sections.items(), key=lambda item: _sort_note_key(item[0])):
-        clean = re.sub(r"\s+", " ", str(text or "")).strip()
+        clean = _clean_ai_snippet(text)
         if not clean:
             continue
         lower = clean.lower()
-        if ref in {"1", "2"} or any(keyword in lower for keyword in POLICY_KEYWORDS):
+        topics = _policy_topics_for_text(clean, policy_map)
+        if ref in {"1", "2"} or topics or any(keyword in lower for keyword in POLICY_KEYWORDS):
             rows.append(
                 {
                     "Evidence type": "Policy/note context",
-                    "Page reference": "",
+                    "Page reference": _note_page_reference(document, ref, clean),
                     "Note reference": f"Note {ref}",
-                    "Detected topics": ", ".join(key for key, present in sorted(policy_map.items()) if present) or "Not mapped",
+                    "Detected topics": ", ".join(topics) or "Policy/disclosure context",
                     "Snippet": clean[:700],
                     "AI role": "Policy relevance, disclosure completeness, standards context, and industry fit judgement",
                 }
@@ -211,19 +212,72 @@ def _policy_evidence_rows(
     for page in document.pages:
         lower = page.text.lower()
         if any(pattern in lower for pattern in NOTES_HEADING_PATTERNS) or "significant accounting policies" in lower:
+            clean = _clean_ai_snippet(page.text)
             rows.append(
                 {
                     "Evidence type": "Fallback page context",
                     "Page reference": f"Page {page.number}",
                     "Note reference": "",
-                    "Detected topics": ", ".join(key for key, present in sorted(policy_map.items()) if present) or "Not mapped",
-                    "Snippet": re.sub(r"\s+", " ", page.text).strip()[:700],
+                    "Detected topics": ", ".join(_policy_topics_for_text(clean, policy_map)) or "Policy/disclosure context",
+                    "Snippet": clean[:700],
                     "AI role": "Fallback policy/disclosure judgement context",
                 }
             )
         if len(rows) >= 3:
             break
     return rows
+
+
+
+POLICY_TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "revenue": ("revenue", "contracts with customers", "ifrs 15", "turnover", "rental income"),
+    "financial instruments": ("financial instrument", "expected credit", "ecl", "amortised cost", "derecognition"),
+    "tax": ("taxation", "income tax", "deferred tax", "current tax"),
+    "ppe": ("property, plant and equipment", "ppe", "depreciation", "capital work in progress"),
+    "intangibles": ("intangible", "software", "amortisation", "amortization"),
+    "inventory": ("inventor", "stock", "net realisable", "net realizable"),
+    "leases": ("right-of-use", "right of use", "lease liability", "lease expense", "lease maturity"),
+    "related parties": ("related part", "key management", "director", "sister compan", "shareholder"),
+    "consolidation": ("consolidated", "subsidiar", "non-controlling", "investment in subsidiar", "group financial"),
+    "foreign currency": ("foreign currenc", "exchange difference", "functional currency"),
+    "employee benefits": ("employee benefit", "pension", "defined contribution", "retirement benefit"),
+    "events after reporting period": ("events after", "subsequent event", "after the reporting period"),
+}
+
+
+def _clean_ai_snippet(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)\bD\s+R\s+A\s+F\s+T\b", " ", text)
+    text = re.sub(r"(?i)\bT\s+F\s+A\s+R\s+D\b", " ", text)
+    text = re.sub(r"(?m)^\s*[DRAFT]{1}\s*$", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _policy_topics_for_text(text: str, policy_map: dict[str, bool]) -> list[str]:
+    lower = str(text or "").lower()
+    topics: list[str] = []
+    for topic, keywords in POLICY_TOPIC_KEYWORDS.items():
+        if any(keyword in lower for keyword in keywords):
+            topics.append(topic)
+    for key, present in sorted(policy_map.items()):
+        normalized = str(key or "").strip().lower()
+        if present and normalized and normalized in lower and normalized not in topics:
+            topics.append(normalized)
+    return topics
+
+
+def _note_page_reference(document: PdfDocument, ref: str, clean_text: str) -> str:
+    note_pattern = re.compile(rf"(?<!\d){re.escape(str(ref))}\s*[\).:-]?\s+", re.I)
+    seed = _clean_ai_snippet(clean_text)[:160]
+    seed_words = re.findall(r"[A-Za-z]{4,}", seed.lower())[:5]
+    for page in document.pages:
+        page_clean = _clean_ai_snippet(page.text)
+        page_lower = page_clean.lower()
+        if seed and seed[:80].lower() in page_lower:
+            return f"Page {page.number}"
+        if note_pattern.search(page_clean) and seed_words and sum(1 for word in seed_words if word in page_lower) >= min(3, len(seed_words)):
+            return f"Page {page.number}"
+    return "Page not isolated"
 
 def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     blocked_remaining = _rate_limit_wait_seconds()
@@ -344,6 +398,15 @@ def _rows_to_outputs(observations: list[dict[str, Any]]) -> tuple[list[Finding],
         evidence_snippet = str(observation.get("evidence_snippet", "") or "").strip()
         if not issue and not title:
             continue
+        severity, confidence, status = _calibrate_policy_observation(
+            severity=severity,
+            confidence=confidence,
+            status=status,
+            standard_or_topic=standard_or_topic,
+            issue=issue,
+            rationale=rationale,
+            evidence_snippet=evidence_snippet,
+        )
         export_rows.append(
             {
                 "Title": title or issue[:80],
@@ -381,6 +444,64 @@ def _rows_to_outputs(observations: list[dict[str, Any]]) -> tuple[list[Finding],
             )
         )
     return findings, export_rows
+
+
+
+
+def _calibrate_policy_observation(
+    *,
+    severity: str,
+    confidence: str,
+    status: str,
+    standard_or_topic: str,
+    issue: str,
+    rationale: str,
+    evidence_snippet: str,
+) -> tuple[str, str, str]:
+    combined = " ".join([standard_or_topic, issue, rationale, evidence_snippet]).lower()
+    if _weak_consolidation_observation(combined) or _weak_lease_observation(combined):
+        return "Low", "Low", "review_prompt" if status != "ok" else status
+    if severity == "High" and confidence != "High":
+        return "Medium", confidence, status
+    if severity == "High" and status != "exception":
+        return "Medium", confidence, status
+    return severity, confidence, status
+
+
+def _weak_consolidation_observation(text: str) -> bool:
+    consolidation_terms = ("consolidation", "consolidated", "subsidiary", "investment entity", "group structure")
+    if not any(term in text for term in consolidation_terms):
+        return False
+    strong_terms = ("investment in subsidiary", "non-controlling", "consolidated statement", "consolidated financial", "parent company")
+    if any(term in text for term in strong_terms):
+        return False
+    weak_terms = ("related part", "sister compan", "common control", "shareholder", "director")
+    return any(term in text for term in weak_terms)
+
+
+def _weak_lease_observation(text: str) -> bool:
+    lease_terms = ("ifrs 16", "lease", "right-of-use", "right of use")
+    if not any(term in text for term in lease_terms):
+        return False
+    strong_disclosure_terms = (
+        "lease maturity",
+        "lease expense",
+        "rou depreciation",
+        "finance lease",
+        "operating lease balance",
+        "actual lease arrangement",
+        "lease commitment",
+    )
+    if any(term in text for term in strong_disclosure_terms):
+        return False
+    balance_context = any(term in text for term in ("lease liability balance", "right-of-use asset balance", "right of use asset balance", "carrying amount", "recognised amount", "recognized amount"))
+    amount_context = bool(re.search(r"\b\d{1,3}(?:,\d{3})+\b", text))
+    generic_sections = ("new standard", "amendment", "deferred tax", "theoretical", "accounting policy")
+    if any(term in text for term in generic_sections) and not amount_context:
+        return True
+    if ("lease liability" in text or "right-of-use asset" in text or "right of use asset" in text) and (balance_context or amount_context):
+        return False
+    return not (balance_context or amount_context)
 
 
 def _normalize_severity(value: Any) -> str:

@@ -616,6 +616,104 @@ def _extraction_finding_as_skipped_check(finding: Finding) -> str:
     return " ".join(parts)
 
 
+def _split_elevated_findings(findings: list[Finding], document: PdfDocument) -> tuple[list[Finding], list[dict[str, str]]]:
+    elevated: list[Finding] = []
+    not_elevated: list[dict[str, str]] = []
+    for finding in findings:
+        reason = _not_elevated_reason(finding, document)
+        if reason:
+            not_elevated.append(_not_elevated_prompt_row(finding, reason))
+            continue
+        elevated.append(finding)
+    return elevated, not_elevated
+
+
+def _not_elevated_reason(finding: Finding, document: PdfDocument) -> str:
+    metadata = finding.metadata or {}
+    explicit = str(metadata.get("not_elevated", "") or "").strip().lower()
+    if explicit in {"1", "true", "yes"}:
+        return str(metadata.get("not_elevated_reason", "Evidence was not strong enough to elevate this item to the exception register.") or "")
+    status = str(metadata.get("ai_review_status", "") or "").strip().lower()
+    if status in {"likely_false_positive", "insufficient_evidence"}:
+        return "AI finding review marked this item as insufficiently supported for the exception register."
+    confidence = str(metadata.get("match_confidence", "") or metadata.get("amount_match_confidence", "") or "").strip().lower()
+    if finding.category == "Notes agreement" and confidence == "low":
+        return "Low-confidence note agreement prompt; retained for review only until note extraction and matching are corroborated."
+    if finding.category == "AI policy judgement":
+        ai_confidence = str(metadata.get("match_confidence", "") or "").strip().lower()
+        if ai_confidence == "low":
+            return "Low-confidence AI policy judgement; retained for reviewer context rather than a confirmed exception."
+        if not _finding_has_page_evidence(finding) and not _finding_has_note_evidence(finding):
+            return "AI policy judgement did not identify a specific page or note reference."
+    if finding.category in _PAGE_REQUIRED_FINDING_CATEGORIES and not _finding_has_page_evidence(finding):
+        return "Finding did not include a specific page reference, so it is retained as a review prompt instead of an exception."
+    if document.ocr_used and str(metadata.get("ocr_review", "") or "").lower() in {"true", "1", "yes"}:
+        if confidence == "low":
+            return "OCR-derived item has low parse/match confidence."
+    return ""
+
+
+_PAGE_REQUIRED_FINDING_CATEGORIES = {
+    "Notes agreement",
+    "Totals and rounding",
+    "Formatting",
+    "Narrative consistency",
+    "Key amount consistency",
+    "AI policy judgement",
+}
+
+
+def _finding_has_page_evidence(finding: Finding) -> bool:
+    metadata = finding.metadata or {}
+    for key in ("page_reference", "page", "pages"):
+        value = str(metadata.get(key, "") or "").strip()
+        if value and value.lower() not in {"document-wide", "page not isolated", "not detected"}:
+            return True
+    text = "\n".join(str(part or "") for part in (finding.location, finding.evidence, finding.issue))
+    if re.search(r"\bPages?\s+\d+", text, flags=re.I):
+        return True
+    if str(finding.location or "").strip().lower() == "document-wide" and finding.category not in _PAGE_REQUIRED_FINDING_CATEGORIES:
+        return True
+    return False
+
+
+def _finding_has_note_evidence(finding: Finding) -> bool:
+    metadata = finding.metadata or {}
+    for key in ("note_reference", "referenced_note", "suggested_note", "alternative_note_found", "amount_found_in_note"):
+        if str(metadata.get(key, "") or "").strip():
+            return True
+    text = "\n".join(str(part or "") for part in (finding.location, finding.evidence, finding.issue))
+    return bool(re.search(r"\bNote\s+\d+[A-Z]?\b", text, flags=re.I))
+
+
+def _not_elevated_prompt_row(finding: Finding, reason: str) -> dict[str, str]:
+    metadata = finding.metadata or {}
+    return {
+        "Severity": finding.severity,
+        "Category": finding.category,
+        "Page reference": str(metadata.get("page_reference", "") or _page_reference_text(finding)),
+        "Note reference": str(metadata.get("note_reference", "") or metadata.get("referenced_note", "") or metadata.get("suggested_note", "") or _note_reference_text(finding)),
+        "Issue": finding.issue,
+        "Evidence": finding.evidence,
+        "Reason not elevated": reason,
+        "Reviewer action": finding.recommendation or "Review the source page/note manually if this area is material.",
+    }
+
+
+def _page_reference_text(finding: Finding) -> str:
+    text = "\n".join(str(part or "") for part in (finding.location, finding.evidence))
+    pages = sorted({int(match) for match in re.findall(r"\bPage\s+(\d+)\b", text, flags=re.I)})
+    if not pages:
+        return ""
+    return f"Page {pages[0]}" if len(pages) == 1 else "Pages " + ", ".join(str(page) for page in pages)
+
+
+def _note_reference_text(finding: Finding) -> str:
+    text = "\n".join(str(part or "") for part in (finding.location, finding.issue, finding.evidence))
+    refs = re.findall(r"\bNote\s+(\d+[A-Z]?)\b", text, flags=re.I)
+    return ", ".join(f"Note {ref.upper()}" for ref in dict.fromkeys(refs))
+
+
 def _build_result(
     document: PdfDocument,
     findings: list[Finding],
@@ -660,7 +758,11 @@ def _build_result(
             f.severity = "Medium"
         active_findings.append(f)
             
-    findings = active_findings
+    findings, not_elevated_review_prompts = _split_elevated_findings(active_findings, document)
+    if not_elevated_review_prompts:
+        checks_skipped_list.append(
+            f"{len(not_elevated_review_prompts)} low-confidence review prompt(s) were not elevated to the Exception register; see Review prompts not elevated."
+        )
     checks_skipped_list = list(dict.fromkeys(checks_skipped_list))
     check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings, document, passed_check_evidence)
     
@@ -697,6 +799,8 @@ def _build_result(
         "rotated_pages": rotated_pages,
         "tables": sum(len(page.tables) for page in document.pages),
         "findings": len(findings),
+        "review_prompts_not_elevated_count": len(not_elevated_review_prompts),
+        "review_prompts_not_elevated": not_elevated_review_prompts,
         "high": sum(1 for item in findings if item.severity == "High"),
         "medium": sum(1 for item in findings if item.severity == "Medium"),
         "low": sum(1 for item in findings if item.severity == "Low"),

@@ -27,6 +27,7 @@ def build_excel_export(result) -> bytes:
         {"Metric": "Checks passed", "Value": result.metrics.get("checks_passed_count", 0)},
         {"Metric": "Checks skipped", "Value": result.metrics.get("checks_skipped_count", 0)},
         {"Metric": "Findings", "Value": result.metrics.get("findings", 0)},
+        {"Metric": "Review prompts not elevated", "Value": result.metrics.get("review_prompts_not_elevated_count", 0)},
         {"Metric": "High findings", "Value": result.metrics.get("high", 0)},
         {"Metric": "Medium findings", "Value": result.metrics.get("medium", 0)},
         {"Metric": "Low findings", "Value": result.metrics.get("low", 0)},
@@ -63,6 +64,8 @@ def build_excel_export(result) -> bytes:
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
         finding_summary_rows = finding_summary_rows_for_result(result) or [{"Severity": "", "Category": "", "Page reference": "", "Issue": "No automated findings were identified.", "Recommendation": ""}]
         pd.DataFrame(finding_summary_rows).to_excel(writer, sheet_name="Findings summary", index=False)
+        review_prompt_rows = review_prompts_not_elevated_rows(result) or [{"Issue": "No low-confidence review prompts were withheld from the exception register."}]
+        pd.DataFrame(review_prompt_rows).to_excel(writer, sheet_name="Review prompts not elevated", index=False)
         ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
         ai_message = str(result.metrics.get("ai_policy_review_message", "") or "").strip()
         ai_default_title = {
@@ -186,6 +189,7 @@ def build_excel_export(result) -> bytes:
 
         format_exception_register_sheet(writer.book["Exception register"])
         format_excel_table_sheet(writer.book["Findings summary"], "FindingsSummary")
+        format_excel_table_sheet(writer.book["Review prompts not elevated"], "ReviewPromptsNotElevated")
         format_excel_table_sheet(writer.book["Primary statement line items"], "PrimaryLineItems")
         format_excel_table_sheet(writer.book["Items without notes summary"], "NoNotesSummary")
         format_excel_table_sheet(writer.book["Note-linked review"], "NoteLinkedReview")
@@ -213,6 +217,18 @@ def checks_skipped_rows(result) -> list[dict[str, str]]:
         row = parse_skipped_check(item)
         rows.append(translate_row_page_fields(row, result, ("Page reference", "Original message", "Reason skipped")))
     return rows
+
+
+def review_prompts_not_elevated_rows(result) -> list[dict[str, str]]:
+    rows = result.metrics.get("review_prompts_not_elevated", [])
+    if not isinstance(rows, list):
+        return []
+    cleaned: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cleaned.append(translate_row_page_fields(dict(row), result, ("Page reference", "Evidence", "Issue")))
+    return cleaned
 
 
 def finding_rows(result) -> list[dict[str, str]]:
