@@ -2194,6 +2194,55 @@ def test_cautious_face_to_note_amount_agreement_skips_non_face_linked_lines(monk
     assert row["Reason"] == "Skipped - not a face-linked note line"
 
 
+def test_statement_amount_parser_does_not_merge_note_number_into_cash_amount():
+    line = "Cash and cash equivalents at the end of the year 3 88,741 154,449"
+
+    parsed = reviewer._parse_ocr_statement_row(line)
+
+    assert parsed is not None
+    assert parsed.label == "cash at end"
+    assert parsed.amounts == (Decimal("88741"), Decimal("154449"))
+    assert "388,741" not in reviewer._amount_tokens_from_statement_line(line)
+
+
+def test_cash_flow_opening_movement_closing_allows_exchange_effect_after_note_token():
+    text = """
+Statement of Cash Flows
+2025 2024
+Cash flows from operating activities
+Net cash generated from/(used in) operating activities 327,438 (273,155)
+Cash flows from investing activities
+Net cash used in investing activities (209,437) (826,228)
+Cash flows from financing activities
+Net cash (used in)/generated from financing activities (181,174) 1,244,762
+Total cash movement for the year (63,173) 145,379
+Cash and cash equivalents at the beginning of the year 154,449 9,070
+Loss on foreign exchange on cash and cash equivalents (2,535) -
+Cash and cash equivalents at the end of the year 3 88,741 154,449
+"""
+    page = PdfPage(14, text, [])
+
+    findings, performed, skipped = reviewer._check_cash_flow_text(page, Decimal("1"))
+
+    assert not findings
+    assert "Statement of cash flows: opening plus movement checked to closing." in performed
+    assert not skipped
+
+
+def test_cash_flow_activity_subtotal_without_note_is_not_face_linked():
+    item = reviewer.StatementNoteLine(
+        statement_name="Statement of cash flows",
+        page_number=14,
+        line="Net cash (used in)/generated from financing activities (181,174) 1,244,762",
+        line_item="Cash /generated from financing activities",
+        ref="",
+        amounts=(Decimal("-181174"), Decimal("1244762")),
+        explicit_ref=False,
+    )
+
+    assert reviewer._note_agreement_skip_reason(item) == "not a face-linked note line"
+
+
 def test_note_agreement_excludes_cash_flow_subtotals_without_explicit_note(monkeypatch):
     document = PdfDocument(
         [

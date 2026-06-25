@@ -5977,7 +5977,7 @@ def _label_prefers_split_leading_digit(label: str) -> bool:
 
 
 def _amount_tokens_from_statement_line(line: str) -> list[str]:
-    cleaned = _normalise_statement_number_spacing(line)
+    cleaned = _normalise_statement_number_spacing(_strip_statement_note_token_before_amounts(line))
     cleaned = re.sub(r"(?<=\s)[-=](?=\s|$)", " 0 ", cleaned)
     return re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", cleaned)
 
@@ -6153,7 +6153,7 @@ def _statement_row_label_allowed(label: str) -> bool:
 
 
 def _statement_label(line: str) -> str:
-    cleaned = _normalise_statement_number_spacing(line)
+    cleaned = _normalise_statement_number_spacing(_strip_statement_note_token_before_amounts(line))
     cleaned = re.sub(r"\([^)]*\)", " ", cleaned)
     cleaned = re.sub(r"\b(?:note|n'?000|000|20\d{2}|\d{1,2}[a-c]?)\b", " ", cleaned, flags=re.I)
     cleaned = NUMBER_RE.sub(" ", cleaned)
@@ -6260,6 +6260,26 @@ def _label_matches(normalized_label: str, alias: str) -> bool:
     return SequenceMatcher(None, normalized_label, normalized_alias).ratio() >= 0.84
 
 
+def _strip_statement_note_token_before_amounts(line: str) -> str:
+    grouped_amount = r"\(?-?\d{1,3}(?:[,\s.]\d{3})+(?:\.\d+)?\)?"
+    amount_pattern = grouped_amount + r"|\(?-?\d+(?:\.\d+)?\)?|-"
+    pattern = re.compile(
+        r"(?P<label>\b[A-Za-z][A-Za-z&/()' -]{2,}?)\s+(?P<ref>\d{1,2}[A-Za-z]?)(?P<tail>\s+" + grouped_amount + r"(?:\s+" + amount_pattern + r")*)",
+        re.I,
+    )
+
+    def repl(match: re.Match[str]) -> str:
+        ref = match.group("ref").upper()
+        if not _valid_note_number(ref):
+            return match.group(0)
+        tail = match.group("tail")
+        remaining = match.string[match.end() :]
+        if re.search(r"\s+\d{1,2}\s+\d{2},\d{3}\b", tail) or re.match(r"\s+\d{1,2}\s+\d{2},\d{3}\b", remaining):
+            return match.group(0)
+        return f"{match.group('label')}{tail}"
+
+    return pattern.sub(repl, line)
+
 def _normalise_statement_number_spacing(line: str) -> str:
     line = re.sub(r"\((-?\d{1,3}),\s+(\d{3})\)", r"(\1,\2)", line)
     line = re.sub(r"\((-?\d{1,3})\s+(\d{3})\)", r"(\1,\2)", line)
@@ -6275,7 +6295,7 @@ def _normalise_statement_number_spacing(line: str) -> str:
 
 
 def _amounts_from_statement_line(line: str) -> list[Decimal]:
-    cleaned = _normalise_statement_number_spacing(line)
+    cleaned = _normalise_statement_number_spacing(_strip_statement_note_token_before_amounts(line))
     cleaned = re.sub(r"\s+[-=]\s*(?=\(?\s?\d)", " 0 ", cleaned)
     tokens = re.findall(r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?", cleaned)
     amounts = [_parse_decimal(token) for token in tokens]
@@ -7997,12 +8017,22 @@ def _note_agreement_skip_reason(item: StatementNoteLine) -> str:
 
 def _cash_flow_line_not_note_linked(line_item: str) -> bool:
     normalized = _normalise_match_words(line_item)
+    if any(activity in normalized for activity in ("operating activities", "investing activities", "financing activities")) and any(
+        term in normalized for term in ("net cash", "cash generated", "cash used", "generated from", "used in", "used from")
+    ):
+        return True
     if any(
         marker in normalized
         for marker in (
             "cash operating activities",
             "cash investing activities",
             "cash financing activities",
+            "cash generated operating activities",
+            "cash generated investing activities",
+            "cash generated financing activities",
+            "cash used operating activities",
+            "cash used investing activities",
+            "cash used financing activities",
             "net cash operating activities",
             "net cash investing activities",
             "net cash financing activities",
