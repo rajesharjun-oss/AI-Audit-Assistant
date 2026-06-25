@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai_policy_review import _call_openai, _friendly_ai_error_message, _normalize_confidence, _normalize_severity, _parse_response_json
-from models import CompanyProfile, Finding, PdfDocument
+from models import DEFAULT_AI_MODEL, CompanyProfile, Finding, PdfDocument
 
 
 REVIEWABLE_CATEGORIES = {
@@ -37,13 +37,14 @@ class AiFindingReviewResult:
     message: str = ""
     reviewed_count: int = 0
     suppressed_count: int = 0
+    evidence_rows: list[dict[str, str]] | None = None
 
 
 def run_ai_finding_review(
     document: PdfDocument,
     profile: CompanyProfile,
     findings: list[Finding],
-    model: str = "gpt-5-mini",
+    model: str = DEFAULT_AI_MODEL,
 ) -> AiFindingReviewResult:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -54,6 +55,7 @@ def run_ai_finding_review(
             status="unavailable",
             model=model,
             message="AI finding review skipped because OPENAI_API_KEY is not configured.",
+            evidence_rows=[],
         )
 
     candidates = _review_candidates(document, findings)
@@ -65,6 +67,7 @@ def run_ai_finding_review(
             status="skipped",
             model=model,
             message="AI finding review skipped because no ambiguous findings were eligible for adjudication.",
+            evidence_rows=[],
         )
 
     payload = {
@@ -101,6 +104,7 @@ def run_ai_finding_review(
             status="deferred",
             model=model,
             message=_friendly_ai_error_message(exc),
+            evidence_rows=_candidate_evidence_rows(candidates) if 'candidates' in locals() else [],
         )
 
 
@@ -150,6 +154,29 @@ def _review_candidates(document: PdfDocument, findings: list[Finding]) -> list[d
             break
     return candidates
 
+
+
+def _candidate_evidence_rows(candidates: list[dict[str, Any]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for candidate in candidates:
+        rows.append(
+            {
+                "Evidence type": "Engine finding adjudication pack",
+                "Finding ID": str(candidate.get("finding_id", "")),
+                "Category": str(candidate.get("category", "")),
+                "Severity": str(candidate.get("severity", "")),
+                "Page reference": str(candidate.get("page_reference", "")),
+                "Note reference": str(candidate.get("note_reference", "")),
+                "Statement": str(candidate.get("statement", "")),
+                "Line item": str(candidate.get("line_item", "")),
+                "Issue": str(candidate.get("issue", "")),
+                "Evidence": str(candidate.get("evidence", "")),
+                "Page snippet": str(candidate.get("page_snippet", "")),
+                "Note snippet": str(candidate.get("note_snippet", "")),
+                "AI role": "Classify as keep, downgrade, or likely false positive using supplied evidence only",
+            }
+        )
+    return rows
 
 def _finding_is_ai_reviewable(document: PdfDocument, finding: Finding) -> bool:
     metadata = finding.metadata or {}
@@ -302,6 +329,7 @@ def _apply_adjudications(
         model=model,
         reviewed_count=len(candidates),
         suppressed_count=len(suppressed_indexes),
+        evidence_rows=_candidate_evidence_rows(candidates),
     )
 
 

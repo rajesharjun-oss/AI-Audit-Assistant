@@ -16,7 +16,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from export_utils import clean_name_consistency_rows
-from models import CompanyProfile, ReviewOptions
+from models import CompanyProfile, DEFAULT_AI_MODEL, ReviewOptions
 from report_exports import build_excel_export, exported_file_stem
 from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
 
@@ -469,6 +469,24 @@ def _build_excel_export(result) -> bytes:
         }.get(ai_status, "AI policy review returned no rows.")
         ai_policy_rows = result.metrics.get("ai_policy_export", []) or [{"Title": ai_default_title, "Status": ai_status, "Message": ai_message}]
         pd.DataFrame(ai_policy_rows).to_excel(writer, sheet_name="AI policy judgement", index=False)
+        ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
+        ai_finding_message = str(result.metrics.get("ai_finding_review_message", "") or "").strip()
+        ai_finding_default_title = {
+            "disabled": "AI finding review not enabled.",
+            "unavailable": "AI finding review was enabled but is unavailable in this environment.",
+            "skipped": "AI finding review was enabled but no weak deterministic findings were eligible.",
+            "error": "AI finding review was enabled but failed during execution.",
+            "deferred": "AI finding review was deferred due to API availability or rate limiting.",
+            "completed": "AI finding review completed but returned no adjudication rows.",
+        }.get(ai_finding_status, "AI finding review returned no rows.")
+        ai_finding_rows = result.metrics.get("ai_finding_export", []) or [
+            {"Finding ID": "", "Issue": ai_finding_default_title, "AI status": ai_finding_status, "Reason": ai_finding_message}
+        ]
+        pd.DataFrame(ai_finding_rows).to_excel(writer, sheet_name="AI finding review", index=False)
+        ai_evidence_rows = result.metrics.get("ai_evidence_packs", []) or [
+            {"Evidence type": "None", "AI role": "AI review was not run or no evidence packs were eligible."}
+        ]
+        pd.DataFrame(ai_evidence_rows).to_excel(writer, sheet_name="AI evidence packs", index=False)
         exception_rows = _finding_rows(result) or [
             {
                 "ID": "",
@@ -572,6 +590,8 @@ def _build_excel_export(result) -> bytes:
         _format_excel_table_sheet(writer.book["OCR statement rows"], "OCRStatementRows")
         _format_excel_table_sheet(writer.book["Notes 1 and 2 policy review"], "PolicyReview")
         _format_excel_table_sheet(writer.book["AI policy judgement"], "AIPolicyJudgement")
+        _format_excel_table_sheet(writer.book["AI finding review"], "AIFindingReview")
+        _format_excel_table_sheet(writer.book["AI evidence packs"], "AIEvidencePacks")
         _format_excel_table_sheet(writer.book["Unreferenced notes"], "UnreferencedNotes")
         _format_excel_table_sheet(writer.book["Key amount consistency"], "AmountConsistency")
         _format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
@@ -1163,7 +1183,7 @@ try:
                 ocr_dpi=int(ocr_dpi),
                 run_cautious_note_agreement=cautious_note_agreement,
                 use_ai_policy_review=use_ai_policy_review,
-                ai_model="gpt-5-mini",
+                ai_model=DEFAULT_AI_MODEL,
             ),
         )
 finally:

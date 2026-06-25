@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib import error, request
 
-from models import CompanyProfile, Finding, PdfDocument
+from models import DEFAULT_AI_MODEL, CompanyProfile, Finding, PdfDocument
 
 
 NOTES_HEADING_PATTERNS = (
@@ -47,6 +47,7 @@ class AiPolicyReviewResult:
     status: str
     model: str
     message: str = ""
+    evidence_rows: list[dict[str, str]] | None = None
 
 
 def run_ai_policy_review(
@@ -54,7 +55,7 @@ def run_ai_policy_review(
     profile: CompanyProfile,
     note_sections: dict[str, str],
     policy_map: dict[str, bool] | None = None,
-    model: str = "gpt-5-mini",
+    model: str = DEFAULT_AI_MODEL,
 ) -> AiPolicyReviewResult:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -65,9 +66,11 @@ def run_ai_policy_review(
             status="unavailable",
             model=model,
             message="AI policy and standards judgement skipped because OPENAI_API_KEY is not configured.",
+            evidence_rows=[],
         )
 
     note_context = _policy_context(note_sections, document)
+    evidence_rows = _policy_evidence_rows(note_sections, document, policy_map or {})
     if not note_context.strip():
         return AiPolicyReviewResult(
             findings=[],
@@ -76,6 +79,7 @@ def run_ai_policy_review(
             status="skipped",
             model=model,
             message="AI policy and standards judgement skipped because no policy/disclosure note context was detected.",
+            evidence_rows=[],
         )
 
     payload = {
@@ -109,6 +113,7 @@ def run_ai_policy_review(
             summary=summary,
             status="completed",
             model=model,
+            evidence_rows=evidence_rows,
         )
     except Exception as exc:  # pragma: no cover - network/runtime dependent
         friendly_message = _friendly_ai_error_message(exc)
@@ -119,6 +124,7 @@ def run_ai_policy_review(
             status="deferred" if _is_rate_limit_error(exc) else "error",
             model=model,
             message=friendly_message,
+            evidence_rows=evidence_rows if 'evidence_rows' in locals() else [],
         )
 
 
@@ -174,6 +180,50 @@ def _build_prompt(
         f"Policies and note context:\n{note_context}"
     )
 
+
+
+def _policy_evidence_rows(
+    note_sections: dict[str, str],
+    document: PdfDocument,
+    policy_map: dict[str, bool],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for ref, text in sorted(note_sections.items(), key=lambda item: _sort_note_key(item[0])):
+        clean = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not clean:
+            continue
+        lower = clean.lower()
+        if ref in {"1", "2"} or any(keyword in lower for keyword in POLICY_KEYWORDS):
+            rows.append(
+                {
+                    "Evidence type": "Policy/note context",
+                    "Page reference": "",
+                    "Note reference": f"Note {ref}",
+                    "Detected topics": ", ".join(key for key, present in sorted(policy_map.items()) if present) or "Not mapped",
+                    "Snippet": clean[:700],
+                    "AI role": "Policy relevance, disclosure completeness, standards context, and industry fit judgement",
+                }
+            )
+        if len(rows) >= 8:
+            break
+    if rows:
+        return rows
+    for page in document.pages:
+        lower = page.text.lower()
+        if any(pattern in lower for pattern in NOTES_HEADING_PATTERNS) or "significant accounting policies" in lower:
+            rows.append(
+                {
+                    "Evidence type": "Fallback page context",
+                    "Page reference": f"Page {page.number}",
+                    "Note reference": "",
+                    "Detected topics": ", ".join(key for key, present in sorted(policy_map.items()) if present) or "Not mapped",
+                    "Snippet": re.sub(r"\s+", " ", page.text).strip()[:700],
+                    "AI role": "Fallback policy/disclosure judgement context",
+                }
+            )
+        if len(rows) >= 3:
+            break
+    return rows
 
 def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     blocked_remaining = _rate_limit_wait_seconds()

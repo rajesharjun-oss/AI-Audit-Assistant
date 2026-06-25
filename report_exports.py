@@ -86,6 +86,8 @@ def build_excel_export(result) -> bytes:
         }.get(ai_finding_status, "AI finding review returned no rows.")
         ai_finding_rows = result.metrics.get("ai_finding_export", []) or [{"Finding ID": "", "Issue": ai_finding_default_title, "AI status": ai_finding_status, "Reason": ai_finding_message}]
         pd.DataFrame(ai_finding_rows).to_excel(writer, sheet_name="AI finding review", index=False)
+        ai_evidence_rows = result.metrics.get("ai_evidence_packs", []) or [{"Evidence type": "None", "AI role": "AI review was not run or no evidence packs were eligible."}]
+        pd.DataFrame(ai_evidence_rows).to_excel(writer, sheet_name="AI evidence packs", index=False)
         exception_rows = finding_rows(result) or [
             {
                 "ID": "",
@@ -193,6 +195,7 @@ def build_excel_export(result) -> bytes:
         format_excel_table_sheet(writer.book["Notes 1 and 2 policy review"], "PolicyReview")
         format_excel_table_sheet(writer.book["AI policy judgement"], "AIPolicyJudgement")
         format_excel_table_sheet(writer.book["AI finding review"], "AIFindingReview")
+        format_excel_table_sheet(writer.book["AI evidence packs"], "AIEvidencePacks")
         format_excel_table_sheet(writer.book["Unreferenced notes"], "UnreferencedNotes")
         format_excel_table_sheet(writer.book["Key amount consistency"], "AmountConsistency")
         format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")

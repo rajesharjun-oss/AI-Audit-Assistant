@@ -23,7 +23,7 @@ NORMALIZED_AMOUNT_RE = re.compile(
     r"\(?-?\d{1,3}(?:\s*,\s*\d{3})+(?:\.\d+)?\)?|\(?-?\d+(?:\.\d+)?\)?",
     re.M,
 )
-NOTE_NUMBER_ONLY_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s+((?:20\d{2}|N['’]?\s?000|\$?000s?|\d{4})[\s,]*)+$", re.I)
+NOTE_NUMBER_ONLY_RE = re.compile(r"^\s*(?:note\s+)?(\d+[A-Za-z]?)\s+((?:20\d{2}|N[\'\u2019]?\s?000|\$?000s?|\d{4})[\s,]*)+$", re.I)
 ENTITY_SUFFIX_RE = re.compile(r"\b(?:limited|ltd|plc|inc|corp|corporation|company)\b", re.I)
 VALID_CURRENCIES = {"NGN", "USD", "GBP", "EUR", "ZAR", "GHS", "KES", "CAD", "AUD"}
 NOTE_TITLE_OCR_CORRECTIONS = {
@@ -107,6 +107,81 @@ POLICY_RULES = {
     "investment property": {
         "policy": ("investment property", "ias 40", "fair value model"),
         "evidence": ("investment property", "rental income", "fair value gain"),
+    },
+}
+
+NOTE_COMPATIBILITY_RULES: dict[str, dict[str, tuple[str, ...]]] = {
+    "ppe": {
+        "line": ("property plant equipment", "ppe", "tangible assets", "plant equipment"),
+        "heading": ("property plant equipment", "ppe", "tangible assets", "plant machinery", "buildings", "fixtures", "furniture"),
+    },
+    "investment property": {
+        "line": ("investment property",),
+        "heading": ("investment property",),
+    },
+    "intangible assets": {
+        "line": ("intangible assets", "intangible asset", "software", "goodwill"),
+        "heading": ("intangible assets", "intangible asset", "software", "goodwill", "amortisation", "amortization"),
+    },
+    "inventory": {
+        "line": ("inventory", "inventories", "stock"),
+        "heading": ("inventory", "inventories", "stock"),
+    },
+    "trade receivables": {
+        "line": ("trade receivables", "other receivables", "trade other receivables", "receivables", "contract assets"),
+        "heading": ("trade receivables", "other receivables", "trade other receivables", "receivables", "contract assets"),
+    },
+    "other financial assets": {
+        "line": ("other financial assets", "financial assets", "amortised cost", "amortized cost", "loans advances"),
+        "heading": ("other financial assets", "financial assets", "amortised cost", "amortized cost", "loans advances"),
+    },
+    "cash": {
+        "line": ("cash", "bank", "cash equivalents"),
+        "heading": ("cash", "bank", "cash equivalents"),
+    },
+    "share capital": {
+        "line": ("share capital", "ordinary shares", "issued capital"),
+        "heading": ("share capital", "ordinary shares", "issued capital"),
+    },
+    "borrowings": {
+        "line": ("borrowings", "loans", "financial liabilities", "lease liabilities", "bank overdraft"),
+        "heading": ("borrowings", "loans", "financial liabilities", "lease liabilities", "bank overdraft"),
+    },
+    "trade payables": {
+        "line": ("trade payables", "other payables", "trade other payables", "payables", "accruals", "contract liabilities"),
+        "heading": ("trade payables", "other payables", "trade other payables", "payables", "accruals", "contract liabilities"),
+    },
+    "tax": {
+        "line": ("tax", "taxation", "current tax", "deferred tax", "income tax"),
+        "heading": ("tax", "taxation", "current tax", "deferred tax", "income tax"),
+    },
+    "revenue": {
+        "line": ("revenue", "operating income", "turnover", "sales", "income property", "rental income"),
+        "heading": ("revenue", "rental income", "operating income", "turnover", "income property", "other operating income"),
+    },
+    "direct costs": {
+        "line": ("direct costs", "cost sales", "cost revenue"),
+        "heading": ("direct costs", "cost sales", "cost revenue"),
+    },
+    "administrative expenses": {
+        "line": ("administrative expenses", "admin expenses", "operating expenses"),
+        "heading": ("administrative expenses", "admin expenses", "operating expenses"),
+    },
+    "finance cost": {
+        "line": ("finance cost", "finance costs", "interest expense"),
+        "heading": ("finance cost", "finance costs", "interest expense"),
+    },
+    "finance income": {
+        "line": ("finance income", "interest income"),
+        "heading": ("finance income", "interest income"),
+    },
+    "related parties": {
+        "line": ("related parties", "related party"),
+        "heading": ("related parties", "related party"),
+    },
+    "going concern": {
+        "line": ("going concern",),
+        "heading": ("going concern",),
     },
 }
 
@@ -308,6 +383,10 @@ def review_pdf(
     findings.extend(statement_findings)
     checks_performed.extend(statement_performed)
     checks_skipped.extend(_limited_scope_statement_skips(statement_skipped) if limited_scope_extract else statement_skipped)
+    contents_performed, contents_skipped, contents_findings = _contents_statement_page_agreement_note(document)
+    findings.extend(contents_findings)
+    checks_performed.extend(contents_performed)
+    checks_skipped.extend(contents_skipped)
     if limited_scope_extract:
         checks_performed.append("Limited-scope review performed on Statement of Financial Position only.")
         checks_skipped.append("Full financial statement completeness, standards checklist, policies, formatting, and note agreement skipped because the upload is a limited-scope statement extract.")
@@ -352,6 +431,7 @@ def review_pdf(
     ai_policy_status = "disabled"
     ai_policy_model = options.ai_model
     ai_policy_message = ""
+    ai_evidence_pack_rows: list[dict[str, str]] = []
     ai_finding_export: list[dict[str, str]] = []
     ai_finding_summary = ""
     ai_finding_status = "disabled"
@@ -373,6 +453,7 @@ def review_pdf(
         ai_policy_summary = ai_review.summary
         ai_policy_export = ai_review.export_rows
         ai_policy_message = ai_review.message
+        ai_evidence_pack_rows.extend(getattr(ai_review, "evidence_rows", None) or [])
         if ai_review.status == "completed":
             findings.extend(ai_review.findings)
             checks_performed.append(f"AI policy and standards judgement completed using {ai_review.model}.")
@@ -406,6 +487,7 @@ def review_pdf(
         ai_finding_status = ai_finding_review.status
         ai_finding_model = ai_finding_review.model
         ai_finding_message = ai_finding_review.message
+        ai_evidence_pack_rows.extend(getattr(ai_finding_review, "evidence_rows", None) or [])
         ai_finding_suppressed = ai_finding_review.suppressed_count
         ai_finding_reviewed = ai_finding_review.reviewed_count
         if ai_finding_review.status == "completed":
@@ -438,6 +520,7 @@ def review_pdf(
         ai_finding_message,
         ai_finding_reviewed,
         ai_finding_suppressed,
+        ai_evidence_pack_rows,
     )
 
 
@@ -504,6 +587,35 @@ def _limited_scope_statement_skips(skipped: list[str]) -> list[str]:
     return [item for item in skipped if "financial position" in item.lower()]
 
 
+def _extraction_finding_as_skipped_check(finding: Finding) -> str:
+    if finding.category != "Extraction quality":
+        return ""
+    issue = str(finding.issue or "").lower()
+    non_exception_markers = (
+        "checks were skipped",
+        "validation skipped",
+        "reconciliation was skipped",
+        "checks were disabled",
+        "ocr was used to recover text",
+        "cautious detailed note agreement was run",
+        "generic arithmetic checks were skipped",
+        "statement-specific ocr checks were skipped",
+    )
+    if not any(marker in issue for marker in non_exception_markers):
+        return ""
+    parts = [str(finding.issue or "Extraction-related check skipped.").strip()]
+    location = str(finding.location or "").strip()
+    if location:
+        parts.append(f"Location: {location}.")
+    evidence = str(finding.evidence or "").strip()
+    if evidence:
+        parts.append(f"Reason: {evidence}")
+    recommendation = str(finding.recommendation or "").strip()
+    if recommendation:
+        parts.append(f"Reviewer action: {recommendation}")
+    return " ".join(parts)
+
+
 def _build_result(
     document: PdfDocument,
     findings: list[Finding],
@@ -524,10 +636,12 @@ def _build_result(
     ai_finding_message: str = "",
     ai_finding_reviewed: int = 0,
     ai_finding_suppressed: int = 0,
+    ai_evidence_pack_rows: list[dict[str, str]] | None = None,
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     
     # Process passed findings and narrative contradiction
+    checks_skipped_list = list(dict.fromkeys(checks_skipped or []))
     active_findings = []
     passed_check_evidence: dict[str, str] = {}
     for f in findings:
@@ -535,15 +649,19 @@ def _build_result(
             if f.issue not in checks_performed_list:
                 checks_performed_list.append(f.issue)
             passed_check_evidence[f.issue] = f.evidence
-        else:
-            if "Statement names in the narrative do not match the statement headings" in f.issue:
-                f.issue = "Statement names in the notes or auditor's report do not match the statement headings."
-                f.location = "Document-wide"
-                f.severity = "Medium"
-            active_findings.append(f)
+            continue
+        skipped_reason = _extraction_finding_as_skipped_check(f)
+        if skipped_reason:
+            checks_skipped_list.append(skipped_reason)
+            continue
+        if "Statement names in the narrative do not match the statement headings" in f.issue:
+            f.issue = "Statement names in the notes or auditor's report do not match the statement headings."
+            f.location = "Document-wide"
+            f.severity = "Medium"
+        active_findings.append(f)
             
     findings = active_findings
-    checks_skipped_list = list(dict.fromkeys(checks_skipped or []))
+    checks_skipped_list = list(dict.fromkeys(checks_skipped_list))
     check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings, document, passed_check_evidence)
     
     is_company = bool(
@@ -610,6 +728,9 @@ def _build_result(
         "ai_finding_review_message": ai_finding_message,
         "ai_finding_reviewed": ai_finding_reviewed,
         "ai_finding_suppressed": ai_finding_suppressed,
+        "ai_evidence_packs": ai_evidence_pack_rows or [],
+        "hybrid_review_mode": "AI-assisted evidence review" if (ai_policy_status != "disabled" or ai_finding_status != "disabled") else "Deterministic engine only",
+        "hybrid_review_principle": "Engine performs extraction, arithmetic, and structural checks; AI reviews evidence packs for policy/disclosure judgement and likely false positives.",
         "checks_performed_count": len(checks_performed_list),
         "checks_passed_count": sum(1 for row in check_result_rows if row.get("Result") == "Passed"),
         "checks_skipped_count": len(checks_skipped_list),
@@ -650,6 +771,45 @@ def _statement_structure_confidence(document: PdfDocument) -> int:
     detected_page_bonus = min(20, len(pages) * 4)
     score = min(100, score + detected_page_bonus)
     return max(0, score)
+
+
+def _contains_compatible_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    normalized = _normalise_match_words(text)
+    if not normalized:
+        return False
+    return any(_normalise_match_words(phrase) in normalized for phrase in phrases)
+
+
+def _note_compatibility_rule(line_item: str) -> str:
+    item = _normalise_match_words(line_item)
+    if not item:
+        return ""
+    for rule_name, rule in NOTE_COMPATIBILITY_RULES.items():
+        if any(_normalise_match_words(term) in item for term in rule["line"]):
+            return rule_name
+    return ""
+
+
+def _note_heading_semantically_compatible(line_item: str, note_heading: str, note_section: str = "") -> bool:
+    rule_name = _note_compatibility_rule(line_item)
+    if not rule_name:
+        return True
+    rule = NOTE_COMPATIBILITY_RULES[rule_name]
+    combined = f"{note_heading} {note_section[:400]}"
+    return _contains_compatible_phrase(combined, rule["heading"])
+
+
+def _note_compatibility_label(line_item: str) -> str:
+    rule_name = _note_compatibility_rule(line_item)
+    return rule_name or "line item"
+
+
+def _is_ppe_line_item(line_item: str) -> bool:
+    return _note_compatibility_rule(line_item) == "ppe"
+
+
+def _is_ppe_heading_compatible(note_heading: str) -> bool:
+    return _contains_compatible_phrase(note_heading, NOTE_COMPATIBILITY_RULES["ppe"]["heading"])
 
 
 def _statement_row_confidence(text: str) -> int:
@@ -2026,10 +2186,18 @@ def _normalise_year_end_format(value: str) -> str:
 
 
 def _detect_currency(text: str) -> str:
-    naira_thousands = r"(?:N|NGN|₦|â‚¦)\s*['’‘â€™]?\s*000|N000"
+    naira_symbol = chr(0x20A6)
+    naira_quotes = r"['\u2019\u2018`\u201c\u201d]"
+    naira_thousands = (
+        rf"(?:N\s*{naira_quotes}\s*000|N000|N[^A-Za-z0-9]{0,2}000|N{naira_symbol}\s*000|{naira_symbol}\s*{naira_quotes}\s*000|{naira_symbol})"
+    )
     if re.search(naira_thousands, text, flags=re.I):
         return "NGN / N'000"
-    if re.search(r"N['’]?\s?000|N000|Naira|₦|\bNGN\b", text, flags=re.I):
+    if re.search(
+        rf"N\s*{naira_quotes}\s*000|N000|{naira_symbol}\s*{naira_quotes}\s*000|\bNGN\b|\bNAIRA\b|NIGERIAN NAIRA|{naira_symbol}",
+        text,
+        flags=re.I,
+    ):
         return "NGN"
     if re.search(r"\bUSD\b|US\$|\bDollar\b|\$", text, flags=re.I):
         return "USD"
@@ -2038,7 +2206,6 @@ def _detect_currency(text: str) -> str:
     if re.search(r"\bEUR\b|\bEuro\b", text, flags=re.I):
         return "EUR"
     return "Not detected"
-
 
 def _detect_framework(text: str) -> str:
     if re.search(r"international financial reporting standards|IFRS", text, flags=re.I):
@@ -2315,7 +2482,12 @@ def check_primary_statement_consistency(
         findings.extend(page_findings)
         performed.extend(page_performed)
         skipped.extend(page_skipped)
-        
+
+    cross_source_findings, cross_source_performed, cross_source_skipped = _check_cross_source_cash_flow(document, tolerance)
+    findings.extend(cross_source_findings)
+    performed.extend(cross_source_performed)
+    skipped.extend(cross_source_skipped)
+
     # Value Added Statement cross-check
     vas_page = next((page for page in document.pages if _looks_like_value_added_page(page.text)), None)
             
@@ -3240,7 +3412,7 @@ def _looks_like_rotated_or_unreadable_statement_page(text: str) -> bool:
             "financial",
         }
     )
-    gibberish_markers = len(re.findall(r"[€¢£¥]|[A-Za-z]{1,2}[‘’][A-Za-z]{1,3}|000,,|,,N|2ouryeg|Asenuef", sample))
+    gibberish_markers = len(re.findall(r"[\u20ac\u00a2\u00a3\u00a5]|[A-Za-z]{1,2}[\u2018\u2019][A-Za-z]{1,3}|000,,|,,N|2ouryeg|Asenuef", sample))
     return gibberish_markers >= 3 and recognisable <= 5
 
 
@@ -4121,7 +4293,7 @@ def _table_has_financial_amount_header(table: list[list[str]]) -> bool:
     if any(marker in header_text for marker in narrative_markers):
         return False
     has_currency_marker = bool(
-        re.search(r"\b(?:ngn|n\s*['’`]\s*000|n000|₦|usd|eur|gbp|\$|amounts?)\b", header_text, flags=re.I)
+        re.search(r"\b(?:ngn|n\s*[\'\u2019`]\s*000|n000|\u20a6|usd|eur|gbp|\$|amounts?)\b", header_text, flags=re.I)
     )
     year_count = len(set(YEAR_RE.findall(header_text)))
     note_or_amount_column = bool(re.search(r"\b(note|notes|amount|assets|liabilities|equity|revenue|income|expense|cost)\b", header_text))
@@ -4465,7 +4637,7 @@ def _find_statement_page(document: PdfDocument, statement_name: str) -> PdfPage 
             continue
         for line in page.text.splitlines():
             lower = line.strip().lower()
-            if "..." in lower or "…" in lower:
+            if "..." in lower or "\u2026" in lower:
                 continue
             if lower.startswith(target):
                 return page
@@ -4524,6 +4696,121 @@ def _infer_statement_page_from_contents(document: PdfDocument, canonical_name: s
     return None
 
 
+def _looks_like_contents_page(text: str) -> bool:
+    raw_lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+    if not raw_lines:
+        return False
+    head = "\n".join(raw_lines[:60]).lower()
+    if _fuzzy_contains(head, "table of contents", 0.76) or _fuzzy_contains(head, "contents", 0.9):
+        return True
+    if _fuzzy_contains(head, "notes to the financial statements", 0.84) or _fuzzy_contains(head, "notes to financial statements", 0.84):
+        return True
+
+    contents_phrase_count = sum(
+        1
+        for phrase in (
+            "table of contents",
+            "contents",
+            "statement of profit or loss",
+            "statement of comprehensive income",
+            "statement of financial position",
+            "statement of changes in equity",
+            "statement of changes in accumulated fund",
+            "statement of cash flows",
+            "cash flow statement",
+        )
+        if _fuzzy_contains(head, phrase, 0.75)
+    )
+
+    statement_line_hits = 0
+    for line in raw_lines[:45]:
+        normalised = _normalise_match_words(line.lower())
+        if re.search(r"\.{2,}\s*\d{1,4}\b", normalised):
+            statement_line_hits += 1
+            continue
+        has_statement_name = any(
+            token in normalised
+            for token in (
+                "statement of profit or loss",
+                "statement of comprehensive income",
+                "statement of financial position",
+                "statement of changes in equity",
+                "statement of changes in accumulated fund",
+                "statement of cash flows",
+                "balance sheet",
+            )
+        )
+        if has_statement_name:
+            statement_line_hits += 1
+    return contents_phrase_count >= 1 and statement_line_hits >= 1
+
+
+
+def _is_ocr_wrap_merge_candidate(previous_line: str, next_line: str) -> bool:
+    if not previous_line or not next_line:
+        return False
+    previous_text = previous_line.strip()
+    next_text = next_line.strip()
+    if len(previous_text.split()) > 12 or len(next_text.split()) > 12:
+        return False
+    if re.search(r"\d", previous_text) or re.search(r"\d", next_text):
+        return False
+    if re.search(r"[.!?;:)]$", previous_text):
+        return False
+    if re.search(r"^\(?\d", next_text):
+        return False
+    if previous_text.endswith("-"):
+        return True
+    if not re.match(r".*[A-Za-z]$", previous_text):
+        return False
+    if not re.match(r"^[a-z]", next_text.lower()):
+        return False
+    return True
+
+
+def _flatten_wrapped_statements(text: str) -> str:
+    lines = [re.sub(r"\s+", " ", line.strip()) for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    merged_lines: list[str] = []
+    for raw_line in lines:
+        if not merged_lines:
+            merged_lines.append(raw_line)
+            continue
+        previous_index = len(merged_lines) - 1
+        if _is_ocr_wrap_merge_candidate(merged_lines[previous_index], raw_line):
+            merged_lines[previous_index] = f"{merged_lines[previous_index]} {raw_line}"
+        else:
+            merged_lines.append(raw_line)
+    return "\n".join(merged_lines)
+
+
+
+def _extract_content_line_page_reference(line: str, page_count: int) -> int | None:
+    if not line:
+        return None
+    clean_line = re.sub(r"\s+", " ", line).strip()
+    patterns = (
+        r"(?<!\d)(\d{1,4})(?=\s*\.{2,}\s*$)",
+        r"(?<!\d)(\d{1,4})(?=\s*$)",
+        r"\(\s*(\d{1,4})\s*\)\s*$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, clean_line)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+    fallback = re.sub(r"[^0-9]", " ", clean_line).split()
+    for token in reversed(fallback):
+        if token.isdigit() and 1 <= len(token) <= 4:
+            value = int(token)
+            if 1 <= value <= max(page_count * 4, 40):
+                return value
+    return None
+
+
 def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
     aliases = {
         "Statement of income and expenditure": (
@@ -4531,36 +4818,128 @@ def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
             "statement of comprehensive income",
             "statement of profit or loss",
             "statement of income and expenditure",
+            "statement of income",
         ),
         "Statement of financial position": ("statement of financial position", "balance sheet"),
         "Statement of changes in accumulated fund": (
             "statement of changes in accumulated fund",
             "statement of changes in equity",
+            "changes in accumulated fund",
+            "changes in equity",
         ),
-        "Statement of cash flows": ("statement of cash flows", "cash flow statement"),
+        "Statement of cash flows": (
+            "statement of cash flows",
+            "cash flow statement",
+            "statement of cash flow",
+        ),
     }
     refs: dict[str, int] = {}
     for page in document.pages:
-        if not _looks_like_contents_or_front_matter_page(page.text):
+        if not _looks_like_contents_page(page.text):
             continue
-        for raw_line in page.text.splitlines()[:80]:
+        raw_lines = [re.sub(r"\s+", " ", line.strip()) for line in page.text.splitlines() if line.strip()]
+        # include a compact OCR-only reconstructed line set to recover broken lines.
+        raw_lines.extend(_flatten_wrapped_statements(page.text).splitlines()[:40])
+        for raw_line in raw_lines[:140]:
             line = re.sub(r"\s+", " ", raw_line.strip())
             if not line:
                 continue
-            number_match = re.search(r"(\d{1,3})\s*$", line)
-            if not number_match:
+            clean_line = re.sub(r"\.{2,}\s*", " ", line)
+            page_ref = _extract_content_line_page_reference(clean_line, len(document.pages))
+            if page_ref is None:
+                continue
+            if page_ref < 1:
                 continue
             normalised = _normalise_match_words(line)
-            page_ref = int(number_match.group(1))
             for canonical, candidates in aliases.items():
                 if canonical in refs:
                     continue
-                if any(_normalise_match_words(candidate) in normalised for candidate in candidates):
-                    refs[canonical] = page_ref
+                for candidate in candidates:
+                    normalized_candidate = _normalise_match_words(candidate)
+                    if not normalized_candidate:
+                        continue
+                    if candidate.lower() in line.lower() or _fuzzy_contains(line, candidate, 0.82) or _fuzzy_contains(normalised, normalized_candidate, 0.82):
+                        refs[canonical] = page_ref
+                        break
+                if canonical in refs:
                     break
     return refs
+def _physical_page_for_printed(document: PdfDocument, printed_page: int) -> int | None:
+    printed_index = _printed_page_number_map(document)
+    # Prefer explicit printed page mapping when available.
+    reverse_map = {value: page for page, value in printed_index.items()}
+    if printed_page in reverse_map:
+        return reverse_map[printed_page]
+    # Conservative fallback for documents without printed footers.
+    if 1 <= printed_page <= len(document.pages):
+        return printed_page
+    return None
 
 
+def _contents_statement_page_agreement_note(
+    document: PdfDocument,
+) -> tuple[list[str], list[str], list[Finding]]:
+    performed: list[str] = []
+    skipped: list[str] = []
+    findings: list[Finding] = []
+    references = _contents_statement_page_refs(document)
+    if not references:
+        skipped.append("Contents agreement: skipped because statement references in contents were not detected.")
+        return performed, skipped, findings
+
+    classified = _classified_primary_statement_pages(document)
+    performed.append("Contents-page agreement was reviewed for detected primary statements.")
+
+    for canonical_name in sorted(references):
+        expected_page = references.get(canonical_name)
+        if expected_page is None:
+            continue
+        detected = classified.get(canonical_name)
+        if not detected:
+            skipped.append(
+                f"Contents agreement: '{canonical_name}' appears in contents (page {expected_page}) but its statement page was not detected."
+            )
+            continue
+
+        detected_printed = _reviewer_page_number(document, detected.number)
+        mapped = _physical_page_for_printed(document, expected_page)
+        if mapped is None:
+            skipped.append(
+                f"Contents agreement: could not map contents reference page {expected_page} for '{canonical_name}' to a document page."
+            )
+            continue
+
+        mapped_printed = _reviewer_page_number(document, mapped)
+        page_delta = detected_printed - expected_page
+        if detected_printed == expected_page or detected_printed == mapped_printed:
+            performed.append(
+                f"Contents agreement: '{canonical_name}' detected on page {detected_printed} and matches contents page {expected_page}."
+            )
+        else:
+            confidence = "Low" if document.ocr_used else ("Medium" if document.table_extraction_confidence >= 80 else "Low")
+            findings.append(
+                Finding(
+                    "Document structure",
+                    confidence,
+                    f"Page {detected_printed} | Contents alignment",
+                    "Contents mismatch detected.",
+                    f"Contents lists '{canonical_name}' on page {expected_page}, but extracted statement page is {detected_printed}. Page offset from contents to extracted page is {page_delta:+d}.",
+                    "Verify page numbering interpretation and confirm if this is a cover page offset, rotated-page offset, or an index reference.",
+                    {
+                        "check_type": "Contents agreement",
+                        "canonical_statement": canonical_name,
+                        "contents_page": str(expected_page),
+                        "detected_page": str(detected_printed),
+                        "mapped_page": str(mapped_printed),
+                        "page_delta": str(page_delta),
+                    },
+                )
+            )
+
+    if not performed:
+        performed.append("Contents-page agreement could not be fully validated because statement pages were not confidently classified.")
+
+    return performed, skipped, findings
 def _looks_like_contents_or_front_matter_page(text: str) -> bool:
     head = "\n".join(text.splitlines()[:40]).lower()
     if re.search(r"\b(table of )?contents\b", head):
@@ -5030,6 +5409,234 @@ def _equity_direct_movement_amount(lines: list[str]) -> Decimal:
 
 
 
+
+
+def _safe_amount_pair_from_row(values: list[Decimal]) -> tuple[Decimal | None, Decimal | None]:
+    if not values:
+        return (None, None)
+    if len(values) >= 2:
+        return (values[0], values[1])
+    return (values[0], None)
+
+
+def _cross_source_confidence(document: PdfDocument) -> str:
+    if getattr(document, "ocr_used", False):
+        return "Low"
+    if document.table_extraction_confidence >= 80:
+        return "Medium"
+    return "Low"
+
+
+def _cross_source_note_amounts(note_sections: dict[str, str], aliases: tuple[str, ...]) -> tuple[list[Decimal], str]:
+    for ref, section in note_sections.items():
+        rows = _statement_rows(section)
+        values = _row_amounts_any(rows, aliases)
+        if values:
+            return values, ref
+    return [], ""
+
+
+def _check_cross_source_cash_flow(
+    document: PdfDocument,
+    tolerance: Decimal,
+) -> tuple[list[Finding], list[str], list[str]]:
+    findings: list[Finding] = []
+    performed: list[str] = []
+    skipped: list[str] = []
+
+    sfp_page = _find_statement_page(document, "Statement of financial position")
+    cf_page = _find_statement_page(document, "Statement of cash flows")
+    is_page = _find_statement_page(document, "Statement of profit or loss")
+    ce_page = _find_statement_page(document, "Statement of changes in equity")
+
+    if not (sfp_page and cf_page):
+        skipped.append("Cross-source cash flow check skipped: statement of financial position and statement of cash flows were both not detected.")
+        return findings, performed, skipped
+
+    sfp_rows = _statement_rows(sfp_page.text)
+    cf_rows = _statement_rows(cf_page.text, "Statement of cash flows")
+    is_rows = _statement_rows(is_page.text) if is_page else {}
+    ce_rows = _statement_rows(ce_page.text) if ce_page else {}
+    conf = _cross_source_confidence(document)
+    note_sections = _note_sections(document)
+    cf_from_notes = bool(note_sections)
+
+    sfp_cash = _row_amounts_any(sfp_rows, ("cash and cash equivalents", "cash and cash equivalents at end", "cash at end"))
+    cf_open = _row_amounts_any(
+        cf_rows,
+        (
+            "cash and cash equivalents at beginning",
+            "cash and cash equivalents at the beginning of the year",
+            "cash at beginning",
+            "opening cash",
+            "cash and cash equivalents at beginning of year",
+        ),
+    )
+    cf_close = _row_amounts_any(
+        cf_rows,
+        (
+            "cash and cash equivalents at end",
+            "cash and cash equivalents at the end of the year",
+            "cash at end",
+            "closing cash",
+            "cash and cash equivalents at end of year",
+        ),
+    )
+    cf_movement = _row_amounts_any(
+        cf_rows,
+        (
+            "net increase in cash and cash equivalents",
+            "net decrease in cash and cash equivalents",
+            "cash movement for the year",
+            "net increase in cash",
+            "net movement in cash and cash equivalents",
+        ),
+    )
+
+    note_cf_open, note_cf_open_ref = _cross_source_note_amounts(
+        note_sections,
+        (
+            "cash and cash equivalents at beginning",
+            "cash and cash equivalents at the beginning of the year",
+            "cash at beginning",
+            "opening cash",
+            "cash and cash equivalents at beginning of year",
+        ),
+    )
+    note_cf_close, note_cf_close_ref = _cross_source_note_amounts(
+        note_sections,
+        (
+            "cash and cash equivalents at end",
+            "cash and cash equivalents at the end of the year",
+            "cash at end",
+            "closing cash",
+            "cash and cash equivalents at end of year",
+        ),
+    )
+    note_cf_movement, note_cf_movement_ref = _cross_source_note_amounts(
+        note_sections,
+        (
+            "net increase in cash and cash equivalents",
+            "net decrease in cash and cash equivalents",
+            "cash movement for the year",
+            "net increase in cash",
+            "net movement in cash and cash equivalents",
+        ),
+    )
+
+    if not cf_open and note_cf_open:
+        cf_open = note_cf_open
+    if not cf_close and note_cf_close:
+        cf_close = note_cf_close
+    if not cf_movement and note_cf_movement:
+        cf_movement = note_cf_movement
+
+    sfp_open = sfp_current = sfp_prior = None
+    if sfp_cash:
+        sfp_current, sfp_prior = _safe_amount_pair_from_row(sfp_cash)
+
+    if sfp_current is not None and sfp_prior is not None and cf_open and cf_close:
+        source = "primary statements"
+        if (cf_open in (note_cf_open, note_cf_close) or cf_close in (note_cf_open, note_cf_close)) and not is_rows:
+            source = "primary statements with note fallback"
+        performed.append(
+            f"Cross-source cash flow check: opening and closing balances reconciled between SFP and CFS ({source})."
+        )
+        if len(cf_open) >= 1 and abs(cf_open[0] - sfp_prior) > tolerance:
+            findings.append(
+                Finding(
+                    "Cash flow consistency",
+                    "Medium" if conf == "Medium" else "Low",
+                    f"Page {cf_page.number} | Statement of cash flows",
+                    "Opening cash in the statement of cash flows does not match SFP prior-year closing cash.",
+                    f"SFP prior-year cash and cash equivalents: {sfp_prior:,}; CFS opening cash: {cf_open[0]:,}.",
+                    "Align the CFS opening cash line with prior-year SFP ending cash and cash equivalents.",
+                    {
+                        "check_type": "Cross-source cash flow consistency",
+                        "match_confidence": conf,
+                        "cf_open_note_ref": note_cf_open_ref,
+                        "cf_page": str(cf_page.number),
+                    },
+                )
+            )
+        if len(cf_close) >= 1 and abs(cf_close[0] - sfp_current) > tolerance:
+            findings.append(
+                Finding(
+                    "Cash flow consistency",
+                    "Medium" if conf == "Medium" else "Low",
+                    f"Page {cf_page.number} | Statement of cash flows",
+                    "Closing cash in the statement of cash flows does not match SFP current-year ending cash.",
+                    f"SFP current-year cash and cash equivalents: {sfp_current:,}; CFS closing cash: {cf_close[0]:,}.",
+                    "Align the CFS closing cash line with current-year SFP ending cash and cash equivalents.",
+                    {
+                        "check_type": "Cross-source cash flow consistency",
+                        "match_confidence": conf,
+                        "cf_close_note_ref": note_cf_close_ref,
+                        "cf_page": str(cf_page.number),
+                    },
+                )
+            )
+        if cf_movement and abs(cf_open[0] + cf_movement[0] - cf_close[0]) > tolerance:
+            findings.append(
+                Finding(
+                    "Cash flow consistency",
+                    "Medium" if conf == "Medium" else "Low",
+                    f"Page {cf_page.number} | Statement of cash flows",
+                    "Net movement in cash does not reconcile opening and closing balances.",
+                    f"Opening {cf_open[0]:,}; movement {cf_movement[0]:,}; closing {cf_close[0]:,}.",
+                    "Review movement and opening/closing lines in the statement of cash flows and related notes.",
+                    {
+                        "check_type": "Cross-source cash flow consistency",
+                        "match_confidence": conf,
+                        "cf_movement_note_ref": note_cf_movement_ref,
+                        "cf_page": str(cf_page.number),
+                    },
+                )
+            )
+    elif cf_from_notes:
+        performed.append("Cross-source cash flow note fallback values were located for cash-flow reconciliation.")
+    else:
+        skipped.append("Cross-source cash flow check skipped: opening, closing, and prior-year cash comparisons were not available at reliable width from SFP and CFS.")
+
+    is_pat = _row_amounts_any(is_rows, ("profit after tax", "loss after tax", "profit for the year", "loss for the year"))
+    ce_pat = _row_amounts_any(ce_rows, ("profit for the year", "loss for the year", "profit or loss for the period"))
+    if (not is_pat or not ce_pat) and note_sections:
+        note_is_pat, note_is_pat_ref = _cross_source_note_amounts(
+            note_sections,
+            ("profit after tax", "loss after tax", "profit for the year", "loss for the year", "comprehensive income for the year"),
+        )
+        note_ce_pat, note_ce_pat_ref = _cross_source_note_amounts(
+            note_sections,
+            ("profit for the year", "loss for the year", "profit or loss for the period", "total comprehensive income"),
+        )
+        if not is_pat and note_is_pat:
+            is_pat = note_is_pat
+        if not ce_pat and note_ce_pat:
+            ce_pat = note_ce_pat
+
+    if is_pat and ce_pat:
+        performed.append("Cross-source cash flow check: income statement result compared to equity movement reference where available.")
+        if abs(is_pat[0] - ce_pat[0]) > tolerance * 10:
+            findings.append(
+                Finding(
+                    "Cash flow consistency",
+                    "Low",
+                    f"Page {is_page.number if is_page else cf_page.number} | Income-to-equity cross-source",
+                    "Result for the year differs between profit statement and changes in equity references.",
+                    f"Income statement amount: {is_pat[0]:,}; changes in equity reference: {ce_pat[0]:,}.",
+                    "Use the note reconciliations to confirm whether this is an additive/subtractive equity movement disclosure.",
+                    {
+                        "check_type": "Cross-source cash flow consistency",
+                        "match_confidence": "Low",
+                    },
+                )
+            )
+    elif is_pat or ce_pat:
+        skipped.append("Cross-source income-to-equity linkage skipped because only one of income or equity reference lines was confidently parsed.")
+    if not performed and not findings:
+        skipped.append("Cross-source cash flow check completed without actionable findings.")
+
+    return findings, performed, skipped
 
 
 
@@ -6342,7 +6949,7 @@ def _check_boilerplate_policy_language(findings: list[Finding], document: PdfDoc
 
 def _contextual_currency_markers(document: PdfDocument) -> list[str]:
     markers: list[str] = []
-    currency_re = re.compile(r"\bUSD\b|\bNGN\b|\bGBP\b|\bEUR\b|US\$|\bNaira\b|\bDollar\b|\bPound\b|\bEuro\b|₦|N['’]?\s?000|N000|\$", re.I)
+    currency_re = re.compile(r"\bUSD\b|\bNGN\b|\bGBP\b|\bEUR\b|US\$|\bNaira\b|\bDollar\b|\bPound\b|\bEuro\b|\u20a6|N[\'\u2019]?\s?000|N000|\$", re.I)
     context_re = re.compile(
         r"statement of|presentation currency|functional currency|expressed in|presented in|currency:|n'000|ngn'000|usd'000",
         re.I,
@@ -6364,32 +6971,37 @@ def _contextual_currency_markers(document: PdfDocument) -> list[str]:
 
 
 def _normalise_currency_marker(marker: str) -> str:
-    normalized_marker = re.sub(r"\s+", "", marker.upper().replace("â€™", "'").replace("’", "'").replace("‘", "'"))
-    if normalized_marker in {"₦", "₦'000", "NGN'000", "N'000", "N000"}:
+    normalized_marker = re.sub(r"\s+", "", marker.upper())
+    normalized_marker = normalized_marker.replace(chr(0x2019), "'").replace(chr(0x2018), "'").replace("`", "'")
+    normalized_marker = normalized_marker.replace(chr(0x20A6), "NGN")
+    if normalized_marker in {"NGN", "NGN'000", "N'000", "N000", "NIGERIA"}:
         return "NGN"
-    marker_upper = re.sub(r"\s+", "", marker.upper().replace("’", "'"))
-    if marker_upper in {"NAIRA", "NGN", "₦", "N'000", "N000"}:
+    if re.fullmatch(r"N[^A-Z0-9]{0,2}000", normalized_marker):
         return "NGN"
-    if marker_upper in {"DOLLAR", "US$", "$", "USD"}:
+    if normalized_marker in {"NAIRA", "NIGERIANNAIRA"}:
+        return "NGN"
+    if normalized_marker in {"DOLLAR", "US$", "USD", "$"}:
         return "USD"
-    if marker_upper == "POUND":
+    if normalized_marker == "POUND":
         return "GBP"
-    if marker_upper == "EURO":
+    if normalized_marker == "EURO":
         return "EUR"
-    return marker_upper
-
+    return normalized_marker
 
 def normalize_reporting_currency(value: str) -> str:
-    normalized_value = re.sub(r"\s+", "", value.strip().upper().replace("â€™", "'").replace("’", "'").replace("‘", "'"))
-    if re.search(r"(?:NGN|NAIRA|NIGERIANNAIRA|₦|N'?000)", normalized_value):
+    normalized_value = re.sub(r"\s+", "", value.strip().upper())
+    normalized_value = normalized_value.replace(chr(0x2019), "'").replace(chr(0x2018), "'").replace("`", "'")
+    normalized_value = normalized_value.replace(chr(0x20A6), "NGN")
+    if normalized_value in {"", None}:
+        return ""
+    if re.fullmatch(r"N[^A-Z0-9]{0,2}000", normalized_value):
         return "NGN"
-    cleaned = re.sub(r"\s+", "", value.strip().upper().replace("’", "'"))
+    if re.search(r"(?:NGN|NAIRA|NIGERIANNAIRA|N'000|N000|NIGNAIRA|NGN000)", normalized_value):
+        return "NGN"
     aliases = {
-        "": "",
         "NAIRA": "NGN",
         "NIGERIANNAIRA": "NGN",
         "NGN": "NGN",
-        "₦": "NGN",
         "N'000": "NGN",
         "N000": "NGN",
         "N'000S": "NGN",
@@ -6407,8 +7019,7 @@ def normalize_reporting_currency(value: str) -> str:
         "CAD": "CAD",
         "AUD": "AUD",
     }
-    return aliases.get(cleaned, cleaned if cleaned in VALID_CURRENCIES else "")
-
+    return aliases.get(normalized_value, normalized_value if normalized_value in VALID_CURRENCIES else "")
 
 def _policy_evidence_present(policy_name: str, evidence_keywords: tuple[str, ...], text: str) -> bool:
     if policy_name == "consolidation":
@@ -6656,8 +7267,8 @@ def _presentation_scale_context(text: str) -> str:
         "n '000",
         "ngn'000",
         "ngn '000",
-        "₦'000",
-        "₦ '000",
+        "\u20a6\'000",
+        "\u20a6 \'000",
         "in thousands",
         "nearest thousand",
         "in millions",
@@ -6673,7 +7284,7 @@ def _presentation_scale_context(text: str) -> str:
         if any(term in lower for term in presentation_terms):
             relevant_lines.append(lower)
             continue
-        if re.search(r"\b20\d{2}\b", lower) and re.search(r"n\s*['’`]\s*000|ngn|₦", lower):
+        if re.search(r"\b20\d{2}\b", lower) and re.search(r"n\s*[\'\u2019`]\s*000|ngn|\u20a6", lower):
             relevant_lines.append(lower)
     return "\n".join(relevant_lines) if relevant_lines else text.lower()
 
@@ -7538,6 +8149,14 @@ def _check_possible_wrong_note_references(
         referenced = referenced or ""
         referenced_match = _note_match_strength(item, referenced_heading, referenced, tolerance)
         referenced_heading_score = max(_wording_match_score(item.line_item, referenced_heading), _semantic_heading_score(item.line_item, referenced_heading))
+        compatibility_rule = _note_compatibility_rule(item.line_item)
+        referenced_incompatible = bool(
+            compatibility_rule
+            and referenced_heading
+            and not _note_heading_semantically_compatible(item.line_item, referenced_heading, referenced)
+        )
+        if referenced_incompatible:
+            referenced_heading_score = max(0.0, referenced_heading_score - 0.45)
         best_ref = ""
         best_score = -1
         best_match: dict[str, bool] = {"wording": False, "amount": False}
@@ -7560,6 +8179,44 @@ def _check_possible_wrong_note_references(
                 best_match = other_match
                 best_heading_score = max(_wording_match_score(item.line_item, other_heading), _semantic_heading_score(item.line_item, other_heading))
 
+        if referenced_incompatible:
+            compatibility_label = _note_compatibility_label(item.line_item)
+            best_heading = _get_note_heading_with_fallback(best_ref, headings) if best_ref else ""
+            best_compatible = bool(best_ref and _note_heading_semantically_compatible(item.line_item, best_heading, _get_note_section_with_fallback(best_ref, note_sections, document) if document else _get_note_section_with_fallback(best_ref, note_sections)))
+            if best_compatible and best_heading_score >= 0.82:
+                confidence = "Medium" if best_match.get("amount") else "Low"
+                if cautious_review_prompt and confidence == "Medium":
+                    confidence = "Low"
+                findings.append(
+                    _note_reference_review_prompt(
+                        item,
+                        best_ref,
+                        confidence,
+                        f"Referenced note heading is not compatible with the {compatibility_label} line item; Note {best_ref} appears more compatible.",
+                        cautious_review_prompt,
+                        explicit_issue=(
+                            f"Note heading mismatch: {item.line_item.title()} references Note {item.ref} heading '{referenced_heading}', "
+                            f"but Note {best_ref} heading '{best_heading}' appears more compatible."
+                        ),
+                    )
+                )
+                flagged.add((item.ref, item.line))
+            elif not referenced_match["amount"] and not best_ref:
+                findings.append(
+                    _note_reference_review_prompt(
+                        item,
+                        "",
+                        "Low",
+                        f"Referenced note heading is not compatible with the {compatibility_label} line item and no compatible alternative was identified.",
+                        cautious_review_prompt,
+                        explicit_issue=(
+                            f"Note heading mismatch: {item.line_item.title()} references Note {item.ref}, "
+                            f"whose heading '{referenced_heading}' is not compatible with the line item."
+                        ),
+                    )
+                )
+                flagged.add((item.ref, item.line))
+
         if (best_match["amount"] and not referenced_match["amount"]) or (
             best_heading_score > referenced_heading_score + 0.3 and best_match["wording"] and not referenced_match["amount"]
         ):
@@ -7578,6 +8235,12 @@ def _check_possible_wrong_note_references(
             if cautious_review_prompt and confidence == "High":
                 confidence = "Medium"
             if cautious_review_prompt and confidence == "Low":
+                continue
+            if best_ref and not _note_heading_semantically_compatible(
+                item.line_item,
+                _get_note_heading_with_fallback(best_ref, headings),
+                _get_note_section_with_fallback(best_ref, note_sections, document) if document else _get_note_section_with_fallback(best_ref, note_sections),
+            ):
                 continue
             findings.append(_note_reference_review_prompt(item, best_ref, confidence, f"Amount or stronger wording match found in Note {best_ref}.", cautious_review_prompt))
             flagged.add((item.ref, item.line))
@@ -7651,9 +8314,12 @@ def _note_reference_review_prompt(
     confidence: str,
     reason: str,
     cautious_review_prompt: bool,
+    explicit_issue: str | None = None,
 ) -> Finding:
     category = "Notes agreement"
-    if "cash flow" in item.statement_name.lower() and not suggested_ref:
+    if explicit_issue:
+        issue = explicit_issue
+    elif "cash flow" in item.statement_name.lower() and not suggested_ref:
         issue = "Note reference on statement of cash flows not found in the notes."
         evidence = f"Note reference '{item.ref}' for {item.line_item.title()} was not found."
         confidence = "Medium" # Mark as Review prompt
@@ -7937,14 +8603,18 @@ def _heading_only_alternative_is_review_prompt(line_item: str, note_heading: str
 def _semantic_heading_score(line_item: str, note_heading: str) -> float:
     item = _normalise_match_words(line_item)
     heading = _normalise_match_words(note_heading)
+    if not item or not heading:
+        return 0.0
+    if "current tax" in item:
+        return 0.9 if any(term in heading for term in ("current tax", "current tax receivable", "current tax payable")) else 0.0
+    if "deferred tax" in item:
+        return 0.9 if "deferred tax" in heading else 0.0
+    if _note_compatibility_rule(item) and _note_heading_semantically_compatible(item, heading):
+        return 0.88
     if _is_revenue_line_item(item) and _revenue_alternative_heading_allowed(heading):
         return 0.86
     if any(term in item for term in ("cash", "bank", "cash equivalents")) and any(term in heading for term in ("cash", "bank", "cash equivalents")):
         return 0.86
-    if "current tax" in item and any(term in heading for term in ("current tax", "current tax receivable", "current tax payable")):
-        return 0.9
-    if "deferred tax" in item and "deferred tax" in heading:
-        return 0.9
     if "tax" in item and "tax" in heading:
         return 0.82
     return 0.0
@@ -7953,10 +8623,14 @@ def _semantic_heading_score(line_item: str, note_heading: str) -> float:
 def _alternative_note_semantically_allowed(line_item: str, note_heading: str, note_section: str = "") -> bool:
     item = _normalise_match_words(line_item)
     heading = _normalise_match_words(note_heading)
+    if not item or not heading:
+        return False
     if "current tax" in item:
         return any(term in heading for term in ("current tax", "current tax receivable", "current tax payable"))
     if "deferred tax" in item:
         return "deferred tax" in heading
+    if _note_compatibility_rule(item):
+        return _note_heading_semantically_compatible(item, heading, note_section)
     if "tax" in item:
         return "tax" in heading
     if any(term in item for term in ("cash", "bank", "cash equivalents")):
@@ -8429,7 +9103,7 @@ def _clean_note_title(title: str) -> str:
     title = re.sub(r"^[^\w(]+", "", title.strip())
     title = re.sub(r"\s*\(?continued\)?\s*$", "", title, flags=re.I)
     title = re.sub(r"(?:\s+20\d{2}){1,3}\s*$", "", title)
-    title = re.sub(r"\s+(?:N['’]?\s?000|\$?000s?)(?:\s+(?:N['’]?\s?000|\$?000s?))*$", "", title, flags=re.I)
+    title = re.sub(r"\s+(?:N[\'\u2019]?\s?000|\$?000s?)(?:\s+(?:N[\'\u2019]?\s?000|\$?000s?))*$", "", title, flags=re.I)
     title = re.sub(r"\s+", " ", title).strip(" -:;,.")
     words: list[str] = []
     for word in title.split():
@@ -8577,3 +9251,12 @@ def _check_ocr_statement_of_cash_flows(document: PdfDocument, tolerance: Decimal
             else:
                 pass
     return findings
+
+
+
+
+
+
+
+
+

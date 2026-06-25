@@ -83,6 +83,8 @@ def test_write_review_outputs_creates_standard_artifacts(monkeypatch, tmp_path: 
     workbook = openpyxl.load_workbook(excel_path, data_only=True)
     assert "Summary" in workbook.sheetnames
     assert "AI policy judgement" in workbook.sheetnames
+    assert "AI finding review" in workbook.sheetnames
+    assert "AI evidence packs" in workbook.sheetnames
 
 
 def test_ai_verification_errors_flag_unavailable_statuses() -> None:

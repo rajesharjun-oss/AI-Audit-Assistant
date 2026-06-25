@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from job_runner import ai_verification_errors, write_review_outputs
-from models import CompanyProfile, ReviewOptions
+from models import CompanyProfile, DEFAULT_AI_MODEL, ReviewOptions
 from reviewer import findings_to_markdown, review_pdf
 
 
@@ -22,7 +22,7 @@ def main() -> int:
     parser.add_argument("--ocr-max-pages", type=int, default=60, help="Maximum scanned pages to OCR")
     parser.add_argument("--ocr-dpi", type=int, default=200, help="OCR render DPI, usually 150-300")
     parser.add_argument("--ai-policy-review", action="store_true", help="Run optional AI judgement for policy relevance, disclosure completeness, and industry fit")
-    parser.add_argument("--ai-model", default="gpt-5-mini", help="Model to use for optional AI policy judgement")
+    parser.add_argument("--ai-model", default=DEFAULT_AI_MODEL, help="Model to use for optional AI policy judgement")
     parser.add_argument("--output", type=Path, help="Optional markdown report path")
     parser.add_argument("--export-dir", type=Path, help="Optional directory for standard backend artifacts (Excel, markdown, JSON summary).")
     parser.add_argument("--skip-excel-export", action="store_true", help="When using --export-dir, skip the Excel exception register export.")

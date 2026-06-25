@@ -449,6 +449,7 @@ def test_optional_ai_policy_review_adds_findings_and_export(monkeypatch):
             summary="Lease policy wording may still reference a superseded standard.",
             status="completed",
             model="gpt-5-mini",
+            evidence_rows=[{"Evidence type": "Policy/note context", "Note reference": "Note 1", "Snippet": "IAS 17 current lease policy"}],
         ),
     )
 
@@ -458,6 +459,7 @@ def test_optional_ai_policy_review_adds_findings_and_export(monkeypatch):
     assert result.metrics["ai_policy_review_status"] == "completed"
     assert result.metrics["ai_policy_review_model"] == "gpt-5-mini"
     assert result.metrics["ai_policy_export"] == [{"Title": "Lease policy context", "Status": "review_prompt"}]
+    assert result.metrics["ai_evidence_packs"][0]["Evidence type"] == "Policy/note context"
     assert "AI policy and standards judgement completed using gpt-5-mini." in result.metrics["checks_performed"]
 
 
@@ -587,6 +589,7 @@ def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sh
             model="gpt-5-mini",
             reviewed_count=1,
             suppressed_count=1,
+            evidence_rows=[{"Evidence type": "Engine finding adjudication pack", "Finding ID": "F1", "Issue": low_finding.issue}],
         ),
     )
 
@@ -599,10 +602,14 @@ def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sh
 
     workbook = openpyxl.load_workbook(BytesIO(build_excel_export(result)), data_only=True)
     assert "AI finding review" in workbook.sheetnames
+    assert "AI evidence packs" in workbook.sheetnames
     ai_sheet = workbook["AI finding review"]
     rows = list(ai_sheet.iter_rows(min_row=2, values_only=True))
     assert rows
     assert any(str(row[2] or "").lower() == "low" for row in rows)
+    evidence_sheet = workbook["AI evidence packs"]
+    evidence_rows = list(evidence_sheet.iter_rows(min_row=2, values_only=True))
+    assert any("Engine finding adjudication pack" in str(row[0] or "") for row in evidence_rows)
 
 
 def test_ai_response_parser_accepts_nested_text_value_payload():
@@ -1698,6 +1705,84 @@ def test_notes_check_flags_possible_wrong_note_reference_when_item_is_in_another
     assert wrong_ref[0].metadata["suggested_note"] == "9"
 
 
+def test_note_reference_compatibility_is_generic_not_ppe_only():
+    filler = "Statement narrative text for extraction confidence. " * 80
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nIntangible assets 3 84,014 70,000\n" + filler, []),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "3 Investment property",
+                        "Fair value property 1,000 900",
+                        "4 Intangible assets",
+                        "Software 84,014 70,000",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    wrong_ref = [finding for finding in findings if "note heading mismatch" in finding.issue.lower()]
+    assert wrong_ref
+    assert "Intangible Assets references Note 3" in wrong_ref[0].issue
+    assert "Note 4" in wrong_ref[0].issue
+    assert wrong_ref[0].metadata["suggested_note"] == "4"
+
+
+def test_note_reference_compatibility_flags_liability_heading_mismatch():
+    filler = "Statement narrative text for extraction confidence. " * 80
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nTrade and other payables 5 526,917 311,755\n" + filler, []),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "5 Trade and other receivables",
+                        "Receivables 10,000 9,000",
+                        "6 Trade and other payables",
+                        "Accruals 526,917 311,755",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    wrong_ref = [finding for finding in findings if "note heading mismatch" in finding.issue.lower()]
+    assert wrong_ref
+    assert "Trade And Other Payables references Note 5" in wrong_ref[0].issue
+    assert wrong_ref[0].metadata["suggested_note"] == "6"
+
+
+def test_note_reference_compatibility_does_not_flag_matching_generic_heading():
+    filler = "Statement narrative text for extraction confidence. " * 80
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nCash and cash equivalents 7 39,387 193,627\n" + filler, []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n7 Cash and cash equivalents\nBank balances 39,387 193,627",
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    assert not any("note heading mismatch" in finding.issue.lower() for finding in findings)
+    assert not any("possible wrong note reference" in finding.issue.lower() for finding in findings)
+
+
 def test_wrong_note_reference_check_respects_low_confidence_gate():
     document = PdfDocument(
         [
@@ -2280,6 +2365,28 @@ def test_notes_agreement_is_conservative_for_ocr_documents():
     assert len(findings) == 1
     assert findings[0].category == "Extraction quality"
     assert "skipped for an ocr-assisted document" in findings[0].issue.lower()
+
+
+def test_non_exception_extraction_skip_messages_do_not_enter_findings():
+    document = PdfDocument([PdfPage(1, "Statement of financial position", [])], ocr_used=True, ocr_pages=1)
+    skipped_notice = reviewer.Finding(
+        "Extraction quality",
+        "Low",
+        "Notes agreement",
+        "Detailed note-reference reconciliation was skipped for an OCR-assisted document.",
+        "OCR can misread note columns and note tables.",
+        "Use OCR output for navigation, but rely on manual review for detailed agreement.",
+    )
+
+    result = reviewer._build_result(document, [skipped_notice])
+
+    assert result.findings == []
+    assert result.metrics["findings"] == 0
+    assert "Detailed note-reference reconciliation was skipped" in result.metrics["checks_skipped"]
+    assert any(
+        row["Result"].startswith("Skipped") and "Detailed note-reference reconciliation" in row["Check"]
+        for row in result.metrics["check_results"]
+    )
 
 
 def test_note_heading_detection_rejects_years_and_ocr_noise():
