@@ -454,6 +454,22 @@ def test_footnote_asterisks_are_not_unreadable_placeholders():
     assert not [finding for finding in check_extraction_quality(document) if "Unreadable or placeholder" in finding.issue]
 
 
+
+
+def test_signature_underscores_are_not_unreadable_placeholders():
+    document = PdfDocument(
+        [
+            PdfPage(
+                7,
+                "Approved by the board\n________________________\nDirector\nStatement of financial position",
+                [[["Approved by the board"], ["________________________"], ["Director"]]],
+            )
+        ]
+    )
+
+    assert document.unreadable_value_count == 0
+    assert not [finding for finding in check_extraction_quality(document) if "Unreadable or placeholder" in finding.issue]
+
 def test_optional_ai_policy_review_adds_findings_and_export(monkeypatch):
     filler = "Additional extracted policy context.\n" * 80
     document = PdfDocument(
