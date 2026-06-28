@@ -149,7 +149,7 @@ def build_excel_export(result) -> bytes:
 
         cross_export = result.metrics.get("cross_page_export", {})
         amount_rows = [
-            translate_row_page_fields(row, result, ("Pages checked", "Context", "Issue"))
+            translate_row_page_fields(row, result, ("Pages checked", "Page", "Context", "Issue"))
             for row in (cross_export.get("key_amounts", []) or [{"Metric": "None found"}])
         ]
         name_rows = [
@@ -227,7 +227,13 @@ def review_prompts_not_elevated_rows(result) -> list[dict[str, str]]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        cleaned.append(translate_row_page_fields(dict(row), result, ("Page reference", "Evidence", "Issue")))
+        # These rows are built after reviewer-page translation, so translating the
+        # page reference again would shift printed page numbers incorrectly.
+        translated = dict(row)
+        for field in ("Evidence", "Issue"):
+            if field in translated:
+                translated[field] = translate_page_tokens(translated.get(field, ""), result)
+        cleaned.append(translated)
     return cleaned
 
 
@@ -407,9 +413,29 @@ def translate_page_tokens(text: object, result) -> str:
 def translate_row_page_fields(row: dict[str, object], result, fields: tuple[str, ...]) -> dict[str, object]:
     translated = dict(row)
     for field in fields:
-        if field in translated:
-            translated[field] = translate_page_tokens(translated.get(field, ""), result)
+        if field not in translated:
+            continue
+        value = translated.get(field, "")
+        if field.lower() in {"page", "page 1", "page 2"}:
+            translated[field] = translate_bare_page_value(value, result)
+        else:
+            translated[field] = translate_page_tokens(value, result)
     return translated
+
+
+def translate_bare_page_value(value: object, result) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not re.fullmatch(r"[0-9,\sand\-]+", text, flags=re.I):
+        return translate_page_tokens(text, result)
+    translated: list[str] = []
+    for token in re.split(r"(\D+)", text):
+        if token.isdigit():
+            translated.append(str(reviewer_page_number(result, int(token))))
+        else:
+            translated.append(token)
+    return "".join(translated).strip()
 
 
 def parse_skipped_check(item: str) -> dict[str, str]:

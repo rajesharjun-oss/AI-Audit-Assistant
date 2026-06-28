@@ -267,15 +267,16 @@ def _policy_topics_for_text(text: str, policy_map: dict[str, bool]) -> list[str]
 
 
 def _note_page_reference(document: PdfDocument, ref: str, clean_text: str) -> str:
-    note_pattern = re.compile(rf"(?<!\d){re.escape(str(ref))}\s*[\).:-]?\s+", re.I)
-    seed = _clean_ai_snippet(clean_text)[:160]
-    seed_words = re.findall(r"[A-Za-z]{4,}", seed.lower())[:5]
+    note_pattern = re.compile(rf"(?<!\d)(?:note\s+)?{re.escape(str(ref))}\s*[\).:-]?\s+", re.I)
+    seed = _clean_ai_snippet(clean_text)[:220]
+    seed_words = [word for word in re.findall(r"[A-Za-z]{4,}", seed.lower()) if word not in {"octerra", "capital", "limited", "financial", "statements", "company"}][:6]
     for page in document.pages:
         page_clean = _clean_ai_snippet(page.text)
         page_lower = page_clean.lower()
-        if seed and seed[:80].lower() in page_lower:
+        note_match = note_pattern.search(page_clean)
+        if note_match and seed_words and sum(1 for word in seed_words if word in page_lower) >= min(3, len(seed_words)):
             return f"Page {page.number}"
-        if note_pattern.search(page_clean) and seed_words and sum(1 for word in seed_words if word in page_lower) >= min(3, len(seed_words)):
+        if str(ref).upper() == "1" and note_match and any(term in page_lower for term in ("accounting polic", "basis of preparation", "reporting entity")):
             return f"Page {page.number}"
     return "Page not isolated"
 

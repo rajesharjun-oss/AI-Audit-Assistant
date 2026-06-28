@@ -158,6 +158,13 @@ def _metric_page_is_excluded(page_text: str) -> bool:
     return any(marker in lower for marker in excluded_markers)
 
 
+def _metric_page_context_not_comparable(metric_name: str, page_text: str) -> bool:
+    lower = page_text.lower()
+    if metric_name in {"Profit after tax", "Total comprehensive income"} and "statement of changes" in lower:
+        return True
+    return False
+
+
 def _metric_line_is_comparable(metric_name: str, line: str) -> bool:
     lower = re.sub(r"\s+", " ", line.lower()).strip()
     if metric_name == "Revenue":
@@ -336,6 +343,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                 if pattern.match(line):
                     if _metric_page_is_excluded(text):
                         continue
+                    if _metric_page_context_not_comparable(metric_name, text):
+                        continue
                     if not _metric_line_is_comparable(metric_name, line):
                         continue
                     if metric_name == "Taxation" and "income tax expense" in line.lower() and not re.search(r"\d", line):
@@ -393,6 +402,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
             if prior_amt is not None:
                 all_prior_amts.add(_consistency_compare_value(metric_name, prior_amt))
         
+        val_map = _merge_equivalent_key_amounts(val_map)
         # If multiple different values found for the same metric
         val_keys = [k for k in val_map.keys() if k not in all_prior_amts]
         if len(val_keys) > 1:
@@ -538,6 +548,26 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     )
 
     return findings, export_data
+
+
+def _merge_equivalent_key_amounts(val_map: dict[Decimal, list[tuple[int, str, Decimal, int]]]) -> dict[Decimal, list[tuple[int, str, Decimal, int]]]:
+    if len(val_map) <= 1:
+        return val_map
+    sorted_keys = sorted(val_map)
+    merged: dict[Decimal, list[tuple[int, str, Decimal, int]]] = {}
+    consumed: set[Decimal] = set()
+    tolerance = Decimal("1")
+    for key in sorted_keys:
+        if key in consumed:
+            continue
+        group = [other for other in sorted_keys if other not in consumed and abs(other - key) <= tolerance]
+        canonical = max(group, key=lambda item: len(val_map[item]))
+        rows: list[tuple[int, str, Decimal, int]] = []
+        for item in group:
+            rows.extend(val_map[item])
+            consumed.add(item)
+        merged[canonical] = rows
+    return merged
 
 
 def _short_context(line: str, limit: int = 220) -> str:

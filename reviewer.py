@@ -622,7 +622,7 @@ def _split_elevated_findings(findings: list[Finding], document: PdfDocument) -> 
     for finding in findings:
         reason = _not_elevated_reason(finding, document)
         if reason:
-            not_elevated.append(_not_elevated_prompt_row(finding, reason))
+            not_elevated.append(_not_elevated_prompt_row(finding, reason, document))
             continue
         elevated.append(finding)
     return elevated, not_elevated
@@ -639,6 +639,8 @@ def _not_elevated_reason(finding: Finding, document: PdfDocument) -> str:
     confidence = str(metadata.get("match_confidence", "") or metadata.get("amount_match_confidence", "") or "").strip().lower()
     if finding.category == "Notes agreement" and confidence == "low":
         return "Low-confidence note agreement prompt; retained for review only until note extraction and matching are corroborated."
+    if finding.category == "Notes agreement" and any(term in str(finding.issue or "").lower() for term in ("amount", "note", "reference")):
+        return "Note agreement prompt retained for manual confirmation; statement and note page references are provided where the engine can infer them."
     if finding.category == "AI policy judgement":
         ai_confidence = str(metadata.get("match_confidence", "") or "").strip().lower()
         if ai_confidence == "low":
@@ -686,18 +688,41 @@ def _finding_has_note_evidence(finding: Finding) -> bool:
     return bool(re.search(r"\bNote\s+\d+[A-Z]?\b", text, flags=re.I))
 
 
-def _not_elevated_prompt_row(finding: Finding, reason: str) -> dict[str, str]:
+def _not_elevated_prompt_row(finding: Finding, reason: str, document: PdfDocument) -> dict[str, str]:
     metadata = finding.metadata or {}
+    note_reference = str(metadata.get("note_reference", "") or metadata.get("referenced_note", "") or metadata.get("suggested_note", "") or _note_reference_text(finding))
     return {
         "Severity": finding.severity,
         "Category": finding.category,
-        "Page reference": str(metadata.get("page_reference", "") or _page_reference_text(finding)),
-        "Note reference": str(metadata.get("note_reference", "") or metadata.get("referenced_note", "") or metadata.get("suggested_note", "") or _note_reference_text(finding)),
+        "Page reference": _not_elevated_page_reference(finding, document, note_reference),
+        "Note reference": note_reference,
         "Issue": finding.issue,
         "Evidence": finding.evidence,
         "Reason not elevated": reason,
         "Reviewer action": finding.recommendation or "Review the source page/note manually if this area is material.",
     }
+
+
+def _not_elevated_page_reference(finding: Finding, document: PdfDocument, note_reference: str = "") -> str:
+    metadata = finding.metadata or {}
+    pages: set[int] = set()
+    direct = str(metadata.get("page_reference", "") or _page_reference_text(finding)).strip()
+    for number in re.findall(r"\d+", direct):
+        pages.add(int(number))
+    statement_pages = _statement_reference_pages(document)
+    for ref in re.findall(r"\d+[A-Z]?", note_reference or ""):
+        page_text = statement_pages.get(ref.upper())
+        if page_text:
+            pages.update(int(number) for number in re.findall(r"\d+", page_text))
+    note_headings = _note_headings_by_page(document)
+    for ref in re.findall(r"\d+[A-Z]?", note_reference or ""):
+        heading = note_headings.get(ref.upper())
+        if heading:
+            pages.add(_reviewer_page_number(document, heading[1]))
+    if pages:
+        ordered = sorted(pages)
+        return f"Page {ordered[0]}" if len(ordered) == 1 else "Pages " + ", ".join(str(page) for page in ordered)
+    return ""
 
 
 def _page_reference_text(finding: Finding) -> str:
@@ -7768,7 +7793,7 @@ def _add_combined_note_heading_candidates(
 
 def _augment_note_headings_from_statement_refs(headings: dict[str, tuple[str, int]], document: PdfDocument) -> None:
     for item in _statement_note_lines(document):
-        if not item.line_item:
+        if not item.line_item or item.ref == "1":
             continue
         title = _statement_line_item_title(item.line_item)
         existing = headings.get(item.ref)
@@ -8591,6 +8616,8 @@ def _note_heading_allows_signless_amount_match(note_heading: str, note_section: 
     return (
         "payable" in combined and "receivable" in combined
     ) or (
+        "current tax" in combined and ("payable" in combined or "receivable" in combined)
+    ) or (
         "asset" in combined and "liabilit" in combined
     ) or (
         "taxation" in combined or "deferred tax" in combined or "tax expense" in combined
@@ -9123,6 +9150,8 @@ def _valid_note_heading(number: str, title: str) -> bool:
         return False
     if title_lower in {"december", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november"}:
         return False
+    if title_lower.startswith("per ") or title_lower in {"per annum", "per month", "per year"}:
+        return False
     if YEAR_RE.search(title_clean) and len(words) <= 4:
         return False
     return bool(re.search(r"[A-Za-z]{3,}", title_clean))
@@ -9239,6 +9268,7 @@ def _clean_note_title(title: str) -> str:
     title = re.sub(r"(?:\s+20\d{2}){1,3}\s*$", "", title)
     title = re.sub(r"\s+(?:N[\'\u2019]?\s?000|\$?000s?)(?:\s+(?:N[\'\u2019]?\s?000|\$?000s?))*$", "", title, flags=re.I)
     title = re.sub(r"\s+", " ", title).strip(" -:;,.")
+    title = re.sub(r"\s+[DRAFT]$", "", title).strip(" -:;,.")
     words: list[str] = []
     for word in title.split():
         match = re.match(r"^([A-Za-z]+)([^A-Za-z]*)$", word)

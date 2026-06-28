@@ -71,3 +71,23 @@ def test_note_low_confidence_prompt_is_not_hidden_or_counted_as_exception():
     row = result.metrics["review_prompts_not_elevated"][0]
     assert row["Note reference"] == "5"
     assert "Low-confidence note agreement" in row["Reason not elevated"]
+
+
+def test_key_amount_consistency_page_column_uses_reviewer_page_numbers():
+    from report_exports import translate_row_page_fields
+
+    class Result:
+        metrics = {"printed_page_map": {"4": 3, "13": 12, "37": 36}}
+
+    row = {
+        "Metric": "Taxation",
+        "Amount": "19,185",
+        "Page": "4",
+        "Context": "Page 4: Taxation 19,185 -",
+        "Issue": "Discrepancy",
+    }
+
+    translated = translate_row_page_fields(row, Result(), ("Pages checked", "Page", "Context", "Issue"))
+
+    assert translated["Page"] == "3"
+    assert translated["Context"] == "Page 3: Taxation 19,185 -"

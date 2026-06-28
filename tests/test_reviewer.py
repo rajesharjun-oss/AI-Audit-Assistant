@@ -125,6 +125,35 @@ def test_revenue_consistency_skips_policy_heading_context():
     assert any(row["Metric"] == "Revenue" for row in export["key_amounts"])
 
 
+def test_profit_after_tax_consistency_ignores_statement_of_changes_rows():
+    document = PdfDocument([
+        PdfPage(4, "Directors report\nProfit for the year 760,902 (691,976)", []),
+        PdfPage(13, "Statement of profit or loss\nProfit for the year 760,902 (691,976)", []),
+        PdfPage(14, "Statement of changes in equity\nLoss for the year - (691,976) (691,976)\nProfit for the year - 760,902 760,902", []),
+    ])
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not any(finding.category == "Consistency" and "Profit after tax" in finding.issue for finding in findings)
+    row = next(row for row in export["key_amounts"] if row["Metric"] == "Profit after tax")
+    assert row["Amount"] == "760,902"
+    assert row["Pages checked"] == "Pages 4, 13"
+
+
+def test_taxation_key_amount_allows_opposite_sign_rounding_difference():
+    document = PdfDocument([
+        PdfPage(3, "Directors report\nTaxation 19,185 -", []),
+        PdfPage(12, "Statement of profit or loss\nTaxation 19 19,185 -", []),
+        PdfPage(36, "19. Taxation\nCurrent tax 30,105 -\nDeferred tax (49,289) -\n(19,184) -", []),
+    ])
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not any(finding.category == "Consistency" and "Taxation varies" in finding.issue for finding in findings)
+    taxation_row = next(row for row in export["key_amounts"] if row["Metric"] == "Taxation")
+    assert taxation_row["Issue"] == "Consistent"
+
+
 def test_name_consistency_ignores_internal_control_headings():
     document = PdfDocument(
         [
@@ -193,6 +222,20 @@ def test_cash_flow_without_financing_section_does_not_log_false_skip():
     assert any("net cash increase checked" in item for item in performed)
     assert not any("operating/investing/financing/movement rows were not confidently parsed" in item for item in skipped)
     assert not findings
+
+
+def test_current_tax_payable_note_matches_absolute_amount_sign():
+    section = "11. Current tax payable\nCurrent tax (30,105) -"
+
+    match = reviewer._amount_match_in_section(
+        Decimal("30105"),
+        section,
+        Decimal("1"),
+        allow_absolute=reviewer._note_heading_allows_signless_amount_match("Current tax payable", section),
+    )
+
+    assert match["found"] is True
+    assert "absolute value" in str(match["method"])
 
 
 def test_payable_receivable_note_matches_absolute_amount_sign():
