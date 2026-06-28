@@ -2977,6 +2977,28 @@ def test_share_capital_table_handles_dropped_repeated_small_amount():
     assert not any(f.severity != "Passed" for f in findings)
 
 
+
+
+
+
+def test_company_as_lessee_note_heading_is_valid():
+    assert reviewer._valid_note_heading("4", "Leases (Company as lessee)")
+
+def test_printed_page_map_interpolates_missing_statement_footer():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Cover", []),
+            PdfPage(2, "Contents\nStatement of Changes in Equity 15\nStatement of Cash Flows 16\nFive-Year Financial Summary 44", []),
+            PdfPage(15, "Statement of profit or loss\n14", []),
+            PdfPage(16, "Statement of Changes in Equity\nBalance at 31 December 2025 100\n15", []),
+            PdfPage(17, "Statement of Cash Flows\nCash at end of year 100", []),
+            PdfPage(18, "Notes to the financial statements\n17", []),
+        ]
+    )
+
+    assert reviewer._reviewer_page_number(document, 17) == 16
+    assert reviewer._reviewer_page_number(document, 2) == 2
+
 def test_changes_statement_page_is_inferred_from_contents_when_rotated():
     document = PdfDocument(
         [

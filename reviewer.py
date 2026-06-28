@@ -1086,10 +1086,28 @@ def _printed_footer_page_number(text: str) -> int | None:
 
 def _printed_page_number_map(document: PdfDocument) -> dict[int, int]:
     mapping: dict[int, int] = {}
+    highest_physical_page = max((page.number for page in document.pages), default=0)
+    max_reasonable_offset = max(12, highest_physical_page // 3)
     for page in document.pages:
         printed = _printed_footer_page_number(page.text)
-        if printed is not None:
-            mapping[page.number] = printed
+        if printed is None:
+            continue
+        # Contents/front-matter pages often end with statement index references
+        # rather than a real printed footer. Reject impossible offsets such as
+        # physical page 3 being read as printed page 44.
+        if abs(printed - page.number) > max_reasonable_offset:
+            continue
+        mapping[page.number] = printed
+
+    known_pages = sorted(mapping)
+    for left, right in zip(known_pages, known_pages[1:]):
+        gap = right - left
+        if gap <= 1:
+            continue
+        if mapping[right] - mapping[left] != gap:
+            continue
+        for page_number in range(left + 1, right):
+            mapping.setdefault(page_number, mapping[left] + (page_number - left))
     return mapping
 
 
@@ -9146,7 +9164,8 @@ def _valid_note_heading(number: str, title: str) -> bool:
     if title_lower in set(front_matter_terms) or any(term in title_lower for term in front_matter_terms):
         return False
     words = title_clean.split()
-    if ENTITY_SUFFIX_RE.search(title_clean) and len(words) <= 4:
+    company_as_lease_party = bool(re.search(r"\bcompany\s+as\s+(?:lessee|lessor)\b", title_lower))
+    if ENTITY_SUFFIX_RE.search(title_clean) and len(words) <= 4 and not company_as_lease_party:
         return False
     if title_lower in {"december", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november"}:
         return False
