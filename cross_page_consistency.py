@@ -117,8 +117,22 @@ def _looks_like_grammar_review_line(line: str) -> bool:
     )
     if any(marker in lower for marker in excluded):
         return False
+    if _looks_like_signature_or_firm_line(clean):
+        return False
     words = re.findall(r"[A-Za-z']+", clean)
     return len(words) >= 5
+
+
+def _looks_like_signature_or_firm_line(line: str) -> bool:
+    clean = re.sub(r"\s+", " ", line).strip()
+    lower = clean.lower()
+    if re.match(r"^(?:for|per)\s*:", lower) and any(term in lower for term in ("audit", "auditor", "accountant", "services")):
+        return True
+    if re.match(r"^(?:for|per)\s*:", lower) and len(re.findall(r"[A-Za-z]+", clean)) <= 6:
+        return True
+    if lower in {"for the board", "on behalf of the board"}:
+        return True
+    return False
 
 
 def _grammar_issue_for_line(line: str) -> str:

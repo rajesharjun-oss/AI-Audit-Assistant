@@ -944,6 +944,25 @@ def test_cross_page_consistency_flags_common_spelling_error():
     assert any(finding.issue == "Possible spelling issue detected." for finding in findings)
 
 
+
+
+def test_cross_page_consistency_ignores_auditor_signature_spacing_noise():
+    document = PdfDocument(
+        [
+            PdfPage(
+                12,
+                "Independent auditor's report\nFor:Kreston Pedabo Audit services\nChartered Accountants",
+                [],
+            )
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not export["grammar"]
+    assert not [finding for finding in findings if finding.category == "Formatting"]
+
+
 def test_key_amount_consistency_picks_up_follow_on_tax_heading_totals():
     document = PdfDocument(
         [
