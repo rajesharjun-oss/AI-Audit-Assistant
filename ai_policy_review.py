@@ -19,7 +19,7 @@ NOTES_HEADING_PATTERNS = (
     "notes to the accounts",
 )
 
-AI_RATE_LIMIT_COOLDOWN_SECONDS = max(5, int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "20")))
+AI_RATE_LIMIT_COOLDOWN_SECONDS = max(5, min(int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "20")), 20))
 _AI_RATE_LIMIT_UNTIL: float = 0.0
 _AI_RATE_LIMIT_LOCK = threading.Lock()
 
@@ -283,7 +283,7 @@ def _note_page_reference(document: PdfDocument, ref: str, clean_text: str) -> st
 def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     blocked_remaining = _rate_limit_wait_seconds()
     if blocked_remaining > 0:
-        raise RuntimeError(f"OpenAI request is in cooldown; try again in {blocked_remaining} second(s).")
+        raise RuntimeError(f"OpenAI rate limit cooldown active for {blocked_remaining} second(s).")
 
     endpoint = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
     last_error: Exception | None = None
@@ -571,10 +571,9 @@ def _rate_limit_wait_seconds() -> int:
 
 
 def _set_rate_limit_block(wait_seconds: int) -> None:
-    wait = max(1, int(wait_seconds))
     with _AI_RATE_LIMIT_LOCK:
         global _AI_RATE_LIMIT_UNTIL
-        _AI_RATE_LIMIT_UNTIL = max(_AI_RATE_LIMIT_UNTIL, time.time() + min(max(wait, AI_RATE_LIMIT_COOLDOWN_SECONDS), 30))
+        _AI_RATE_LIMIT_UNTIL = max(_AI_RATE_LIMIT_UNTIL, time.time() + AI_RATE_LIMIT_COOLDOWN_SECONDS)
 
 
 def _is_rate_limit_blocked() -> bool:
@@ -588,12 +587,10 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 def _friendly_ai_error_message(exc: Exception) -> str:
     if _is_rate_limit_error(exc):
-        wait_seconds = _rate_limit_wait_seconds()
-        wait_text = f" Try the AI layer again in about {wait_seconds} second(s)." if wait_seconds > 0 else " Try the AI layer again shortly."
         return (
             "AI review was deferred because the AI service is temporarily busy; "
             "the deterministic review and exports were still completed."
-            f"{wait_text}"
+            f" Try the AI layer again in about {AI_RATE_LIMIT_COOLDOWN_SECONDS} second(s)."
         )
     return f"AI review could not be completed: {exc}"
 

@@ -1727,7 +1727,8 @@ def test_ai_rate_limit_message_does_not_tell_user_to_refresh():
 
     assert "refresh" not in message.lower()
     assert "deterministic review" in message.lower()
-    assert ai_policy_review._rate_limit_wait_seconds() <= 30
+    assert "20 second(s)" in message
+    assert ai_policy_review._rate_limit_wait_seconds() <= 20
 
 
 def test_generic_arithmetic_skips_ocr_reconstructed_tables():
