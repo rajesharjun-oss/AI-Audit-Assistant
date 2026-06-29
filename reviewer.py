@@ -1784,12 +1784,14 @@ def _skipped_table_detail_rows(document: PdfDocument) -> list[dict[str, str]]:
         match = re.match(r"Page\s+(\d+),\s+table\s+(\d+):\s+(.+?)(?:\s+\((.+)\))?$", detail)
         if match:
             page, table, table_type, reason = match.groups()
+            reviewer_page = str(_reviewer_page_number(document, int(page)))
             if table_type.lower().startswith("skipped because"):
                 reason = reason or table_type
                 table_type = "Notes table"
             rows.append(
                 {
-                    "Page": page,
+                    "Page": reviewer_page,
+                    "Source PDF page": page,
                     "Table": table,
                     "Classification": table_type,
                     "Reason skipped": reason or "",
@@ -1800,9 +1802,10 @@ def _skipped_table_detail_rows(document: PdfDocument) -> list[dict[str, str]]:
             rows.append(
                 {
                     "Page": "",
+                    "Source PDF page": "",
                     "Table": "",
                     "Classification": "",
-                    "Reason skipped": detail,
+                    "Reason skipped": _translate_page_reference_text(detail, document),
                     "Result": "Skipped - not reliable for generic arithmetic",
                 }
             )

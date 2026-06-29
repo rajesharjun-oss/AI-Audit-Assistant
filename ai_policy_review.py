@@ -19,7 +19,7 @@ NOTES_HEADING_PATTERNS = (
     "notes to the accounts",
 )
 
-AI_RATE_LIMIT_COOLDOWN_SECONDS = max(30, int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "60")))
+AI_RATE_LIMIT_COOLDOWN_SECONDS = max(5, int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "20")))
 _AI_RATE_LIMIT_UNTIL: float = 0.0
 _AI_RATE_LIMIT_LOCK = threading.Lock()
 
@@ -558,7 +558,7 @@ def _retry_after_seconds(value: str) -> int | None:
     if not text:
         return None
     if text.isdigit():
-        return max(1, min(int(text), 12))
+        return max(1, min(int(text), 8))
     return None
 
 
@@ -574,7 +574,7 @@ def _set_rate_limit_block(wait_seconds: int) -> None:
     wait = max(1, int(wait_seconds))
     with _AI_RATE_LIMIT_LOCK:
         global _AI_RATE_LIMIT_UNTIL
-        _AI_RATE_LIMIT_UNTIL = max(_AI_RATE_LIMIT_UNTIL, time.time() + max(wait, AI_RATE_LIMIT_COOLDOWN_SECONDS))
+        _AI_RATE_LIMIT_UNTIL = max(_AI_RATE_LIMIT_UNTIL, time.time() + min(max(wait, AI_RATE_LIMIT_COOLDOWN_SECONDS), 30))
 
 
 def _is_rate_limit_blocked() -> bool:
@@ -589,10 +589,11 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 def _friendly_ai_error_message(exc: Exception) -> str:
     if _is_rate_limit_error(exc):
         wait_seconds = _rate_limit_wait_seconds()
-        wait_text = f" (wait {wait_seconds} second(s) if continuing immediately)." if wait_seconds > 0 else " (a short delay may be required)."
+        wait_text = f" Try the AI layer again in about {wait_seconds} second(s)." if wait_seconds > 0 else " Try the AI layer again shortly."
         return (
-            "AI review was deferred because the AI service is busy right now. "
-            f"The core deterministic review still completed. Please retry after refreshing and waiting a moment{wait_text}"
+            "AI review was deferred because the AI service is temporarily busy; "
+            "the deterministic review and exports were still completed."
+            f"{wait_text}"
         )
     return f"AI review could not be completed: {exc}"
 

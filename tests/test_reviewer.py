@@ -982,6 +982,8 @@ def test_cross_page_consistency_ignores_auditor_signature_spacing_noise():
     assert not [finding for finding in findings if finding.category == "Formatting"]
 
 
+
+
 def test_key_amount_consistency_picks_up_follow_on_tax_heading_totals():
     document = PdfDocument(
         [
@@ -1689,6 +1691,43 @@ def test_low_confidence_table_skips_are_grouped():
     assert len(grouped) == 2
     assert any("Page 1, table 1" in detail for detail in grouped)
     assert any("Page 1, table 2" in detail for detail in grouped)
+
+
+def test_skipped_table_details_include_reviewer_and_source_pages(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(
+                10,
+                "Statement page with financial table\n9",
+                [
+                    [
+                        ["Value added statement", "2025", "2024"],
+                        ["Revenue", "100", "90"],
+                        ["Total value added", "100", "90"],
+                    ]
+                ],
+            )
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions())
+
+    details = result.metrics["skipped_table_details"]
+    assert details[0]["Page"] == "9"
+    assert details[0]["Source PDF page"] == "10"
+    assert result.metrics["skipped_table_summary"][0]["Pages affected"] == "Page 9"
+
+
+def test_ai_rate_limit_message_does_not_tell_user_to_refresh():
+    ai_policy_review._AI_RATE_LIMIT_UNTIL = 0
+    ai_policy_review._set_rate_limit_block(90)
+
+    message = ai_policy_review._friendly_ai_error_message(RuntimeError("429 rate limit exceeded"))
+
+    assert "refresh" not in message.lower()
+    assert "deterministic review" in message.lower()
+    assert ai_policy_review._rate_limit_wait_seconds() <= 30
 
 
 def test_generic_arithmetic_skips_ocr_reconstructed_tables():
@@ -3043,6 +3082,8 @@ def test_share_capital_table_handles_dropped_repeated_small_amount():
 def test_company_as_lessee_note_heading_is_valid():
     assert reviewer._valid_note_heading("4", "Leases (Company as lessee)")
 
+
+
 def test_printed_page_map_interpolates_missing_statement_footer():
     document = PdfDocument(
         [
@@ -3057,6 +3098,7 @@ def test_printed_page_map_interpolates_missing_statement_footer():
 
     assert reviewer._reviewer_page_number(document, 17) == 16
     assert reviewer._reviewer_page_number(document, 2) == 2
+
 
 def test_changes_statement_page_is_inferred_from_contents_when_rotated():
     document = PdfDocument(
