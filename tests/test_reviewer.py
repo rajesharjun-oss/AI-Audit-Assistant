@@ -946,6 +946,25 @@ def test_cross_page_consistency_flags_common_spelling_error():
 
 
 
+
+
+def test_cross_page_consistency_ignores_table_header_repeated_words():
+    document = PdfDocument(
+        [
+            PdfPage(
+                8,
+                "Statement of changes in equity\nAccumulated fund Donation fund fund Total equity",
+                [],
+            )
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not export["grammar"]
+    assert not [finding for finding in findings if finding.category == "Formatting"]
+
+
 def test_cross_page_consistency_ignores_auditor_signature_spacing_noise():
     document = PdfDocument(
         [
@@ -2973,6 +2992,27 @@ def test_share_capital_directors_report_table_flags_wrong_total():
         and "Share capital or shareholding table total does not agree" in f.issue
         for f in findings
     )
+
+
+
+
+def test_low_confidence_sfp_fallback_component_casting_is_skipped():
+    page = PdfPage(
+        7,
+        "Statement of financial position\n"
+        "Investment property 1,000 900\n"
+        "Property plant and equipment 2,000 1,800\n"
+        "Intangible assets 100 90\n"
+        "Total non - current assets 3,500 2,790\n",
+        [],
+    )
+    document = PdfDocument([page])
+
+    findings, performed, skipped = reviewer._check_sfp_text(page, Decimal("1"), document=document)
+
+    assert not findings
+    assert not performed
+    assert any("fallback component casting skipped" in item for item in skipped)
 
 
 def test_share_capital_table_handles_dropped_repeated_small_amount():

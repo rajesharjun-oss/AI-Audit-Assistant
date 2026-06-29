@@ -120,7 +120,27 @@ def _looks_like_grammar_review_line(line: str) -> bool:
     if _looks_like_signature_or_firm_line(clean):
         return False
     words = re.findall(r"[A-Za-z']+", clean)
+    if _looks_like_table_header_fragment(clean, words):
+        return False
     return len(words) >= 5
+
+
+def _looks_like_table_header_fragment(line: str, words: list[str]) -> bool:
+    lower = line.lower()
+    financial_terms = {
+        "accumulated", "fund", "funds", "equity", "assets", "liabilities", "liability",
+        "land", "building", "buildings", "property", "plant", "equipment", "motor",
+        "vehicles", "generators", "library", "books", "cash", "between", "over",
+        "less", "total", "cost", "depreciation", "carrying", "value", "note",
+    }
+    if not words or any(char in line for char in ".,;:"):
+        return False
+    lowered_words = [word.lower() for word in words]
+    if len(lowered_words) >= 4 and sum(1 for word in lowered_words if word in financial_terms) >= 3:
+        return True
+    if REPEATED_WORD_RE.search(line) and sum(1 for word in lowered_words if word in financial_terms) >= 2:
+        return True
+    return False
 
 
 def _looks_like_signature_or_firm_line(line: str) -> bool:

@@ -2725,12 +2725,17 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
                 if targeted_note_findings:
                     findings.extend(targeted_note_findings)
                     continue
-                if page.number not in line_checked_note_pages:
+                simple_note_text_casting_safe = document.table_extraction_confidence >= 80 or document.merged_value_cell_count <= 10
+                if page.number not in line_checked_note_pages and simple_note_text_casting_safe:
                     line_note_findings = _check_simple_note_text_casting(page, tolerance)
                     if line_note_findings:
                         findings.extend(line_note_findings)
                         line_checked_note_pages.add(page.number)
                         continue
+                elif not simple_note_text_casting_safe:
+                    skipped_tables.append(
+                        f"Page {page.number}, table {table_index}: simple note text casting skipped because table extraction confidence is low ({document.table_extraction_confidence}%) and merged numeric cells were detected ({document.merged_value_cell_count})."
+                    )
                 skipped_tables.append(
                     f"Page {page.number}, table {table_index}: skipped because generic arithmetic is not reliable for notes tables; use note-reference and amount-agreement checks instead."
                 )
@@ -5276,6 +5281,7 @@ def _check_sfp_text(
     performed: list[str] = []
     skipped: list[str] = []
     findings: list[Finding] = []
+    low_statement_confidence = document is not None and _statement_structure_confidence(document) < 80
     if _has_rows(rows, ("non-current assets", "current assets", "total assets")):
         _check_vector_equation(
             findings,
@@ -5346,6 +5352,9 @@ def _check_sfp_text(
         )
         performed.append("Statement of financial position: total assets checked against total equity and liabilities.")
     if performed:
+        return findings, performed, skipped
+    if low_statement_confidence and not ocr_review:
+        skipped.append("Statement of financial position: fallback component casting skipped because statement structure confidence is below the safe threshold.")
         return findings, performed, skipped
     non_current = ("investment property", "property plant and equipment", "intangible assets")
     current = ("inventories", "trade and other receivables", "cash and cash equivalents")

@@ -94,6 +94,21 @@ or use:
 
 The tests cover local PDF cases when available, generic synthetic financial-statement patterns, workbook export creation, and evidence-gating rules that prevent low-confidence prompts from becoming exception-register findings.
 
+For a practical folder-level smoke test against real local PDFs, use the batch verifier. It runs the same backend pipeline as the UI/CLI, writes each normal workbook output, and creates `batch_summary.json` plus `batch_summary.csv`:
+
+```powershell
+python batch_verify.py `
+  --input-dir "C:\Users\ionawoga\Downloads\audit assistant test files" `
+  --output-dir .\scratch\batch_verify `
+  --ocr `
+  --ocr-max-pages 300 `
+  --ocr-dpi 300 `
+  --max-medium 3 `
+  --forbid-finding "For:Kreston"
+```
+
+Use `--limit 1` for a quick single-file smoke test. By default the batch fails if any file produces High findings; use `--allow-high` only when you intentionally want to inspect High findings without failing the batch.
+
 ## Extraction confidence
 
 The tool classifies uploaded PDFs as `text-based`, `partially scanned`, `image-only`, `ocr-assisted`, or `empty`.
