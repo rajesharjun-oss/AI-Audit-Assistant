@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from ai_policy_review import _call_openai, _friendly_ai_error_message, _normalize_confidence, _normalize_severity, _parse_response_json
+from ai_policy_review import MalformedAiResponseError, _call_openai, _friendly_ai_error_message, _normalize_confidence, _normalize_severity, _parse_response_json, _repair_response_json
 from models import DEFAULT_AI_MODEL, CompanyProfile, Finding, PdfDocument
 
 
@@ -82,7 +82,7 @@ def run_ai_finding_review(
                     "Do not invent evidence. Only use the page snippets, note snippets, issue text, and evidence text supplied. "
                     "Treat deterministic arithmetic and structure findings as primary evidence, but suppress likely false positives from OCR noise, split digits, duplicated headers, five-year-summary contamination, value-added contamination, weak note linkage, or layout extraction drift. "
                     "Do not suppress a finding simply because it is inconvenient. "
-                    "Return strict JSON only."
+                    "Return one valid JSON object only; no markdown, no comments, and no trailing commas."
                 ),
             },
             {
@@ -94,7 +94,15 @@ def run_ai_finding_review(
 
     try:
         response_json = _call_openai(api_key, payload)
-        parsed = _parse_response_json(response_json)
+        try:
+            parsed = _parse_response_json(response_json)
+        except MalformedAiResponseError as parse_exc:
+            parsed = _repair_response_json(
+                api_key,
+                model,
+                parse_exc.text,
+                '{"summary":"short summary","adjudications":[{"finding_id":"F1","decision":"keep|suppress|downgrade","confidence":"High|Medium|Low","rationale":"...","corrected_severity":"High|Medium|Low optional"}]}',
+            )
         return _apply_adjudications(findings, candidates, parsed, model)
     except Exception as exc:  # pragma: no cover - network/runtime dependent
         return AiFindingReviewResult(

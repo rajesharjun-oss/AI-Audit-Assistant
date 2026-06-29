@@ -795,6 +795,55 @@ def test_ai_response_parser_accepts_nested_text_value_payload():
     assert parsed["observations"][0]["title"] == "Policy context"
 
 
+def test_ai_response_parser_accepts_fenced_json_with_surrounding_text():
+    payload = {
+        "output_text": 'Here is the result:\n```json\n{"summary":"ok","observations":[]}\n```\nDone.'
+    }
+
+    parsed = _parse_response_json(payload)
+
+    assert parsed == {"summary": "ok", "observations": []}
+
+
+def test_ai_policy_review_repairs_malformed_json_response(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    calls = []
+
+    def fake_call(_api_key, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return {
+                "output_text": (
+                    '{"summary":"needs review","observations":[{"title":"Revenue policy","status":"review_prompt"}'
+                    '{"title":"Tax policy","status":"ok"}]}'
+                )
+            }
+        return {
+            "output_text": (
+                '{"summary":"needs review","observations":[{"title":"Revenue policy","status":"review_prompt",'
+                '"severity":"Low","confidence":"Medium","issue":"Revenue wording should be reviewed",'
+                '"rationale":"Policy text is present but may need tailoring","recommendation":"Review revenue wording",'
+                '"page_reference":"Page 10","note_reference":"Note 1","evidence_snippet":"Revenue from contracts with customers"}]}'
+            )
+        }
+
+    monkeypatch.setattr(ai_policy_review, "_call_openai", fake_call)
+    document = PdfDocument([PdfPage(10, "Notes to the financial statements\n1 Significant accounting policies\nRevenue from contracts with customers", [])])
+
+    result = ai_policy_review.run_ai_policy_review(
+        document,
+        CompanyProfile(company_name="Test Limited", industry="Technology"),
+        {"1": "Significant accounting policies. Revenue from contracts with customers."},
+        policy_map={"revenue": True},
+        model="gpt-test",
+    )
+
+    assert result.status == "completed"
+    assert len(calls) == 2
+    assert result.export_rows
+    assert "Revenue" in result.export_rows[0]["Title"]
+
+
 def test_ai_finding_review_includes_page_and_note_context_and_can_suppress_medium():
     document = PdfDocument(
         [

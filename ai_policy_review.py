@@ -50,6 +50,12 @@ class AiPolicyReviewResult:
     evidence_rows: list[dict[str, str]] | None = None
 
 
+class MalformedAiResponseError(RuntimeError):
+    def __init__(self, message: str, text: str):
+        super().__init__(message)
+        self.text = text
+
+
 def run_ai_policy_review(
     document: PdfDocument,
     profile: CompanyProfile,
@@ -90,7 +96,7 @@ def run_ai_policy_review(
                 "role": "system",
                 "content": (
                     "You are reviewing a financial statement for policy relevance, disclosure completeness, "
-                    "standards context, and industry fit. Return strict JSON only. Be conservative. "
+                    "standards context, and industry fit. Return one valid JSON object only; no markdown, no comments, and no trailing commas. Be conservative. "
                     "Do not invent missing evidence. If evidence is weak, use Low confidence and prefer review prompts. "
                     "Ignore generic standards/amendments text unless the report clearly applies the standard in current accounting policies or balances."
                 ),
@@ -104,7 +110,15 @@ def run_ai_policy_review(
 
     try:
         response_json = _call_openai(api_key, payload)
-        parsed = _parse_response_json(response_json)
+        try:
+            parsed = _parse_response_json(response_json)
+        except MalformedAiResponseError as parse_exc:
+            parsed = _repair_response_json(
+                api_key,
+                model,
+                parse_exc.text,
+                '{"summary":"short reviewer summary","observations":[{"title":"...","severity":"High|Medium|Low","confidence":"High|Medium|Low","status":"exception|review_prompt|ok","issue":"...","rationale":"...","recommendation":"...","page_reference":"Page X","note_reference":"Note X","evidence_snippet":"..."}]}',
+            )
         findings, export_rows = _rows_to_outputs(parsed.get("observations", []))
         summary = str(parsed.get("summary", "") or "").strip()
         return AiPolicyReviewResult(
@@ -121,7 +135,7 @@ def run_ai_policy_review(
             findings=[],
             export_rows=[],
             summary="",
-            status="deferred" if _is_rate_limit_error(exc) else "error",
+            status="deferred" if _is_rate_limit_error(exc) or isinstance(exc, MalformedAiResponseError) else "error",
             model=model,
             message=friendly_message,
             evidence_rows=evidence_rows if 'evidence_rows' in locals() else [],
@@ -325,13 +339,85 @@ def _parse_response_json(response_json: dict[str, Any]) -> dict[str, Any]:
     text = _extract_response_text(response_json).strip()
     if not text:
         raise RuntimeError("OpenAI response did not contain text output.")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.S)
-        if not match:
-            raise RuntimeError("OpenAI response was not valid JSON.")
-        return json.loads(match.group(0))
+
+    last_error: json.JSONDecodeError | None = None
+    for candidate in _json_text_candidates(text):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    detail = f"AI response was not valid JSON: {last_error}" if last_error else "AI response was not valid JSON."
+    raise MalformedAiResponseError(detail, text)
+
+
+def _json_text_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    stripped = text.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", stripped, re.S | re.I)
+    if fenced:
+        candidates.append(fenced.group(1).strip())
+    candidates.append(stripped)
+    balanced = _balanced_json_object(stripped)
+    if balanced:
+        candidates.append(balanced)
+    unique: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def _balanced_json_object(text: str) -> str:
+    start = text.find("{")
+    if start < 0:
+        return ""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text[start:], start=start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1].strip()
+    return ""
+
+
+def _repair_response_json(api_key: str, model: str, malformed_text: str, expected_shape: str) -> dict[str, Any]:
+    repair_payload = {
+        "model": model,
+        "max_output_tokens": 1600,
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "You repair malformed JSON produced by another model. Return valid JSON only. "
+                    "Do not add markdown. Do not change the factual content, only fix JSON syntax. "
+                    "If a field is unclear, keep the nearest valid string value."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Expected JSON shape:\n{expected_shape}\n\n"
+                    "Malformed JSON to repair:\n"
+                    f"{malformed_text[:12000]}"
+                ),
+            },
+        ],
+    }
+    return _parse_response_json(_call_openai(api_key, repair_payload))
 
 
 def _extract_response_text(response_json: dict[str, Any]) -> str:
@@ -591,6 +677,11 @@ def _friendly_ai_error_message(exc: Exception) -> str:
             "AI review was deferred because the AI service is temporarily busy; "
             "the deterministic review and exports were still completed."
             f" Try the AI layer again in about {AI_RATE_LIMIT_COOLDOWN_SECONDS} second(s)."
+        )
+    if isinstance(exc, MalformedAiResponseError):
+        return (
+            "AI review was deferred because the AI returned malformed structured output; "
+            "the deterministic review and exports were still completed. Please rerun the AI layer."
         )
     return f"AI review could not be completed: {exc}"
 
