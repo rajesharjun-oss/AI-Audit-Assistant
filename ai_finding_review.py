@@ -264,13 +264,25 @@ def _apply_adjudications(
         action = str(adjudication.get("recommended_action", "") or "").strip()
         original = updated_findings[candidate["index"]]
         metadata = dict(original.metadata or {})
+        unsupported_by_ai = _ai_reason_indicates_unsupported(reason, status)
         if _has_strong_narrative_contradiction_evidence(original):
             decision = "keep"
             status = "confirmed_exception"
             confidence = "High" if confidence != "Low" else confidence
-            if not reason:
+            if unsupported_by_ai or not reason:
                 reason = "The finding is supported by an explicit nil-style narrative and a non-zero amount in the same note evidence."
-        if decision == "suppress" and _suppression_conflicts_with_note_evidence(original, candidate, reason):
+        elif unsupported_by_ai:
+            if _ai_reason_indicates_likely_false_positive(reason, status):
+                decision = "suppress"
+                status = "likely_false_positive"
+                confidence = "High"
+            else:
+                decision = "downgrade" if original.severity in {"High", "Medium"} else "suppress"
+                status = "insufficient_evidence"
+                confidence = "Medium" if confidence == "High" else confidence
+            if not action:
+                action = "Treat as a low-confidence AI review prompt unless the reviewer confirms the source evidence."
+        if decision == "suppress" and not unsupported_by_ai and _suppression_conflicts_with_note_evidence(original, candidate, reason):
             decision = "downgrade" if original.severity == "High" else "keep"
             status = "confirmed_exception" if original.severity in {"High", "Medium"} else "review_prompt"
             confidence = "Medium" if confidence == "Low" else confidence
@@ -346,6 +358,46 @@ def _apply_adjudications(
         reviewed_count=len(candidates),
         suppressed_count=len(suppressed_indexes),
         evidence_rows=_candidate_evidence_rows(candidates),
+    )
+
+
+def _ai_reason_indicates_likely_false_positive(reason: str, status: str = "") -> bool:
+    combined = f"{status} {reason}".lower()
+    return any(
+        phrase in combined
+        for phrase in (
+            "likely false positive",
+            "false positive",
+            "extraction drift",
+            "not supported by robust evidence",
+            "not supported by the supplied evidence",
+        )
+    )
+
+
+def _ai_reason_indicates_unsupported(reason: str, status: str = "") -> bool:
+    combined = f"{status} {reason}".lower()
+    if _ai_reason_indicates_likely_false_positive(reason, status):
+        return True
+    return any(
+        phrase in combined
+        for phrase in (
+            "insufficient evidence",
+            "no evidence",
+            "not visible",
+            "not found in the supplied",
+            "not found in the provided",
+            "not found in the page",
+            "not found in the note",
+            "no repeated word",
+            "no deterministic table",
+            "cannot confirm",
+            "ambiguous",
+            "reviewer attention",
+            "manual confirmation",
+            "confirm if this is",
+            "apparent contradiction",
+        )
     )
 
 

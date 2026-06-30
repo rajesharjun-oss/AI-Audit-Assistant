@@ -844,6 +844,88 @@ def test_ai_policy_review_repairs_malformed_json_response(monkeypatch):
     assert "Revenue" in result.export_rows[0]["Title"]
 
 
+def test_ai_finding_review_suppresses_contradictory_false_positive_keep():
+    finding = reviewer.Finding(
+        category="Notes agreement",
+        severity="Medium",
+        location="Page 10",
+        issue="Amount not located in referenced note.",
+        evidence="Statement amount was not found in note snippet.",
+        recommendation="Review note reference.",
+    )
+    candidate = {
+        "finding_id": "F1",
+        "index": 0,
+        "category": finding.category,
+        "severity": finding.severity,
+        "page_reference": "Page 10",
+        "note_reference": "Note 14",
+        "issue": finding.issue,
+        "page_snippet": "",
+        "note_snippet": "",
+    }
+    parsed = {
+        "summary": "AI reviewed one finding",
+        "adjudications": [
+            {
+                "finding_id": "F1",
+                "decision": "keep",
+                "status": "confirmed_exception",
+                "confidence": "Medium",
+                "reason": "This is likely false positive because no supporting table is visible in the supplied snippets.",
+            }
+        ],
+    }
+
+    result = ai_finding_review._apply_adjudications([finding], [candidate], parsed, "gpt-test")
+
+    assert not result.findings
+    assert result.suppressed_count == 1
+    assert result.export_rows[0]["Decision"] == "Suppress"
+    assert result.export_rows[0]["AI status"] == "likely_false_positive"
+
+
+def test_ai_finding_review_keeps_strong_narrative_contradiction_when_ai_is_weak():
+    finding = reviewer.Finding(
+        category="Narrative consistency",
+        severity="Medium",
+        location="Page 24",
+        issue="Note 3 states that a balance was nil, but the same note table shows a non-zero amount.",
+        evidence="Cash and cash equivalents was nil. | Non-zero amount detected in same note: 2,916,467",
+        recommendation="Review the narrative disclosure against the note table.",
+    )
+    candidate = {
+        "finding_id": "F1",
+        "index": 0,
+        "category": finding.category,
+        "severity": finding.severity,
+        "page_reference": "Page 24",
+        "note_reference": "Note 3",
+        "issue": finding.issue,
+        "page_snippet": "",
+        "note_snippet": "",
+    }
+    parsed = {
+        "adjudications": [
+            {
+                "finding_id": "F1",
+                "decision": "keep",
+                "status": "insufficient_evidence",
+                "confidence": "Low",
+                "reason": "The evidence is ambiguous and reviewer attention is needed to confirm if this is a true inconsistency.",
+            }
+        ]
+    }
+
+    result = ai_finding_review._apply_adjudications([finding], [candidate], parsed, "gpt-test")
+
+    assert len(result.findings) == 1
+    assert result.findings[0].severity == "Medium"
+    assert result.export_rows[0]["Decision"] == "Keep"
+    assert result.export_rows[0]["AI status"] == "confirmed_exception"
+    assert "explicit nil-style narrative" in result.export_rows[0]["Reason"]
+
+
 def test_ai_finding_review_includes_page_and_note_context_and_can_suppress_medium():
     document = PdfDocument(
         [
