@@ -5569,6 +5569,59 @@ def test_not_elevated_review_prompts_are_not_counted_as_skipped_checks():
     assert result.metrics["checks_skipped"] == "No major checks skipped."
 
 
+def test_skipped_cash_flow_check_becomes_manual_review_required():
+    document = PdfDocument(
+        [
+            PdfPage(
+                9,
+                "Statement of cash flows\nCash generated from operations 100 90",
+                [],
+            )
+        ]
+    )
+
+    result = reviewer._build_result(
+        document,
+        [],
+        checks_skipped=["Statement of cash flows: Page 9 skipped because table structure was not confidently parsed."],
+    )
+
+    manual_findings = [finding for finding in result.findings if finding.category == "Manual review"]
+    assert len(manual_findings) == 1
+    assert manual_findings[0].location == "Page 9"
+    assert "manual review required" in manual_findings[0].issue.lower()
+    assert any(
+        row["Result"] == "Manual review required" and "cash flows" in row["Check"].lower()
+        for row in result.metrics["check_results"]
+    )
+
+
+def test_ai_openai_call_uses_bounded_timeout(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"output_text":"{}"}'
+
+    def fake_urlopen(_req, timeout):
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(ai_policy_review, "_rate_limit_wait_seconds", lambda: 0)
+    monkeypatch.setattr(ai_policy_review.request, "urlopen", fake_urlopen)
+
+    ai_policy_review._call_openai("test-key", {"model": "test", "input": []})
+
+    assert captured["timeout"] == ai_policy_review.AI_REQUEST_TIMEOUT_SECONDS
+    assert captured["timeout"] < 60
+
+
 def test_skipped_table_summary_marks_supplementary_schedules_as_intentional_exclusions():
     document = PdfDocument(
         [

@@ -783,9 +783,7 @@ def _build_result(
             f.severity = "Medium"
         active_findings.append(f)
             
-    findings, not_elevated_review_prompts = _split_elevated_findings(active_findings, document)
     checks_skipped_list = list(dict.fromkeys(checks_skipped_list))
-    check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings, document, passed_check_evidence)
     
     is_company = bool(
         document
@@ -794,6 +792,9 @@ def _build_result(
     if is_company:
         ngo_terms = ["gross operating revenue", "total income", "total expenditure", "surplus", "statement of changes in accumulated fund", "statement of income and expenditure"]
         checks_skipped_list = [c for c in checks_skipped_list if not any(t in c.lower() for t in ngo_terms)]
+    active_findings.extend(_manual_review_findings_for_skipped_checks(checks_skipped_list, document))
+    findings, not_elevated_review_prompts = _split_elevated_findings(active_findings, document)
+    check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings, document, passed_check_evidence)
         
     positive_assurance = _positive_assurance_text(findings, checks_performed_list)
     note_validation_debug = note_validation_debug or _note_validation_debug(document, False, [])
@@ -863,6 +864,101 @@ def _build_result(
         **note_validation_debug,
     }
     return ReviewResult(findings=findings, metrics=metrics)
+
+
+def _manual_review_findings_for_skipped_checks(checks_skipped: list[str], document: PdfDocument) -> list[Finding]:
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    for check in checks_skipped:
+        if not _skipped_check_requires_manual_review(check, document):
+            continue
+        location = _manual_review_location_for_skipped_check(check, document)
+        key = f"{location}|{check}"
+        if key in seen:
+            continue
+        seen.add(key)
+        findings.append(
+            Finding(
+                "Manual review",
+                "Low",
+                location,
+                "Automated check could not be completed; manual review required.",
+                check,
+                _manual_review_recommendation_for_skipped_check(check),
+                metadata={"check_type": "manual_review_required", "page_reference": location},
+            )
+        )
+    return findings
+
+
+def _skipped_check_requires_manual_review(check: str, document: PdfDocument | None = None) -> bool:
+    lower = str(check or "").lower()
+    if not lower or "no major checks skipped" in lower:
+        return False
+    status_only_terms = (
+        "ai review",
+        "openai",
+        "api key",
+        "rate-limit",
+        "rate limit",
+        "cooldown",
+        "temporarily busy",
+        "malformed structured output",
+        "limited-scope statement extract",
+        "full financial statement completeness",
+        "document-level extraction quality is low",
+    )
+    if any(term in lower for term in status_only_terms):
+        return False
+    if "generic table arithmetic skipped" in lower and document is not None:
+        return any(row.get("Can automated check be fixed?") != "Not applicable" for row in _skipped_table_summary_rows(document))
+    actionable_terms = (
+        "skipped",
+        "not confidently parsed",
+        "not detected",
+        "not reliable",
+        "manual confirmation required",
+        "could not be confidently extracted",
+        "table extraction confidence is below threshold",
+    )
+    return any(term in lower for term in actionable_terms)
+
+
+def _manual_review_location_for_skipped_check(check: str, document: PdfDocument | None = None) -> str:
+    lower = str(check or "").lower()
+    if "generic table arithmetic skipped" in lower and document is not None:
+        pages: list[str] = []
+        for row in _skipped_table_summary_rows(document):
+            if row.get("Can automated check be fixed?") == "Not applicable":
+                continue
+            page_ref = str(row.get("Pages affected", "")).strip()
+            if page_ref:
+                pages.append(page_ref)
+        if pages:
+            return "; ".join(dict.fromkeys(pages))
+        return "See Skipped table details"
+    page_match = re.search(r"\bPages?\s+([0-9, and-]+)", check, flags=re.I)
+    if page_match:
+        numbers = re.findall(r"\d+", page_match.group(1))
+        if numbers:
+            return "Page " + numbers[0] if len(numbers) == 1 else "Pages " + ", ".join(numbers)
+    if "note" in lower and document is not None:
+        start = _notes_start_page(document)
+        if start:
+            return f"Notes section from Page {_reviewer_page_number(document, start)}"
+        return "Notes section not detected"
+    return "Document-wide"
+
+
+def _manual_review_recommendation_for_skipped_check(check: str) -> str:
+    lower = str(check or "").lower()
+    if "cash flow" in lower:
+        return "Review the cash flow statement manually and tie major movements back to the statement of financial position, profit or loss, changes in equity, and supporting notes."
+    if "note" in lower:
+        return "Review the referenced note section manually and confirm note heading, face-statement reference, and amount agreement."
+    if "generic table arithmetic" in lower or "table" in lower:
+        return "Use the Skipped table details sheet to cast the affected table manually or rerun after improving extraction/OCR."
+    return "Review the referenced area manually and rerun the tool after improving extraction if needed."
 
 
 def _note_validation_debug(
@@ -1975,8 +2071,12 @@ def _check_result_rows(
     )
     
     for check in checks_skipped:
-        result_status = "Skipped because extraction is not reliable"
-        evidence = "Check was not run because prerequisite extraction confidence or source evidence was not available."
+        if _skipped_check_requires_manual_review(check, document):
+            result_status = "Manual review required"
+            evidence = "Automated check was not reliable enough to conclude; reviewer should inspect the referenced page/table/note."
+        else:
+            result_status = "Status only / deferred"
+            evidence = "This item reports an availability, scope, or not-applicable condition rather than a failed audit check."
         
         if is_company:
             lower_check = check.lower()

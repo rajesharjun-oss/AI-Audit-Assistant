@@ -20,6 +20,8 @@ NOTES_HEADING_PATTERNS = (
 )
 
 AI_RATE_LIMIT_COOLDOWN_SECONDS = max(5, min(int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "20")), 20))
+AI_REQUEST_TIMEOUT_SECONDS = max(5, min(int(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "25")), 45))
+AI_MAX_ATTEMPTS = max(1, min(int(os.getenv("OPENAI_MAX_ATTEMPTS", "1")), 2))
 _AI_RATE_LIMIT_UNTIL: float = 0.0
 _AI_RATE_LIMIT_LOCK = threading.Lock()
 
@@ -301,7 +303,7 @@ def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
 
     endpoint = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
     last_error: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(AI_MAX_ATTEMPTS):
         req = request.Request(
             endpoint,
             data=json.dumps(payload).encode("utf-8"),
@@ -312,21 +314,19 @@ def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
             method="POST",
         )
         try:
-            with request.urlopen(req, timeout=60) as response:
+            with request.urlopen(req, timeout=AI_REQUEST_TIMEOUT_SECONDS) as response:
                 return json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            if exc.code == 429 and attempt < 2:
-                retry_after = _retry_after_seconds(exc.headers.get("Retry-After", ""))
-                time.sleep(retry_after if retry_after is not None else (2 + attempt * 3))
-                last_error = RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}")
-                continue
             if exc.code == 429:
                 block_seconds = _retry_after_seconds(exc.headers.get("Retry-After", ""))
                 if block_seconds is None:
                     block_seconds = AI_RATE_LIMIT_COOLDOWN_SECONDS
                 _set_rate_limit_block(block_seconds)
-            raise RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}") from exc
+                raise RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}") from exc
+            last_error = RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}")
+            if attempt + 1 >= AI_MAX_ATTEMPTS:
+                raise last_error from exc
         except Exception as exc:
             last_error = exc
             break
@@ -657,9 +657,10 @@ def _rate_limit_wait_seconds() -> int:
 
 
 def _set_rate_limit_block(wait_seconds: int) -> None:
+    wait = max(1, min(int(wait_seconds or AI_RATE_LIMIT_COOLDOWN_SECONDS), AI_RATE_LIMIT_COOLDOWN_SECONDS))
     with _AI_RATE_LIMIT_LOCK:
         global _AI_RATE_LIMIT_UNTIL
-        _AI_RATE_LIMIT_UNTIL = max(_AI_RATE_LIMIT_UNTIL, time.time() + AI_RATE_LIMIT_COOLDOWN_SECONDS)
+        _AI_RATE_LIMIT_UNTIL = max(_AI_RATE_LIMIT_UNTIL, time.time() + wait)
 
 
 def _is_rate_limit_blocked() -> bool:
