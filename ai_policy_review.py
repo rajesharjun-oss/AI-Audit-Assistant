@@ -27,6 +27,53 @@ _AI_RATE_LIMIT_UNTIL: float = 0.0
 _AI_RATE_LIMIT_LOCK = threading.Lock()
 _AI_REQUEST_LOCK = threading.Lock()
 
+AI_POLICY_OBSERVATION_LIMIT = 30
+AI_MAX_OUTPUT_TOKENS = 2500
+AI_REPAIR_OUTPUT_TOKENS = 2800
+
+STANDARD_AI_REVIEW_QUERY = (
+    "You are an expert financial-statement quality-control reviewer. Apply the same standard to all audited statements, "
+    "including the report front matter, directors report, management statements, independent auditor sections, and all notes.\n\n"
+    "Scope:\n"
+    "1. Review spelling, grammar, wording, typographical and presentation defects in the supplied extraction text.\n"
+    "2. Review note references shown on the face of primary statements (statement of profit or loss and OCI, statement of "
+    "financial position, statement of changes in equity, statement of cash flows).\n"
+    "3. Verify consistency of regulation references (CAMA, FRC, IFRS/IAS, tax laws, and related Nigerian requirements).\n"
+    "4. Verify line-item note-links are correct, with compatible note headings and accurate note numbers.\n"
+    "5. Perform casting/cross-casting checks where possible: subtotals, grand totals, prior-year comparatives, grouped "
+    "movement tables, and agreement between primary statements and notes.\n"
+    "6. Perform IAS 7 statement-of-cash-flows checks: operating/investing/financing subtotals, net movement, opening/closing "
+    "reconciliation to cash balances, and non-cash treatment consistency.\n"
+    "7. Identify missing disclosures, wrong section notes, outdated wording, unsupported amounts, and drafting-quality issues.\n\n"
+    "Output requirements:\n"
+    "Return one valid JSON object only, with no markdown. Use conservative confidence and label uncertain items as review prompts.\n"
+    "You may flag only issues with explicit evidence in the extracted context.\n\n"
+    "Expected JSON object shape:\n"
+    "{\n"
+    '  "summary": "short overall conclusion",\n'
+    '  "observations": [\n'
+    "    {\n"
+    '      "title": "brief issue title",\n'
+    '      "section_or_statement": "statement/page/section where issue appears",\n'
+    '      "dimension": "policy_relevance | disclosure_completeness | standard_context | industry_fit",\n'
+    '      "category": "optional audit category (e.g., Note Cross-reference or Spelling/Grammar)",\n'
+    '      "standard_or_topic": "regulatory standard/topic",\n'
+    '      "severity": "High|Medium|Low",\n'
+    '      "priority": "High|Medium|Low",\n'
+    '      "confidence": "High|Medium|Low",\n'
+    '      "status": "exception|review_prompt|ok",\n'
+    '      "issue": "what is wrong",\n'
+    '      "rationale": "why this issue is identified",\n'
+    '      "expected_fix": "what corrective wording/structure is expected",\n'
+    '      "recommendation": "next reviewer step",\n'
+    '      "page_reference": "Page X",\n'
+    '      "note_reference": "Note X",\n'
+    '      "evidence_snippet": "short quote or paraphrase from supplied text"\n'
+    "    }\n"
+    "  ]\n"
+    "}\n"
+    "Use \"status\": \"ok\" only where evidence supports no further action.\n"
+)
 POLICY_KEYWORDS = (
     "significant accounting policies",
     "material accounting policies",
@@ -94,15 +141,13 @@ def run_ai_policy_review(
 
     payload = {
         "model": model,
-        "max_output_tokens": 1200,
+        "max_output_tokens": AI_MAX_OUTPUT_TOKENS,
         "input": [
             {
                 "role": "system",
                 "content": (
-                    "You are reviewing a financial statement for policy relevance, disclosure completeness, "
-                    "standards context, and industry fit. Return one valid JSON object only; no markdown, no comments, and no trailing commas. Be conservative. "
-                    "Do not invent missing evidence. If evidence is weak, use Low confidence and prefer review prompts. "
-                    "Ignore generic standards/amendments text unless the report clearly applies the standard in current accounting policies or balances."
+                    f"{STANDARD_AI_REVIEW_QUERY}\n"
+                    "Do not invent missing evidence. If evidence is weak, use Medium/Low confidence and prefer review_prompt."
                 ),
             },
             {
@@ -165,32 +210,43 @@ def _build_prompt(
     significant_transactions = ", ".join(profile.significant_transactions) if profile.significant_transactions else "None provided"
     checklist_areas = ", ".join(profile.checklist_areas) if profile.checklist_areas else "None forced"
     disclosure_context = _keyword_evidence(doc_text)
+    json_shape = (
+        "{\n"
+        '  "summary": "short reviewer summary",\n'
+        '  "observations": [\n'
+        '    {\n'
+        '      "title": "...",\n'
+        '      "section_or_statement": "statement/page/section where issue appears",\n'
+        '      "dimension": "policy_relevance | disclosure_completeness | standard_context | industry_fit",\n'
+        '      "category": "optional audit category",\n'
+        '      "standard_or_topic": "...",\n'
+        '      "severity": "High|Medium|Low",\n'
+        '      "priority": "High|Medium|Low",\n'
+        '      "confidence": "High|Medium|Low",\n'
+        '      "status": "exception|review_prompt|ok",\n'
+        '      "issue": "...",\n'
+        '      "rationale": "...",\n'
+        '      "expected_fix": "proposed correction or expected wording, if applicable",\n'
+        '      "recommendation": "...",\n'
+        '      "page_reference": "Page X or Pages X-Y if visible",\n'
+        '      "note_reference": "Note X if visible",\n'
+        '      "evidence_snippet": "short quote/paraphrase from provided text"\n'
+        '    }\n'
+        '  ]\n'
+        "}"
+    )
+
     return (
-        "Review the accounting policies and related disclosures.\n\n"
+        f"{STANDARD_AI_REVIEW_QUERY}\n\n"
         "Return JSON with this shape:\n"
-        "{"
-        '"summary":"short reviewer summary",'
-        '"observations":[{'
-        '"title":"...",'
-        '"dimension":"policy_relevance|disclosure_completeness|standard_context|industry_fit",'
-        '"standard_or_topic":"...",'
-        '"severity":"High|Medium|Low",'
-        '"confidence":"High|Medium|Low",'
-        '"status":"exception|review_prompt|ok",'
-        '"issue":"...",'
-        '"rationale":"...",'
-        '"recommendation":"...",'
-        '"page_reference":"Page X or Pages X-Y if visible",'
-        '"note_reference":"Note X if visible",'
-        '"evidence_snippet":"short quote/paraphrase from provided text"'
-        "}]}.\n\n"
+        f"{json_shape}\n"
         "Rules:\n"
         "1. Use High only when the wording clearly conflicts with the entity, transaction, or current standard context.\n"
         "2. Use Medium or Low for judgement prompts.\n"
         "3. If a policy is present and appears tailored, you may return status=ok.\n"
         "4. If disclosure wording is generic but not clearly wrong, prefer review_prompt.\n"
         "5. Consider industry fit when judging whether a paragraph represents the entity's business.\n"
-        "6. Limit output to at most 6 observations.\n\n"
+        f"6. Do not return more than {AI_POLICY_OBSERVATION_LIMIT} observations unless evidence strongly requires it.\n\n"
         f"Company profile:\n- Company name: {company_name}\n- Industry: {industry}\n- Reporting currency: {currency}\n"
         f"- Framework: {framework}\n- Expected policies: {expected_policies}\n- Significant transactions: {significant_transactions}\n"
         f"- Forced checklist areas: {checklist_areas}\n- Deterministically detected policy areas: {', '.join(detected_indicators) or 'None'}\n\n"
@@ -410,7 +466,7 @@ def _balanced_json_object(text: str) -> str:
 def _repair_response_json(api_key: str, model: str, malformed_text: str, expected_shape: str) -> dict[str, Any]:
     repair_payload = {
         "model": model,
-        "max_output_tokens": 1600,
+        "max_output_tokens": AI_REPAIR_OUTPUT_TOKENS,
         "input": [
             {
                 "role": "system",
@@ -481,7 +537,7 @@ def _append_text_fragments(collected: list[str], value: Any) -> None:
 def _rows_to_outputs(observations: list[dict[str, Any]]) -> tuple[list[Finding], list[dict[str, str]]]:
     findings: list[Finding] = []
     export_rows: list[dict[str, str]] = []
-    for observation in observations[:6]:
+    for observation in observations[:AI_POLICY_OBSERVATION_LIMIT]:
         if not isinstance(observation, dict):
             continue
         title = str(observation.get("title", "") or "").strip()
@@ -496,6 +552,11 @@ def _rows_to_outputs(observations: list[dict[str, Any]]) -> tuple[list[Finding],
         page_reference = str(observation.get("page_reference", "") or "").strip() or "Document-wide"
         note_reference = str(observation.get("note_reference", "") or "").strip()
         evidence_snippet = str(observation.get("evidence_snippet", "") or "").strip()
+        category = str(observation.get("category", "") or "").strip() or "General"
+        section_or_statement = str(observation.get("section_or_statement", "") or "").strip() or "Document-wide"
+        priority = str(observation.get("priority", "") or "").strip() or "Medium"
+        expected_fix = str(observation.get("expected_fix", "") or "").strip()
+
         if not issue and not title:
             continue
         severity, confidence, status = _calibrate_policy_observation(
@@ -520,6 +581,10 @@ def _rows_to_outputs(observations: list[dict[str, Any]]) -> tuple[list[Finding],
                 "Issue": issue,
                 "Rationale": rationale,
                 "Evidence snippet": evidence_snippet,
+                "Section / statement": section_or_statement,
+                "Expected fix": expected_fix,
+                "Priority": priority,
+                "Category detail": category,
                 "Recommendation": recommendation,
             }
         )
@@ -540,6 +605,10 @@ def _rows_to_outputs(observations: list[dict[str, Any]]) -> tuple[list[Finding],
                     "note_reference": note_reference,
                     "reason": rationale,
                     "check_type": "AI policy judgement",
+                    "category_detail": category,
+                    "expected_fix": expected_fix,
+                    "section_or_statement": section_or_statement,
+                    "review_priority": priority,
                 },
             )
         )
@@ -713,3 +782,7 @@ def _sort_note_key(value: str) -> tuple[int, str]:
     if not match:
         return (999, str(value))
     return (int(match.group(1)), str(value))
+
+
+
+
