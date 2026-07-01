@@ -3649,6 +3649,7 @@ def check_formatting(document: PdfDocument, profile: CompanyProfile) -> list[Fin
 
     _check_comparatives(findings, document)
     _check_required_statement_names(findings, document, profile)
+    findings.extend(_check_share_capital_unit_heading_presentation(document))
     for page in document.pages:
         bad_separators = []
         page_document = PdfDocument([page], ocr_used=document.ocr_used)
@@ -3672,6 +3673,70 @@ def check_formatting(document: PdfDocument, profile: CompanyProfile) -> list[Fin
             )
     return findings
 
+
+def _check_share_capital_unit_heading_presentation(document: PdfDocument) -> list[Finding]:
+    findings: list[Finding] = []
+    seen_pages: set[int] = set()
+    for page in document.pages:
+        if page.number in seen_pages or not _page_may_contain_share_capital_cast(page.text):
+            continue
+        issue = _share_capital_unit_heading_issue(page.text)
+        if not issue:
+            continue
+        seen_pages.add(page.number)
+        findings.append(
+            Finding(
+                "Formatting",
+                "Low",
+                f"Page {page.number}",
+                "Share capital table may have unclear unit headings.",
+                issue,
+                "Confirm that monetary columns and number-of-share columns are separately and clearly labelled.",
+                metadata={"check_type": "share_capital_presentation", "page": str(page.number)},
+            )
+        )
+    return findings
+
+
+def _share_capital_unit_heading_issue(text: str) -> str:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        line_lower = _normalise_match_words(line)
+        if not re.search(r"\b(issued|shareholding|shareholder|number\s+of\s+shares?)\b", line, flags=re.I):
+            continue
+        start = max(0, index - 1)
+        end = min(len(lines), index + 8)
+        window_lines = lines[start:end]
+        window = " ".join(window_lines)
+        normalized_window = _normalise_match_words(window)
+        share_unit_count = len(re.findall(r"\bnumber\s+of\s+shares?\b", window, flags=re.I))
+        if not share_unit_count:
+            continue
+        if not _currency_unit_marker_count(window):
+            continue
+        year_header_count = max((len(YEAR_RE.findall(candidate)) for candidate in window_lines), default=0)
+        amount_column_count = max((len(NUMBER_RE.findall(candidate)) for candidate in window_lines), default=0)
+        if max(year_header_count, amount_column_count) < 4:
+            continue
+        unit_count = _currency_unit_marker_count(window) + share_unit_count
+        if unit_count >= max(year_header_count, 2):
+            continue
+        snippet = re.sub(r"\s+", " ", " | ".join(window_lines[:6])).strip()[:260]
+        return (
+            "The share capital/shareholding table appears to mix currency amounts and number-of-share columns, "
+            f"but the unit headings may not clearly map to all columns. Header snippet: {snippet}"
+        )
+    return ""
+
+
+def _currency_unit_marker_count(text: str) -> int:
+    return len(
+        re.findall(
+            r"(?:N|NGN|NGN\.|\u20a6)\s*['’‘]?\s*0{3}\b|N\s*['’‘]\s*000\b|N\s*'\s*000\b",
+            text,
+            flags=re.I,
+        )
+    )
 
 def _looks_like_unformatted_amount(token: str) -> bool:
     if YEAR_RE.fullmatch(token):

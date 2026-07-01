@@ -4039,6 +4039,54 @@ def test_ocr_formatting_ignores_low_confidence_summary_table_fragments():
     assert not any("thousands separators" in finding.issue.lower() for finding in findings)
 
 
+def test_formatting_flags_unclear_share_capital_unit_headings():
+    document = PdfDocument(
+        [
+            PdfPage(
+                4,
+                "Directors' Report\n"
+                "6. Share capital\n"
+                "2025 2024 2025 2024\n"
+                "Issued N '000 N '000 Number of shares\n"
+                "Greystone One Holdings Limited 1,250,000 1,250,000 1,250,000 1,250,000\n"
+                "Greystone Two Holdings Limited 1,250,000 1,250,000 1,250,000 1,250,000\n"
+                "2,500,000 2,500,000 2,500,000 2,500,000\n",
+                [],
+            )
+        ]
+    )
+
+    findings = check_formatting(document, CompanyProfile())
+
+    issue = next((finding for finding in findings if "unit headings" in finding.issue.lower()), None)
+    assert issue is not None
+    assert issue.location == "Page 4"
+    assert issue.severity == "Low"
+    assert issue.metadata["check_type"] == "share_capital_presentation"
+    assert "N '000" in issue.evidence
+    assert "Number of shares" in issue.evidence
+
+
+def test_formatting_does_not_flag_clear_share_capital_unit_headings():
+    document = PdfDocument(
+        [
+            PdfPage(
+                4,
+                "Share capital\n"
+                "Issued | 2025 N '000 | 2024 N '000 | 2025 Number of shares | 2024 Number of shares\n"
+                "Greystone One Holdings Limited 1,250,000 1,250,000 1,250,000 1,250,000\n"
+                "Greystone Two Holdings Limited 1,250,000 1,250,000 1,250,000 1,250,000\n"
+                "Total 2,500,000 2,500,000 2,500,000 2,500,000\n",
+                [],
+            )
+        ]
+    )
+
+    findings = check_formatting(document, CompanyProfile())
+
+    assert not any("unit headings" in finding.issue.lower() for finding in findings)
+
+
 def test_currency_normalization_accepts_naira_aliases_and_rejects_invalid_code():
     assert normalize_reporting_currency("NGN") == "NGN"
     assert normalize_reporting_currency("Naira") == "NGN"
