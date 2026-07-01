@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import warnings
@@ -18,6 +19,8 @@ from models import PdfDocument, PdfPage, ReviewOptions
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
+FAST_TEXT_ONLY_PAGE_THRESHOLD = max(10, int(os.getenv("FAST_TEXT_ONLY_PAGE_THRESHOLD", "45")))
+
 FINANCIAL_OCR_WORDS = {
     "statement",
     "changes",
@@ -42,6 +45,11 @@ FINANCIAL_OCR_WORDS = {
 def extract_pdf(path: str | Path) -> PdfDocument:
     path = Path(path)
     fast_pages = _extract_text_fast(path)
+    if _fast_text_pages_are_sufficient(fast_pages):
+        document = _document_from_fast_text_pages(fast_pages or [])
+        setattr(document, "rotated_page_details", [])
+        setattr(document, "fast_text_only", True)
+        return document
 
     pages: list[PdfPage] = []
     rotated_page_details: list[dict[str, object]] = []
@@ -90,6 +98,27 @@ def extract_pdf(path: str | Path) -> PdfDocument:
     document = PdfDocument(fast_pages or [])
     setattr(document, "rotated_page_details", rotated_page_details)
     return document
+
+
+def _fast_text_pages_are_sufficient(fast_pages: list[PdfPage] | None) -> bool:
+    if not fast_pages or len(fast_pages) < FAST_TEXT_ONLY_PAGE_THRESHOLD:
+        return False
+    text_pages = [page for page in fast_pages if page.text.strip()]
+    if len(text_pages) / len(fast_pages) < 0.95:
+        return False
+    total_chars = sum(len(page.text.strip()) for page in text_pages)
+    if total_chars < len(fast_pages) * 350:
+        return False
+    return not any(_should_retry_with_rotated_ocr(page.text) for page in text_pages)
+
+
+def _document_from_fast_text_pages(fast_pages: list[PdfPage]) -> PdfDocument:
+    return PdfDocument(
+        [
+            PdfPage(page.number, page.text, _tables_from_text_lines(page.text))
+            for page in fast_pages
+        ]
+    )
 
 
 def extract_pdf_with_ocr(

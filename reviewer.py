@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 
 from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage, ReviewOptions, ReviewResult
@@ -461,7 +462,7 @@ def review_pdf(
         else:
             if ai_review.message:
                 checks_skipped.append(ai_review.message)
-            ai_policy_rate_limited = ai_review.status == "deferred" and _is_rate_limit_error(Exception(ai_review.message or ""))
+            ai_policy_rate_limited = ai_review.status == "deferred"
     if getattr(document, "skipped_table_details", None):
         checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables; details are listed in Skipped table details.")
     
@@ -559,7 +560,12 @@ def _get_note_heading_with_fallback(ref: str, headings: dict[str, str]) -> str:
     return ""
 
 def _document_scope(document: PdfDocument) -> str:
-    return "Limited-scope statement extract" if _is_limited_scope_statement_extract(document) else "Full financial statement or mixed upload"
+    cached = getattr(document, "_document_scope_cache", None)
+    if isinstance(cached, str):
+        return cached
+    scope = "Limited-scope statement extract" if _is_limited_scope_statement_extract(document) else "Full financial statement or mixed upload"
+    setattr(document, "_document_scope_cache", scope)
+    return scope
 
 
 def _is_limited_scope_statement_extract(document: PdfDocument) -> bool:
@@ -897,6 +903,8 @@ def _skipped_check_requires_manual_review(check: str, document: PdfDocument | No
         return False
     status_only_terms = (
         "ai review",
+        "ai policy",
+        "ai finding",
         "openai",
         "api key",
         "rate-limit",
@@ -907,6 +915,10 @@ def _skipped_check_requires_manual_review(check: str, document: PdfDocument | No
         "limited-scope statement extract",
         "full financial statement completeness",
         "document-level extraction quality is low",
+        "ocr-assisted document",
+        "detailed note-reference reconciliation was skipped",
+        "detailed note agreement skipped because table extraction confidence is below threshold",
+        "contents agreement: skipped because statement references in contents were not detected",
     )
     if any(term in lower for term in status_only_terms):
         return False
@@ -1177,6 +1189,9 @@ def _printed_footer_page_number(text: str) -> int | None:
 
 
 def _printed_page_number_map(document: PdfDocument) -> dict[int, int]:
+    cached = getattr(document, "_printed_page_number_map_cache", None)
+    if isinstance(cached, dict):
+        return cached
     mapping: dict[int, int] = {}
     highest_physical_page = max((page.number for page in document.pages), default=0)
     max_reasonable_offset = max(12, highest_physical_page // 3)
@@ -1200,6 +1215,7 @@ def _printed_page_number_map(document: PdfDocument) -> dict[int, int]:
             continue
         for page_number in range(left + 1, right):
             mapping.setdefault(page_number, mapping[left] + (page_number - left))
+    setattr(document, "_printed_page_number_map_cache", mapping)
     return mapping
 
 
@@ -1238,17 +1254,22 @@ def _apply_reviewer_page_labels_to_note_rows(document: PdfDocument, rows: list[d
 
 
 def _notes_start_page(document: PdfDocument) -> int | None:
+    if hasattr(document, "_notes_start_page_cache"):
+        return getattr(document, "_notes_start_page_cache")
     pages = list(document.pages)
     for i, page in enumerate(pages):
         text_lower = page.text.lower()
         if "notes to the financial" in text_lower:
             if "accounting policies" in text_lower or "material accounting" in text_lower:
                 if not _looks_like_front_matter_page(page.text):
+                    setattr(document, "_notes_start_page_cache", page.number)
                     return page.number
             elif i + 1 < len(pages) and ("accounting policies" in pages[i+1].text.lower() or "material accounting" in pages[i+1].text.lower()):
                 if not _looks_like_front_matter_page(page.text):
+                    setattr(document, "_notes_start_page_cache", page.number)
                     return page.number
         if _notes_heading_in_text(page.text):
+            setattr(document, "_notes_start_page_cache", page.number)
             return page.number
         if _looks_like_front_matter_page(page.text):
             continue
@@ -1256,7 +1277,10 @@ def _notes_start_page(document: PdfDocument) -> int | None:
         candidates = _notes_heading_candidates(document, include_weak=False)
         accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
         if accepted:
-            return int(accepted[0]["page"])
+            start_page = int(accepted[0]["page"])
+            setattr(document, "_notes_start_page_cache", start_page)
+            return start_page
+    setattr(document, "_notes_start_page_cache", None)
     return None
 
 
@@ -1363,6 +1387,10 @@ def _possible_notes_heading_snippets(document: PdfDocument) -> list[str]:
 
 
 def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False) -> list[dict[str, str | int]]:
+    cache_name = "_notes_heading_candidates_weak_cache" if include_weak else "_notes_heading_candidates_strict_cache"
+    cached = getattr(document, cache_name, None)
+    if isinstance(cached, list):
+        return cached
     candidates: list[tuple[float, dict[str, str | int]]] = []
     search_start_page = _notes_candidate_search_start_page(document)
     for page in document.pages:
@@ -1446,7 +1474,9 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
                 )
             )
     candidates.sort(key=lambda item: item[0], reverse=True)
-    return [candidate for _score, candidate in candidates]
+    rows = [candidate for _score, candidate in candidates]
+    setattr(document, cache_name, rows)
+    return rows
 
 
 def _raw_page_notes_heading_candidates(text: str, include_weak: bool = False) -> list[tuple[float, str, str, str, str]]:
@@ -1610,10 +1640,15 @@ def _notes_heading_candidate_rows(document: PdfDocument) -> list[dict[str, str]]
 
 
 def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
+    cached = getattr(document, "_note_agreement_result_rows_cache", None)
+    if isinstance(cached, list):
+        return cached
     rows: list[dict[str, str]] = []
     statement_lines = _statement_note_lines(document)
     if not statement_lines:
-        return _apply_reviewer_page_labels_to_note_rows(document, rows)
+        labelled_rows = _apply_reviewer_page_labels_to_note_rows(document, rows)
+        setattr(document, "_note_agreement_result_rows_cache", labelled_rows)
+        return labelled_rows
     if document.ocr_used:
         headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
         page_ranges = _note_section_page_ranges(document)
@@ -1835,7 +1870,9 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                 f"heading match / {matching_method or 'normalized amount'}" if alternative_ref else (matching_method or "not found"),
             )
         )
-    return _apply_reviewer_page_labels_to_note_rows(document, rows)
+    labelled_rows = _apply_reviewer_page_labels_to_note_rows(document, rows)
+    setattr(document, "_note_agreement_result_rows_cache", labelled_rows)
+    return labelled_rows
 
 
 def _filtered_note_agreement_rows(document: PdfDocument, findings: list[Finding] | None = None) -> list[dict[str, str]]:
@@ -2075,7 +2112,10 @@ def _check_result_rows(
             result_status = "Manual review required"
             evidence = "Automated check was not reliable enough to conclude; reviewer should inspect the referenced page/table/note."
         else:
-            result_status = "Status only / deferred"
+            if "skipped" in check.lower():
+                result_status = "Skipped - not elevated"
+            else:
+                result_status = "Status only / deferred"
             evidence = "This item reports an availability, scope, or not-applicable condition rather than a failed audit check."
         
         if is_company:
@@ -2254,6 +2294,9 @@ def check_extraction_quality(document: PdfDocument) -> list[Finding]:
 
 
 def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
+    cached = getattr(document, "_detected_profile_cache", None)
+    if isinstance(cached, dict):
+        return cached
     text = document.text
     profile_text = _profile_detection_text(document)
     lower = profile_text.lower()
@@ -2276,6 +2319,7 @@ def infer_detected_profile(document: PdfDocument) -> dict[str, str]:
         "Suggested checklist areas": _suggest_checklist_areas(lower),
         "Extraction confidence": f"Text {document.extraction_confidence}% | Tables {document.table_extraction_confidence}%",
     }
+    setattr(document, "_detected_profile_cache", profile)
     return profile
 
 
@@ -3832,7 +3876,7 @@ def _share_capital_unit_heading_issue(text: str) -> str:
 def _currency_unit_marker_count(text: str) -> int:
     return len(
         re.findall(
-            r"(?:N|NGN|NGN\.|\u20a6)\s*['’‘]?\s*0{3}\b|N\s*['’‘]\s*000\b|N\s*'\s*000\b",
+            "(?:N|NGN|NGN\\.|\\u20a6)\\s*['\\u2019\\u2018]?\\s*0{3}\\b|N\\s*['\\u2019\\u2018]\\s*000\\b|N\\s*'\\s*000\\b",
             text,
             flags=re.I,
         )
@@ -4986,6 +5030,9 @@ def _find_statement_page(document: PdfDocument, statement_name: str) -> PdfPage 
 
 
 def _classified_primary_statement_pages(document: PdfDocument) -> dict[str, PdfPage]:
+    cached = getattr(document, "_classified_primary_statement_pages_cache", None)
+    if isinstance(cached, dict):
+        return cached
     aliases = {
         "Statement of income and expenditure": (
             "statement of income and expenditure",
@@ -5011,6 +5058,7 @@ def _classified_primary_statement_pages(document: PdfDocument) -> dict[str, PdfP
                 continue
             if any(_statement_heading_line_present(page_head, candidate) for candidate in candidates) and _page_has_statement_rows_for(canonical, page.text):
                 classified[canonical] = page
+    setattr(document, "_classified_primary_statement_pages_cache", classified)
     return classified
 
 
@@ -5039,6 +5087,8 @@ def _looks_like_contents_page(text: str) -> bool:
     if not raw_lines:
         return False
     head = "\n".join(raw_lines[:60]).lower()
+    if not any(marker in head for marker in ("contents", "statement of", "balance sheet", "cash flow", "financial position", "profit or loss", "comprehensive income")):
+        return False
     if _fuzzy_contains(head, "table of contents", 0.76) or _fuzzy_contains(head, "contents", 0.9):
         return True
     if _fuzzy_contains(head, "notes to the financial statements", 0.84) or _fuzzy_contains(head, "notes to financial statements", 0.84):
@@ -5150,6 +5200,9 @@ def _extract_content_line_page_reference(line: str, page_count: int) -> int | No
 
 
 def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
+    cached = getattr(document, "_contents_statement_page_refs_cache", None)
+    if isinstance(cached, dict):
+        return cached
     aliases = {
         "Statement of income and expenditure": (
             "statement of profit or loss and other comprehensive income",
@@ -5172,7 +5225,8 @@ def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
         ),
     }
     refs: dict[str, int] = {}
-    for page in document.pages:
+    front_matter_pages = document.pages[: min(len(document.pages), 15)]
+    for page in front_matter_pages:
         if not _looks_like_contents_page(page.text):
             continue
         raw_lines = [re.sub(r"\s+", " ", line.strip()) for line in page.text.splitlines() if line.strip()]
@@ -5201,7 +5255,9 @@ def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
                         break
                 if canonical in refs:
                     break
+    setattr(document, "_contents_statement_page_refs_cache", refs)
     return refs
+
 def _physical_page_for_printed(document: PdfDocument, printed_page: int) -> int | None:
     printed_index = _printed_page_number_map(document)
     # Prefer explicit printed page mapping when available.
@@ -5289,20 +5345,25 @@ def _looks_like_contents_or_front_matter_page(text: str) -> bool:
 
 
 def _statement_heading_line_present(text: str, phrase: str) -> bool:
+    normalized_phrase = _normalise_match_words(phrase)
+    if not normalized_phrase:
+        return False
+    generic_terms = {"statement", "statements", "financial", "of", "the", "and", "for"}
+    discriminators = [word for word in normalized_phrase.split() if word not in generic_terms]
     for line in text.splitlines()[:60]:
         stripped = re.sub(r"\s+", " ", line.strip())
-        if not stripped or re.search(r"\.{2,}\s*\d{1,3}$", stripped):
+        if not stripped or len(stripped) > 140 or re.search(r"\.{2,}\s*\d{1,3}$", stripped):
             continue
         if re.search(r"\b(page|contents)\b", stripped, flags=re.I):
             continue
         normalized = _normalise_match_words(stripped)
-        normalized_phrase = _normalise_match_words(phrase)
+        if discriminators and not any(term in normalized for term in discriminators):
+            continue
         if normalized_phrase in normalized and len(normalized.split()) <= len(normalized_phrase.split()) + 6:
             return True
         if _fuzzy_contains(stripped, phrase, threshold=0.82) and len(normalized.split()) <= len(normalized_phrase.split()) + 6:
             return True
     return False
-
 
 def _page_has_statement_rows_for(statement_name: str, text: str) -> bool:
     rows = _statement_rows(text)
@@ -5769,9 +5830,17 @@ def _cross_source_confidence(document: PdfDocument) -> str:
     return "Low"
 
 
-def _cross_source_note_amounts(note_sections: dict[str, str], aliases: tuple[str, ...]) -> tuple[list[Decimal], str]:
+def _cross_source_note_amounts(
+    note_sections: dict[str, str],
+    aliases: tuple[str, ...],
+    row_cache: dict[str, dict[str, list[Decimal]]] | None = None,
+) -> tuple[list[Decimal], str]:
+    row_cache = row_cache if row_cache is not None else {}
     for ref, section in note_sections.items():
-        rows = _statement_rows(section)
+        rows = row_cache.get(ref)
+        if rows is None:
+            rows = _statement_rows(section)
+            row_cache[ref] = rows
         values = _row_amounts_any(rows, aliases)
         if values:
             return values, ref
@@ -5800,8 +5869,17 @@ def _check_cross_source_cash_flow(
     is_rows = _statement_rows(is_page.text) if is_page else {}
     ce_rows = _statement_rows(ce_page.text) if ce_page else {}
     conf = _cross_source_confidence(document)
-    note_sections = _note_sections(document)
-    cf_from_notes = bool(note_sections)
+    note_sections: dict[str, str] = {}
+    note_sections_loaded = False
+    note_row_cache: dict[str, dict[str, list[Decimal]]] = {}
+    allow_note_fallback = len(document.pages) <= 45 and not getattr(document, "fast_text_only", False)
+
+    def get_note_sections() -> dict[str, str]:
+        nonlocal note_sections, note_sections_loaded
+        if not note_sections_loaded:
+            note_sections = _note_sections(document)
+            note_sections_loaded = True
+        return note_sections
 
     sfp_cash = _row_amounts_any(sfp_rows, ("cash and cash equivalents", "cash and cash equivalents at end", "cash at end"))
     cf_open = _row_amounts_any(
@@ -5835,36 +5913,45 @@ def _check_cross_source_cash_flow(
         ),
     )
 
-    note_cf_open, note_cf_open_ref = _cross_source_note_amounts(
-        note_sections,
-        (
-            "cash and cash equivalents at beginning",
-            "cash and cash equivalents at the beginning of the year",
-            "cash at beginning",
-            "opening cash",
-            "cash and cash equivalents at beginning of year",
-        ),
-    )
-    note_cf_close, note_cf_close_ref = _cross_source_note_amounts(
-        note_sections,
-        (
-            "cash and cash equivalents at end",
-            "cash and cash equivalents at the end of the year",
-            "cash at end",
-            "closing cash",
-            "cash and cash equivalents at end of year",
-        ),
-    )
-    note_cf_movement, note_cf_movement_ref = _cross_source_note_amounts(
-        note_sections,
-        (
-            "net increase in cash and cash equivalents",
-            "net decrease in cash and cash equivalents",
-            "cash movement for the year",
-            "net increase in cash",
-            "net movement in cash and cash equivalents",
-        ),
-    )
+    note_cf_open, note_cf_open_ref = ([], "")
+    note_cf_close, note_cf_close_ref = ([], "")
+    note_cf_movement, note_cf_movement_ref = ([], "")
+    if allow_note_fallback and not cf_open and get_note_sections():
+        note_cf_open, note_cf_open_ref = _cross_source_note_amounts(
+            note_sections,
+            (
+                "cash and cash equivalents at beginning",
+                "cash and cash equivalents at the beginning of the year",
+                "cash at beginning",
+                "opening cash",
+                "cash and cash equivalents at beginning of year",
+            ),
+            note_row_cache,
+        )
+    if allow_note_fallback and not cf_close and get_note_sections():
+        note_cf_close, note_cf_close_ref = _cross_source_note_amounts(
+            note_sections,
+            (
+                "cash and cash equivalents at end",
+                "cash and cash equivalents at the end of the year",
+                "cash at end",
+                "closing cash",
+                "cash and cash equivalents at end of year",
+            ),
+            note_row_cache,
+        )
+    if allow_note_fallback and not cf_movement and get_note_sections():
+        note_cf_movement, note_cf_movement_ref = _cross_source_note_amounts(
+            note_sections,
+            (
+                "net increase in cash and cash equivalents",
+                "net decrease in cash and cash equivalents",
+                "cash movement for the year",
+                "net increase in cash",
+                "net movement in cash and cash equivalents",
+            ),
+            note_row_cache,
+        )
 
     if not cf_open and note_cf_open:
         cf_open = note_cf_open
@@ -5935,7 +6022,7 @@ def _check_cross_source_cash_flow(
                     },
                 )
             )
-    elif cf_from_notes:
+    elif note_sections_loaded and note_sections:
         performed.append("Cross-source cash flow note fallback values were located for cash-flow reconciliation.")
     else:
         skipped.append("Cross-source cash flow check skipped: opening, closing, and prior-year cash comparisons were not available at reliable width from SFP and CFS.")
@@ -5944,7 +6031,7 @@ def _check_cross_source_cash_flow(
     ce_pat = _row_amounts_any(ce_rows, ("profit for the year", "loss for the year", "profit or loss for the period"))
     note_is_pat_ref = ""
     note_ce_pat_ref = ""
-    if (not is_pat or not ce_pat) and note_sections:
+    if allow_note_fallback and (not is_pat or not ce_pat) and get_note_sections():
         note_is_pat, note_is_pat_ref = _cross_source_note_amounts(
             note_sections,
             ("profit after tax", "loss after tax", "profit for the year", "loss for the year", "comprehensive income for the year"),
@@ -6490,13 +6577,31 @@ def _statement_rows(text: str, statement_name: str = "") -> dict[str, list[Decim
 
 
 def _statement_row_parses(text: str, statement_name: str = "") -> dict[str, OcrStatementRow]:
+    return dict(_statement_row_parses_cached(str(text or ""), str(statement_name or "")))
+
+
+@lru_cache(maxsize=512)
+def _statement_row_parses_cached(text: str, statement_name: str = "") -> dict[str, OcrStatementRow]:
     rows: dict[str, OcrStatementRow] = {}
     text = _crop_statement_text(text, statement_name)
     for line in text.splitlines():
+        if not _plausible_statement_amount_line(line):
+            continue
         parsed = _parse_ocr_statement_row(line)
         if parsed and parsed.label and _statement_row_label_allowed(parsed.label):
             rows[parsed.label] = parsed
     return _align_income_statement_columns(rows, text)
+
+
+def _plausible_statement_amount_line(line: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", str(line or "")).strip()
+    if not cleaned or len(cleaned) > 320:
+        return False
+    if len(NUMBER_RE.findall(cleaned)) < 1:
+        return False
+    if sum(1 for token in cleaned.split() if len(token) > 35) >= 2:
+        return False
+    return bool(re.search(r"[A-Za-z]", cleaned))
 
 
 def _align_income_statement_columns(rows: dict[str, OcrStatementRow], text: str) -> dict[str, OcrStatementRow]:
@@ -8217,6 +8322,9 @@ def _note_headings(text: str) -> dict[str, str]:
 
 
 def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
+    cached = getattr(document, "_note_headings_by_page_cache", None)
+    if isinstance(cached, dict):
+        return cached
     candidates: dict[str, list[tuple[str, int, int]]] = {}
     notes_start_page = _notes_start_page(document)
     strict_notes_start = notes_start_page is not None
@@ -8282,6 +8390,7 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
         best = valid_occs[-1]
         headings[number] = (best[0], best[1])
     _augment_note_headings_from_statement_refs(headings, document)
+    setattr(document, "_note_headings_by_page_cache", headings)
     return headings
 
 
@@ -8564,6 +8673,9 @@ def _rename_statement_for_output(document: PdfDocument, canonical_name: str, pag
     return canonical_name
 
 def _statement_note_lines(document: PdfDocument) -> list[StatementNoteLine]:
+    cached = getattr(document, "_statement_note_lines_cache", None)
+    if isinstance(cached, list):
+        return cached
     items: list[StatementNoteLine] = []
     statements = _classified_primary_statement_pages(document)
     source_pages: list[tuple[str, PdfPage]] = []
@@ -8586,6 +8698,7 @@ def _statement_note_lines(document: PdfDocument) -> list[StatementNoteLine]:
             parsed = _parse_statement_note_line(line, page.number, display_name)
             if parsed:
                 items.append(parsed)
+    setattr(document, "_statement_note_lines_cache", items)
     return items
 
 
@@ -9526,6 +9639,9 @@ def _note_refs_from_tables(tables: list[list[list[str]]]) -> set[str]:
 
 
 def _note_sections(document: PdfDocument) -> dict[str, str]:
+    cached = getattr(document, "_note_sections_cache", None)
+    if isinstance(cached, dict):
+        return cached
     start_page = _notes_start_page(document)
     if not start_page:
         text = document.text
@@ -9570,6 +9686,7 @@ def _note_sections(document: PdfDocument) -> dict[str, str]:
             sections[current].append(line)
     section_text = {number: "\n".join(lines) for number, lines in sections.items()}
     _augment_note_sections_from_inferred_headings(section_text, document)
+    setattr(document, "_note_sections_cache", section_text)
     return section_text
 
 
@@ -9967,12 +10084,3 @@ def _check_ocr_statement_of_cash_flows(document: PdfDocument, tolerance: Decimal
             else:
                 pass
     return findings
-
-
-
-
-
-
-
-
-
