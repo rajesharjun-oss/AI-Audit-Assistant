@@ -450,11 +450,20 @@ def parse_skipped_check(item: str) -> dict[str, str]:
         page_reference = f"Page {statement_match.group(2)}"
         reason = statement_match.group(3).rstrip(".")
         reviewer_action = "Open the page and inspect the statement manually; automated casting is withheld because extraction did not produce reliable rows/columns."
+    elif "cross-source income-to-equity linkage skipped" in item.lower():
+        check_area = "Cross-source income-to-equity linkage"
+        page_tokens = re.findall(r"\bPage\s+\d+", item, flags=re.I)
+        page_reference = ", ".join(dict.fromkeys(page_tokens))
+        reason = "Only one of income statement result or equity movement reference was confidently parsed."
+        if "Available evidence:" in item:
+            reason += " " + item.split("Available evidence:", 1)[1].strip()
+        reviewer_action = "Review the income statement and statement of changes in equity/accumulated fund pages; rerun after improving row extraction if material."
     elif item.lower().startswith("generic table arithmetic skipped"):
         check_area = "Generic table arithmetic"
         page_reference = "See Skipped table details"
-        reason = "Low-confidence or non-standard tables are listed separately."
-        reviewer_action = "Use Skipped checks summary and Skipped table details to inspect the affected note tables manually."
+        reason = "Low-confidence, note, supplementary, or non-standard tables are listed separately."
+        can_fix = "Partially; some table exclusions are intentional"
+        reviewer_action = "Use Skipped checks summary and Skipped table details. Value-added statements and multi-year summaries are intentionally excluded; low-confidence and notes tables require manual inspection or better extraction."
     elif "notes section start was not detected" in item.lower():
         check_area = "OCR note-reference validation"
         reason = "Notes section start was not detected reliably."

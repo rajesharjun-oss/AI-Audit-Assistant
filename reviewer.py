@@ -784,10 +784,6 @@ def _build_result(
         active_findings.append(f)
             
     findings, not_elevated_review_prompts = _split_elevated_findings(active_findings, document)
-    if not_elevated_review_prompts:
-        checks_skipped_list.append(
-            f"{len(not_elevated_review_prompts)} low-confidence review prompt(s) were not elevated to the Exception register; see Review prompts not elevated."
-        )
     checks_skipped_list = list(dict.fromkeys(checks_skipped_list))
     check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings, document, passed_check_evidence)
     
@@ -1831,6 +1827,16 @@ def _skipped_table_summary_rows(document: PdfDocument) -> list[dict[str, str]]:
             reviewer_action = "Review the source page before relying on automated table arithmetic."
             can_fix = "Possibly"
             why_review = "The extracted numeric row pattern is inconsistent, so the tool cannot confirm which figures belong to the same table columns without reviewer inspection."
+        elif "value-added statement" in skip_context:
+            group = "Value-added statement"
+            reviewer_action = "Inspect manually if material; do not cast it like a primary statement because value-added presentations have their own subtotal logic."
+            can_fix = "Not applicable"
+            why_review = "Value-added statements are supplementary presentation schedules, so generic row addition can create false exceptions."
+        elif "multi-year summary" in skip_context:
+            group = "Multi-year summary"
+            reviewer_action = "Inspect manually if material; do not cast it like a current-year primary statement."
+            can_fix = "Not applicable"
+            why_review = "Multi-year summaries combine several years and summary measures, so generic table casting is intentionally withheld."
         elif "not a recognised statement/note total table" in reason.lower() or "other table" in classification.lower():
             group = "Non-standard or non-financial table"
             reviewer_action = "No generic casting performed; review only if the table is financially relevant."
@@ -2637,6 +2643,18 @@ def check_primary_statement_consistency(
     findings.extend(cross_source_findings)
     performed.extend(cross_source_performed)
     skipped.extend(cross_source_skipped)
+
+    cash_support_findings, cash_support_performed = _check_cash_flow_supporting_amounts(document, tolerance)
+    findings.extend(cash_support_findings)
+    performed.extend(cash_support_performed)
+
+    disclosure_findings, disclosure_performed = _check_supporting_disclosure_note_reference_amounts(document, tolerance)
+    findings.extend(disclosure_findings)
+    performed.extend(disclosure_performed)
+
+    summary_findings, summary_performed = _check_supplementary_summary_consistency(document, tolerance)
+    findings.extend(summary_findings)
+    performed.extend(summary_performed)
 
     # Value Added Statement cross-check
     vas_page = next((page for page in document.pages if _looks_like_value_added_page(page.text)), None)
@@ -5469,7 +5487,7 @@ def _check_accumulated_fund_text(
     surplus_rows = [
         (idx, line, _amounts_from_statement_line(line))
         for idx, line in enumerate(lines)
-        if any(k in line.lower() for k in ["surplus for the year", "profit for the year", "profit/(loss) for the year"])
+        if any(k in line.lower() for k in ["surplus for the year", "profit for the year", "loss for the year", "profit/(loss) for the year", "loss/(profit) for the year"])
     ]
     
     if len(balance_rows) >= 2 and len(surplus_rows) >= 1:
@@ -5759,6 +5777,8 @@ def _check_cross_source_cash_flow(
 
     is_pat = _row_amounts_any(is_rows, ("profit after tax", "loss after tax", "profit for the year", "loss for the year"))
     ce_pat = _row_amounts_any(ce_rows, ("profit for the year", "loss for the year", "profit or loss for the period"))
+    note_is_pat_ref = ""
+    note_ce_pat_ref = ""
     if (not is_pat or not ce_pat) and note_sections:
         note_is_pat, note_is_pat_ref = _cross_source_note_amounts(
             note_sections,
@@ -5791,13 +5811,349 @@ def _check_cross_source_cash_flow(
                 )
             )
     elif is_pat or ce_pat:
-        skipped.append("Cross-source income-to-equity linkage skipped because only one of income or equity reference lines was confidently parsed.")
+        income_location = "not parsed"
+        if is_pat:
+            income_location = f"Page {is_page.number}" if is_page else (f"Note {note_is_pat_ref}" if note_is_pat_ref else "note fallback")
+        equity_location = "not parsed"
+        if ce_pat:
+            equity_location = f"Page {ce_page.number}" if ce_page else (f"Note {note_ce_pat_ref}" if note_ce_pat_ref else "note fallback")
+        skipped.append(
+            "Cross-source income-to-equity linkage skipped because only one of income or equity reference lines was confidently parsed. "
+            f"Available evidence: income result {income_location}; equity movement {equity_location}."
+        )
     if not performed and not findings:
         skipped.append("Cross-source cash flow check completed without actionable findings.")
 
     return findings, performed, skipped
 
 
+
+
+def _check_cash_flow_supporting_amounts(
+    document: PdfDocument,
+    tolerance: Decimal,
+) -> tuple[list[Finding], list[str]]:
+    findings: list[Finding] = []
+    performed: list[str] = []
+    cf_page = _find_statement_page(document, "Statement of cash flows")
+    if not cf_page:
+        return findings, performed
+    income_page = _find_statement_page(document, "Statement of profit or loss") or _find_statement_page(document, "Statement of income and expenditure")
+    note_sections = _note_sections(document)
+    specs = (
+        (
+            "Finance costs",
+            ("finance costs", "finance cost", "interest expense", "interest expenses"),
+            income_page,
+            ("finance costs", "finance cost", "interest expense", "interest expenses"),
+        ),
+        (
+            "Depreciation/amortisation add-back",
+            ("amortisation of right-of-use asset", "amortisation", "depreciation"),
+            None,
+            ("depreciation", "amortisation", "amortisation of right-of-use asset"),
+        ),
+        (
+            "Interest received on loan",
+            ("interest received on loan", "interest income", "finance income"),
+            income_page,
+            ("interest received on loan", "interest income", "finance income", "other operating income"),
+        ),
+    )
+    comparisons: list[str] = []
+    max_diff = Decimal("0")
+    for label, cf_aliases, source_page, source_aliases in specs:
+        cf_amounts, cf_line = _line_amounts_for_aliases_preserving_zero(cf_page.text, cf_aliases)
+        if not cf_amounts:
+            continue
+        sources: list[tuple[str, list[Decimal], str, str]] = []
+        if source_page:
+            source_amounts, source_line = _line_amounts_for_aliases_preserving_zero(source_page.text, source_aliases)
+            if source_amounts:
+                sources.append((f"Page {source_page.number}", source_amounts, source_line, "primary statement"))
+        note_amounts, note_ref, note_line = _note_line_amounts_for_aliases(note_sections, source_aliases)
+        if note_amounts:
+            sources.append((f"Note {note_ref}", note_amounts, note_line, "note"))
+        for source_ref, source_amounts, source_line, source_type in sources:
+            mismatches = _amount_vector_mismatches(cf_amounts, source_amounts, tolerance=Decimal("0"), compare_abs=True)
+            for column, left, right, diff in mismatches:
+                if abs(diff) == 0:
+                    continue
+                max_diff = max(max_diff, abs(diff))
+                comparisons.append(
+                    f"{label} {column}: cash flow {left:,} on Page {cf_page.number} vs {source_type} {right:,} in {source_ref} (difference {diff:,}). "
+                    f"Cash flow line: {cf_line}; source line: {source_line}"
+                )
+                break
+    if comparisons:
+        performed.append("Cash-flow add-back and source-note amount tie-out performed where matching lines were readable.")
+        findings.append(
+            Finding(
+                "Consistency",
+                "Medium" if max_diff > tolerance else "Low",
+                f"Page {cf_page.number} | Statement of cash flows",
+                "Cash-flow line item amount differs from the related primary statement or note amount.",
+                " | ".join(comparisons[:6]),
+                "Agree the cash-flow add-back/source line to the related statement or note and update the inconsistent amount.",
+                {"check_type": "Cash-flow source amount tie-out", "match_confidence": "High"},
+            )
+        )
+    return findings, performed
+
+
+def _check_supporting_disclosure_note_reference_amounts(
+    document: PdfDocument,
+    tolerance: Decimal,
+) -> tuple[list[Finding], list[str]]:
+    note_sections = _note_sections(document)
+    note_headings = _note_headings_by_page(document)
+    notes_start = _notes_start_page(document)
+    if not note_sections or not note_headings:
+        return [], []
+    findings: list[Finding] = []
+    performed: list[str] = []
+    issues: list[str] = []
+    pages: set[int] = set()
+    max_diff = Decimal("0")
+    risk_markers = ("financial instrument", "risk management", "credit risk", "liquidity risk", "market risk", "interest rate risk")
+    for page in document.pages:
+        if notes_start and page.number < notes_start:
+            continue
+        page_lower = page.text.lower()
+        if not any(marker in page_lower for marker in risk_markers):
+            continue
+        for raw_line in page.text.splitlines():
+            parsed = _parse_supporting_note_reference_amount_line(raw_line)
+            if not parsed:
+                continue
+            label, ref, amounts, line = parsed
+            if ref not in note_headings or ref not in note_sections:
+                continue
+            heading, heading_page = note_headings[ref]
+            section = note_sections[ref]
+            if not _note_heading_semantically_compatible(label, heading, section):
+                issues.append(
+                    f"Page {page.number}: '{label}' references Note {ref}, but Note {ref} heading is '{heading}'. Line: {line}"
+                )
+                pages.add(page.number)
+                max_diff = max(max_diff, Decimal("999"))
+                continue
+            section_amounts = _amounts_in_text(section)
+            for amount in amounts[:2]:
+                if abs(amount) < Decimal("1000"):
+                    continue
+                if _amount_list_contains(section_amounts, amount, tolerance=Decimal("0")):
+                    continue
+                nearest = _nearest_amount(amount, section_amounts)
+                if nearest is None:
+                    issues.append(f"Page {page.number}: {label} references Note {ref}, but {amount:,} was not located in Note {ref}. Line: {line}")
+                    max_diff = max(max_diff, abs(amount))
+                else:
+                    diff = amount - nearest
+                    issues.append(
+                        f"Page {page.number}: {label} references Note {ref}; disclosure shows {amount:,}, nearest amount in Note {ref} is {nearest:,} (difference {diff:,}). Line: {line}"
+                    )
+                    max_diff = max(max_diff, abs(diff))
+                pages.add(page.number)
+                break
+    if issues:
+        performed.append("Supporting disclosure note-reference amount tie-out performed for financial-instrument/risk tables.")
+        findings.append(
+            Finding(
+                "Consistency",
+                "Medium" if max_diff > tolerance else "Low",
+                _format_page_set(pages) if pages else "Notes",
+                "A supporting disclosure table does not appear to agree to its referenced note heading or amount.",
+                " | ".join(issues[:8]),
+                "Review the disclosure table note reference and amount against the referenced note and the primary statement.",
+                {"check_type": "Supporting disclosure note-reference tie-out", "match_confidence": "Medium"},
+            )
+        )
+    return findings, performed
+
+
+def _check_supplementary_summary_consistency(
+    document: PdfDocument,
+    tolerance: Decimal,
+) -> tuple[list[Finding], list[str]]:
+    summary_pages = [page for page in document.pages if _looks_like_five_year_summary_page(page.text)]
+    if not summary_pages:
+        return [], []
+    income_page = _find_statement_page(document, "Statement of profit or loss") or _find_statement_page(document, "Statement of income and expenditure")
+    sfp_page = _find_statement_page(document, "Statement of financial position")
+    specs: list[tuple[str, tuple[str, ...], PdfPage | None, tuple[str, ...]]] = [
+        ("Revenue", ("revenue", "rental income", "turnover"), income_page, ("revenue", "rental income", "turnover")),
+        ("Other operating income", ("other operating income", "interest income"), income_page, ("other operating income", "interest income")),
+        ("Other operating gains", ("other operating gains", "other operating gains/losses"), income_page, ("other operating gains", "other operating gains/losses")),
+        ("Other operating expenses", ("other operating expenses",), income_page, ("other operating expenses",)),
+        ("Operating profit/loss", ("operating profit", "operating loss", "operating profit/loss"), income_page, ("operating profit", "operating loss", "operating profit/loss")),
+        ("Finance costs", ("finance costs", "finance cost"), income_page, ("finance costs", "finance cost")),
+        ("Profit/loss before taxation", ("profit before taxation", "loss before taxation", "profit before tax", "loss before tax"), income_page, ("profit before taxation", "loss before taxation", "profit before tax", "loss before tax")),
+        ("Taxation", ("taxation", "income tax expense"), income_page, ("taxation", "income tax expense")),
+        ("Profit/loss for the year", ("profit for the year", "loss for the year", "profit after tax", "loss after tax"), income_page, ("profit for the year", "loss for the year", "profit after tax", "loss after tax")),
+        ("Total assets", ("total assets",), sfp_page, ("total assets",)),
+        ("Share capital", ("share capital",), sfp_page, ("share capital",)),
+        ("Retained income", ("retained income", "retained earnings"), sfp_page, ("retained income", "retained earnings")),
+        ("Total equity", ("total equity",), sfp_page, ("total equity",)),
+        ("Total liabilities", ("total liabilities",), sfp_page, ("total liabilities",)),
+        ("Total equity and liabilities", ("total equity and liabilities",), sfp_page, ("total equity and liabilities",)),
+    ]
+    findings: list[Finding] = []
+    performed: list[str] = []
+    for summary_page in summary_pages:
+        issues: list[str] = []
+        max_diff = Decimal("0")
+        for label, summary_aliases, source_page, source_aliases in specs:
+            if not source_page:
+                continue
+            summary_amounts, summary_line = _line_amounts_for_aliases_preserving_zero(summary_page.text, summary_aliases)
+            source_amounts, source_line = _line_amounts_for_aliases_preserving_zero(source_page.text, source_aliases)
+            if not summary_amounts or not source_amounts:
+                continue
+            summary_value = summary_amounts[0]
+            source_value = source_amounts[0]
+            diff = summary_value - source_value
+            if abs(diff) == 0:
+                continue
+            max_diff = max(max_diff, abs(diff))
+            issues.append(
+                f"{label}: summary Page {summary_page.number} shows {summary_value:,}; primary statement Page {source_page.number} shows {source_value:,}; difference {diff:,}. "
+                f"Summary line: {summary_line}; source line: {source_line}"
+            )
+        if issues:
+            performed.append("Five-year/financial summary amounts compared with primary statement current-year lines where readable.")
+            findings.append(
+                Finding(
+                    "Consistency",
+                    "Medium" if max_diff > tolerance else "Low",
+                    f"Page {summary_page.number} | Five-year financial summary",
+                    "Supplementary financial summary amount does not agree to the related primary statement amount.",
+                    " | ".join(issues[:8]),
+                    "Update the supplementary financial summary to agree with the audited primary statement amounts or explain the basis difference.",
+                    {"check_type": "Supplementary summary tie-out", "match_confidence": "High"},
+                )
+            )
+    return findings, performed
+
+
+def _line_amounts_for_aliases_preserving_zero(text: str, aliases: tuple[str, ...]) -> tuple[list[Decimal], str]:
+    alias_norms = [_normalise_match_words(alias) for alias in aliases]
+    for line in text.splitlines():
+        raw_line = re.sub(r"\s+", " ", line).strip()
+        if not raw_line:
+            continue
+        note_ref, ref_start, ref_end = _detect_statement_row_note_token(line)
+        label_source = line[:ref_start] if note_ref else line
+        label = _normalise_match_words(_statement_label(label_source))
+        if not label:
+            continue
+        if not _label_matches_any_amount_alias(label, alias_norms):
+            continue
+        amount_source = f"{line[:ref_start]} {line[ref_end:]}" if note_ref else line
+        parsed = [amount for amount in _amounts_from_statement_line(amount_source) if amount is not None and abs(amount) < Decimal("100000000")]
+        heading_match = re.match(r"^\s*(\d{1,2}[A-Z]?)\.\s+[A-Za-z]", raw_line, flags=re.I)
+        if heading_match and len(parsed) == 1 and parsed[0] == Decimal(heading_match.group(1).rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ")):
+            continue
+        if parsed:
+            return parsed[:2], raw_line
+    return [], ""
+
+
+def _note_line_amounts_for_aliases(note_sections: dict[str, str], aliases: tuple[str, ...]) -> tuple[list[Decimal], str, str]:
+    for ref, section in note_sections.items():
+        amounts, line = _line_amounts_for_aliases_preserving_zero(section, aliases)
+        if amounts:
+            return amounts, ref, line
+    return [], "", ""
+
+
+def _amount_vector_mismatches(
+    left: list[Decimal],
+    right: list[Decimal],
+    tolerance: Decimal,
+    compare_abs: bool = False,
+) -> list[tuple[str, Decimal, Decimal, Decimal]]:
+    labels = ("current year", "prior year")
+    width = min(len(left), len(right), 2)
+    mismatches: list[tuple[str, Decimal, Decimal, Decimal]] = []
+    for index in range(width):
+        left_value = abs(left[index]) if compare_abs else left[index]
+        right_value = abs(right[index]) if compare_abs else right[index]
+        diff = left_value - right_value
+        if abs(diff) > tolerance:
+            mismatches.append((labels[index], left[index], right[index], diff))
+    return mismatches
+
+
+def _label_matches_any_amount_alias(label: str, alias_norms: list[str]) -> bool:
+    for alias in alias_norms:
+        if alias == "total equity" and "liabilities" in label:
+            continue
+        if alias == "equity" and "liabilities" in label:
+            continue
+        if alias == "current assets" and "non current" in label:
+            continue
+        if alias == "current liabilities" and "non current" in label:
+            continue
+        if label == alias or label.startswith(alias) or alias in label:
+            return True
+    return False
+
+
+def _parse_supporting_note_reference_amount_line(line: str) -> tuple[str, str, list[Decimal], str] | None:
+    raw_line = re.sub(r"\s+", " ", line).strip()
+    if not raw_line or len(raw_line) < 8:
+        return None
+    match = re.match(r"^([A-Za-z][A-Za-z&/'() -]{2,}?)\s+(\d{1,2}[A-C]?)\s+(.+)$", raw_line, flags=re.I)
+    if not match:
+        return None
+    label, ref, tail = match.groups()
+    ref = ref.upper()
+    if not _valid_note_number(ref):
+        return None
+    normalized_label = _normalise_match_words(label)
+    lower_line = raw_line.lower()
+    narrative_markers = (
+        "beginning on or after",
+        "effective date",
+        "mandatory adoption",
+        "with effect from",
+        "advance rental",
+        "per annum",
+        "financial statements for the year ended",
+    )
+    if any(marker in lower_line for marker in narrative_markers):
+        return None
+    label_words = re.findall(r"[A-Za-z]{3,}", label)
+    if len(label_words) > 4:
+        return None
+    if not normalized_label or normalized_label.startswith("total") or normalized_label in {"current liabilities", "non current liabilities", "non-current liabilities", "less than"}:
+        return None
+    amounts = [_parse_decimal(token) for token in _amount_tokens_from_statement_line(tail)]
+    parsed = [amount for amount in amounts if amount is not None and abs(amount) < Decimal("100000000")]
+    if not parsed or not any(abs(amount) >= Decimal("1000") for amount in parsed):
+        return None
+    return label.strip(), ref, parsed[:2], raw_line
+
+
+def _amount_list_contains(amounts: list[Decimal], target: Decimal, tolerance: Decimal = Decimal("0")) -> bool:
+    return any(abs(candidate - target) <= tolerance or abs(abs(candidate) - abs(target)) <= tolerance for candidate in amounts)
+
+
+def _nearest_amount(target: Decimal, amounts: list[Decimal]) -> Decimal | None:
+    if not amounts:
+        return None
+    return min(amounts, key=lambda candidate: abs(abs(candidate) - abs(target)))
+
+
+def _looks_like_five_year_summary_page(text: str) -> bool:
+    header = "\n".join(text.splitlines()[:20]).lower()
+    return bool(
+        "five year financial summary" in header
+        or "five-year financial summary" in header
+        or "5 year financial summary" in header
+        or ("financial summary" in header and re.search(r"\b20\d{2}\b.*\b20\d{2}\b", header, flags=re.S))
+    )
 
 def _normalise_cash_flow_label(label: str) -> str:
     import re

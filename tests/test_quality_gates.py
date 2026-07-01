@@ -24,7 +24,7 @@ def test_low_confidence_ai_policy_prompt_is_visible_but_not_elevated():
     assert result.findings == []
     assert result.metrics["findings"] == 0
     assert result.metrics["review_prompts_not_elevated_count"] == 1
-    assert "Review prompts not elevated" in result.metrics["checks_skipped"]
+    assert result.metrics["checks_skipped"] == "No major checks skipped."
 
     workbook = openpyxl.load_workbook(BytesIO(build_excel_export(result)), data_only=True)
     assert "Review prompts not elevated" in workbook.sheetnames

@@ -11,7 +11,7 @@ from ai_finding_review import AiFindingReviewResult, run_ai_finding_review
 from ai_policy_review import AiPolicyReviewResult, _parse_response_json
 from cross_page_consistency import _names_look_like_spelling_variants, check_cross_page_consistency
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
-from report_exports import build_excel_export
+from report_exports import build_excel_export, parse_skipped_check
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
     _note_headings,
@@ -5488,3 +5488,266 @@ def test_simple_note_text_casting_skips_reconciliation_style_note_sections():
 
     assert not findings
 
+
+
+def test_not_elevated_review_prompts_are_not_counted_as_skipped_checks():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of profit or loss\nRevenue Note 9 100 90\nNotes to the financial statements\n9 Revenue\n",
+                [],
+            )
+        ]
+    )
+    finding = reviewer.Finding(
+        "Notes agreement",
+        "Low",
+        "Page 1 | Note 9",
+        "Amount not located in referenced note.",
+        "Revenue Note 9 amount could not be corroborated from the detected note text.",
+        "Review the source statement and note manually.",
+        {"match_confidence": "Low", "referenced_note": "9", "page_reference": "Page 1"},
+    )
+
+    result = reviewer._build_result(
+        document,
+        [finding],
+        checks_performed=["Cautious face-to-note amount agreement performed in review-prompt mode."],
+    )
+
+    assert result.metrics["review_prompts_not_elevated_count"] == 1
+    assert "low-confidence review prompt" not in result.metrics["checks_skipped"].lower()
+    assert result.metrics["checks_skipped"] == "No major checks skipped."
+
+
+def test_skipped_table_summary_marks_supplementary_schedules_as_intentional_exclusions():
+    document = PdfDocument(
+        [
+            PdfPage(
+                7,
+                "Supplementary schedules",
+                [
+                    [["Value added statement", "2025", "2024"], ["Revenue", "100", "90"], ["Total value added", "100", "90"]],
+                    [["Five year financial summary", "2025", "2024"], ["Revenue", "100", "90"], ["Total assets", "200", "180"]],
+                ],
+            )
+        ]
+    )
+
+    check_rounding_and_casting(document, tolerance=Decimal("1"))
+    summary = reviewer._skipped_table_summary_rows(document)
+
+    value_added = next(row for row in summary if row["Skipped check group"] == "Value-added statement")
+    multi_year = next(row for row in summary if row["Skipped check group"] == "Multi-year summary")
+    assert value_added["Can automated check be fixed?"] == "Not applicable"
+    assert multi_year["Can automated check be fixed?"] == "Not applicable"
+    assert "supplementary" in value_added["Why reviewer should review"].lower()
+    assert "several years" in multi_year["Why reviewer should review"].lower()
+
+
+def test_parse_skipped_check_adds_cross_source_page_context():
+    row = parse_skipped_check(
+        "Cross-source income-to-equity linkage skipped because only one of income or equity reference lines was confidently parsed. "
+        "Available evidence: income result Page 12; equity movement not parsed."
+    )
+
+    assert row["Check area"] == "Cross-source income-to-equity linkage"
+    assert row["Page reference"] == "Page 12"
+    assert "income result Page 12" in row["Reason skipped"]
+    assert row["Can automated check be fixed?"] == "Partially"
+
+
+def test_greystone_style_drafting_issues_are_flagged_with_page_context():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "The annual report and financial statements on pagess 10 to 36 were approved by the Board.",
+                        "Financial liabilities at fair value through profit or loss or loss are recognised.",
+                        "Transaction costs are recognised in profit or loss or loss.",
+                        "For these leases, the payment is recognised as a direct cost (note ) on a straight-line basis.",
+                        "Ordinary shares are classified as . Mandatorily redeemable preference shares are liabilities.",
+                        "Deferred tax asset of N284,9451,338 was not recognised.",
+                        "Effect of development levy - % 1,955 - % -",
+                        "including governance, strategy, risk management, metrics and tragets, and the effect of climated related matters",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+    issues = [row["Issue"] for row in export["grammar"]]
+
+    assert any("pagess" in issue for issue in issues)
+    assert sum(1 for issue in issues if "profit or loss or loss" in issue) == 1
+    assert any("Blank note reference" in issue for issue in issues)
+    assert any("Incomplete sentence" in issue for issue in issues)
+    assert any("malformed thousands" in issue for issue in issues)
+    assert any("missing percentage" in issue for issue in issues)
+    assert any("tragets" in issue for issue in issues)
+    assert any("climated" in issue for issue in issues)
+    assert all(f.location == "Page 1" for f in findings if f.category == "Formatting")
+
+
+def test_cash_flow_source_amount_tieout_flags_one_unit_differences_without_sign_noise():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of Comprehensive Income",
+                        "2025 2024",
+                        "Other operating income 14 116,364 88,383",
+                        "Finance costs 17 (324,994) (438,700)",
+                        "(Loss)/profit for the year (245,475) 4,891,754",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Statement of Cash Flows",
+                        "2025 2024",
+                        "Amortisation of right-of-use asset 3 - 124,980",
+                        "Interest received on loan 4 (116,364) (88,383)",
+                        "Finance costs 17 324,995 438,700",
+                        "Total cash at end of the year 6 215,166 314,032",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                3,
+                "\n".join(
+                    [
+                        "Notes to the Financial Statements",
+                        "16. Other operating expenses",
+                        "Depreciation - 124,979",
+                        "17. Finance costs",
+                        "Interest expenses 324,994 438,700",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+
+    findings, performed = reviewer._check_cash_flow_supporting_amounts(document, Decimal("1"))
+
+    assert performed
+    assert findings
+    evidence = findings[0].evidence
+    assert "difference 1" in evidence
+    assert "difference 649,989" not in evidence
+    assert "Interest received on loan" not in evidence
+
+
+def test_supporting_disclosure_note_reference_tieout_ignores_standards_dates():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nOther receivables 5 323,614 120,512", []),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the Financial Statements",
+                        "5. Other receivables",
+                        "Other receivables 323,614 120,512",
+                        "8. Borrowings",
+                        "Loans 3,224,255 3,147,828",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                3,
+                "\n".join(
+                    [
+                        "20. Risk management",
+                        "The standard is effective for annual reporting periods beginning on or after 1 January 2027.",
+                        "Credit risk",
+                        "Other receivables 5 1,474,662 - 1,474,662",
+                        "Borrowings 8 3,224,254 - 3,224,254",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+
+    findings, performed = reviewer._check_supporting_disclosure_note_reference_amounts(document, Decimal("1"))
+
+    assert performed
+    assert findings
+    evidence = findings[0].evidence
+    assert "Other receivables references Note 5" in evidence
+    assert "Borrowings references Note 8" in evidence
+    assert "beginning on or after" not in evidence
+
+
+def test_supplementary_summary_consistency_flags_current_year_mismatches():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "\n".join(
+                    [
+                        "Statement of Financial Position as at 31 December 2025",
+                        "Retained income (2,624,236) (2,378,761)",
+                        "Total Liabilities 4,311,564 3,942,462",
+                        "Total Equity and Liabilities 1,689,828 1,566,201",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Statement of Comprehensive Income",
+                        "Revenue 13 - 389,382",
+                        "Other operating income 14 116,364 88,383",
+                        "Other operating expenses 16 (50,027) (160,667)",
+                        "Operating profit 80,262 5,358,295",
+                        "Finance costs 17 (324,994) (438,700)",
+                        "(Loss)/profit before taxation (244,732) 4,919,595",
+                        "Taxation 12 (743) (27,841)",
+                        "(Loss)/profit for the year (245,475) 4,891,754",
+                    ]
+                ),
+                [],
+            ),
+            PdfPage(
+                3,
+                "\n".join(
+                    [
+                        "Five Year Financial Summary",
+                        "2025 2024 2023",
+                        "Other operating expenses (50,026) (160,667) (262,281)",
+                        "Operating profit/(loss) 80,263 5,358,295 (4,496,406)",
+                        "Finance costs (324,995) (438,700) (306,083)",
+                        "Retained income (2,624,235) (2,378,761) (7,270,515)",
+                        "Total liabilities 4,311,563 3,942,462 9,179,029",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+
+    findings, performed = reviewer._check_supplementary_summary_consistency(document, Decimal("1"))
+
+    assert performed
+    assert findings
+    evidence = findings[0].evidence
+    assert "Other operating expenses" in evidence
+    assert "Operating profit/loss" in evidence
+    assert "Total liabilities" in evidence

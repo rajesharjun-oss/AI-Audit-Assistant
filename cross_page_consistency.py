@@ -49,6 +49,11 @@ COMMON_SPELLING_CORRECTIONS = {
     "goverment": "government",
     "contrat": "contract",
     "relevent": "relevant",
+    "pagess": "pages",
+    "tragets": "targets",
+    "climated": "climate",
+    "witholding": "withholding",
+    "finrance": "finance",
 }
 
 
@@ -249,6 +254,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
     amount_occurrences = defaultdict(list)
     date_occurrences = defaultdict(list)
     name_candidates = []
+    grammar_seen = set()
     
     # Simple NER for names (Capitalized words, 2-4 words)
     NAME_RE = re.compile(r"\b[A-Z][a-z]+(?: [A-Z][a-z]+){1,3}\b")
@@ -268,47 +274,15 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                 # Only add if it wasn't already matched as part of FORMAT 1 or 2
                 if not any(match.group(0) in d for d in date_occurrences.keys()):
                     date_occurrences[match.group(0)].append((page.number, line.strip()))
+            for special_issue in _special_drafting_issues_for_line(line):
+                _append_grammar_review_issue(findings, export_data, grammar_seen, page.number, special_issue, line, "Review the sentence, number, or disclosure wording for drafting clarity.")
             if _looks_like_grammar_review_line(line):
                 grammar_issue = _grammar_issue_for_line(line)
                 spelling_issue = _spelling_issue_for_line(line)
                 if grammar_issue:
-                    export_data["grammar"].append(
-                        {
-                            "Page": str(page.number),
-                            "Issue": grammar_issue,
-                            "Context": _short_context(line),
-                            "Comment": "Review wording and punctuation.",
-                        }
-                    )
-                    findings.append(
-                        Finding(
-                            "Formatting",
-                            "Low",
-                            f"Page {page.number}",
-                            "Possible grammatical or drafting issue detected.",
-                            f"{grammar_issue} Context: {_short_context(line, 180)}",
-                            "Review the sentence for grammar, punctuation, and drafting clarity.",
-                        )
-                    )
+                    _append_grammar_review_issue(findings, export_data, grammar_seen, page.number, grammar_issue, line, "Review the sentence for grammar, punctuation, and drafting clarity.")
                 if spelling_issue:
-                    export_data["grammar"].append(
-                        {
-                            "Page": str(page.number),
-                            "Issue": spelling_issue,
-                            "Context": _short_context(line),
-                            "Comment": "Review spelling and standardise the wording.",
-                        }
-                    )
-                    findings.append(
-                        Finding(
-                            "Formatting",
-                            "Low",
-                            f"Page {page.number}",
-                            "Possible spelling issue detected.",
-                            f"{spelling_issue} Context: {_short_context(line, 180)}",
-                            "Review the word choice and correct the spelling if needed.",
-                        )
-                    )
+                    _append_grammar_review_issue(findings, export_data, grammar_seen, page.number, spelling_issue, line, "Review the word choice and correct the spelling if needed.", spelling=True)
             
         # Extract potential names in signature blocks or directors lists
         page_lower = text.lower()
@@ -583,6 +557,63 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
 
     return findings, export_data
 
+
+
+
+def _special_drafting_issues_for_line(line: str) -> list[str]:
+    issues: list[str] = []
+    lower = line.lower()
+    if re.search(r"\bprofit or loss\s+or\s+loss\b", lower):
+        issues.append("Repeated phrase detected: 'profit or loss or loss'.")
+    if re.search(r"\bpagess\b", lower):
+        issues.append("Possible spelling error: 'pagess' -> 'pages'.")
+    if re.search(r"\bclimated\b", lower):
+        issues.append("Possible spelling error: 'climated' -> 'climate'.")
+    if re.search(r"\bclassified\s+as\s+[.;:,]", lower):
+        issues.append("Incomplete sentence detected after 'classified as'.")
+    if re.search(r"\(\s*note\s*\)", lower):
+        issues.append("Blank note reference detected: '(note )'.")
+    if re.search(r"\bN?\d{1,3},\d{4,},\d{3}\b", line):
+        issues.append("Possible malformed thousands grouping in a large number.")
+    if re.search(r"(?<!\d)-\s*%", line):
+        issues.append("Possible missing percentage value before percent sign.")
+    return issues
+
+
+def _append_grammar_review_issue(
+    findings: list[Finding],
+    export_data: dict[str, list[dict[str, str]]],
+    seen: set[tuple[int, str, str]],
+    page_number: int,
+    issue: str,
+    line: str,
+    recommendation: str,
+    spelling: bool = False,
+) -> None:
+    context = _short_context(line)
+    key_context = "" if issue.startswith("Repeated phrase detected") else context
+    key = (page_number, issue, key_context)
+    if key in seen:
+        return
+    seen.add(key)
+    export_data["grammar"].append(
+        {
+            "Page": str(page_number),
+            "Issue": issue,
+            "Context": context,
+            "Comment": "Review spelling and standardise the wording." if spelling else "Review wording and punctuation.",
+        }
+    )
+    findings.append(
+        Finding(
+            "Formatting",
+            "Low",
+            f"Page {page_number}",
+            "Possible spelling issue detected." if spelling else "Possible grammatical or drafting issue detected.",
+            f"{issue} Context: {_short_context(line, 180)}",
+            recommendation,
+        )
+    )
 
 def _merge_equivalent_key_amounts(val_map: dict[Decimal, list[tuple[int, str, Decimal, int]]]) -> dict[Decimal, list[tuple[int, str, Decimal, int]]]:
     if len(val_map) <= 1:
