@@ -5852,3 +5852,21 @@ def test_supplementary_summary_consistency_flags_current_year_mismatches():
     assert "Other operating expenses" in evidence
     assert "Operating profit/loss" in evidence
     assert "Total liabilities" in evidence
+
+def test_ai_openai_call_defers_when_another_ai_request_is_active(monkeypatch):
+    ai_policy_review._AI_RATE_LIMIT_UNTIL = 0
+    monkeypatch.setattr(ai_policy_review, "AI_REQUEST_LOCK_TIMEOUT_SECONDS", 0.1)
+    acquired = ai_policy_review._AI_REQUEST_LOCK.acquire(blocking=False)
+    assert acquired
+    try:
+        try:
+            ai_policy_review._call_openai("test-key", {"model": "test", "input": []})
+        except RuntimeError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected a busy AI request to be deferred.")
+    finally:
+        ai_policy_review._AI_REQUEST_LOCK.release()
+
+    assert "AI service busy" in message
+    assert ai_policy_review._is_rate_limit_error(RuntimeError(message))

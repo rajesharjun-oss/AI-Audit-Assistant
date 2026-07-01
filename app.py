@@ -21,6 +21,18 @@ from report_exports import build_excel_export, exported_file_stem
 from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
 
 st.set_page_config(page_title="AI Audit Assistant", page_icon="✨", layout="wide", initial_sidebar_state="expanded")
+
+def _friendly_review_failure_message(exc: Exception) -> str:
+    text = str(exc or "").strip()
+    lower = text.lower()
+    if any(marker in lower for marker in ("429", "rate limit", "rate exceeded", "too many requests", "ai service busy", "timed out", "timeout")):
+        return (
+            "The AI service or review worker is temporarily busy, so this upload could not finish cleanly. "
+            "No exception register was produced for this run. Please wait about 20 seconds and try again. "
+            "If it happens again, temporarily turn off AI policy judgement to generate the deterministic review immediately."
+        )
+    return f"The review could not be completed: {text or type(exc).__name__}."
+
 def _metric_lines(value: object, empty: str) -> list[str]:
     text = str(value or "").strip()
     if not text or text == empty:
@@ -1186,6 +1198,9 @@ try:
                 ai_model=DEFAULT_AI_MODEL,
             ),
         )
+except Exception as exc:
+    st.error(_friendly_review_failure_message(exc))
+    st.stop()
 finally:
     temp_path.unlink(missing_ok=True)
 
