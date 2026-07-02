@@ -446,6 +446,7 @@ def review_pdf(
     ai_finding_model = options.ai_model
     ai_finding_message = ""
     ai_finding_suppressed = 0
+    ai_finding_suppressed_rows: list[dict[str, str]] = []
     ai_finding_reviewed = 0
     ai_policy_rate_limited = False
     if options.use_ai_policy_review:
@@ -515,6 +516,7 @@ def review_pdf(
             profile,
             findings,
             model=options.ai_model,
+            pdf_path=path,
         )
         findings = ai_finding_review.findings
         ai_finding_export = ai_finding_review.export_rows
@@ -524,6 +526,7 @@ def review_pdf(
         ai_finding_message = ai_finding_review.message
         ai_evidence_pack_rows.extend(getattr(ai_finding_review, "evidence_rows", None) or [])
         ai_finding_suppressed = ai_finding_review.suppressed_count
+        ai_finding_suppressed_rows = getattr(ai_finding_review, "suppressed_rows", None) or []
         ai_finding_reviewed = ai_finding_review.reviewed_count
         if ai_finding_review.status == "completed":
             checks_performed.append(
@@ -561,6 +564,7 @@ def review_pdf(
         ai_finding_message,
         ai_finding_reviewed,
         ai_finding_suppressed,
+        ai_finding_suppressed_rows,
         ai_evidence_pack_rows,
     )
 
@@ -817,6 +821,7 @@ def _build_result(
     ai_finding_message: str = "",
     ai_finding_reviewed: int = 0,
     ai_finding_suppressed: int = 0,
+    ai_finding_suppressed_rows: list[dict[str, str]] | None = None,
     ai_evidence_pack_rows: list[dict[str, str]] | None = None,
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
@@ -917,6 +922,7 @@ def _build_result(
         "ai_finding_review_message": ai_finding_message,
         "ai_finding_reviewed": ai_finding_reviewed,
         "ai_finding_suppressed": ai_finding_suppressed,
+        "ai_suppressed_findings": ai_finding_suppressed_rows or [],
         "ai_evidence_packs": ai_evidence_pack_rows or [],
         "hybrid_review_mode": "AI-assisted evidence review" if (ai_policy_status != "disabled" or ai_full_status != "disabled" or ai_finding_status != "disabled") else "Deterministic engine only",
         "hybrid_review_principle": "Engine performs extraction, arithmetic, and structural checks; AI reviews evidence packs for policy/disclosure judgement and likely false positives.",

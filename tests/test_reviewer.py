@@ -567,7 +567,7 @@ def test_optional_ai_full_review_adds_findings_and_export(monkeypatch):
     monkeypatch.setattr(
         reviewer,
         "run_ai_finding_review",
-        lambda document, profile, findings, model: AiFindingReviewResult(
+        lambda document, profile, findings, model, **kwargs: AiFindingReviewResult(
             findings=findings,
             export_rows=[],
             summary="",
@@ -817,6 +817,16 @@ def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sh
             reviewed_count=1,
             suppressed_count=1,
             evidence_rows=[{"Evidence type": "Engine finding adjudication pack", "Finding ID": "F1", "Issue": low_finding.issue}],
+            suppressed_rows=[
+                {
+                    "Finding ID": "F1",
+                    "Category": "Formatting",
+                    "Decision": "Suppress",
+                    "AI status": "likely_false_positive",
+                    "Issue": low_finding.issue,
+                    "Reason": "The evidence looks like extraction noise rather than a report defect.",
+                }
+            ],
         ),
     )
 
@@ -830,14 +840,17 @@ def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sh
     workbook = openpyxl.load_workbook(BytesIO(build_excel_export(result)), data_only=True)
     assert "AI finding review" in workbook.sheetnames
     assert "AI evidence packs" in workbook.sheetnames
+    assert "AI suppressed findings" in workbook.sheetnames
     ai_sheet = workbook["AI finding review"]
     rows = list(ai_sheet.iter_rows(min_row=2, values_only=True))
     assert rows
     assert any(str(row[2] or "").lower() == "low" for row in rows)
+    suppressed_sheet = workbook["AI suppressed findings"]
+    suppressed_rows = list(suppressed_sheet.iter_rows(min_row=2, values_only=True))
+    assert any("Formatting" in [str(cell or "") for cell in row] for row in suppressed_rows)
     evidence_sheet = workbook["AI evidence packs"]
     evidence_rows = list(evidence_sheet.iter_rows(min_row=2, values_only=True))
     assert any("Engine finding adjudication pack" in str(row[0] or "") for row in evidence_rows)
-
 
 def test_ai_response_parser_accepts_nested_text_value_payload():
     payload = {
@@ -910,7 +923,7 @@ def test_ai_policy_review_repairs_malformed_json_response(monkeypatch):
     assert "Revenue" in result.export_rows[0]["Title"]
 
 
-def test_ai_finding_review_suppresses_contradictory_false_positive_keep():
+def test_ai_finding_review_keeps_amount_related_change_without_required_evidence():
     finding = reviewer.Finding(
         category="Notes agreement",
         severity="Medium",
@@ -927,6 +940,7 @@ def test_ai_finding_review_suppresses_contradictory_false_positive_keep():
         "page_reference": "Page 10",
         "note_reference": "Note 14",
         "issue": finding.issue,
+        "evidence": finding.evidence,
         "page_snippet": "",
         "note_snippet": "",
     }
@@ -945,11 +959,10 @@ def test_ai_finding_review_suppresses_contradictory_false_positive_keep():
 
     result = ai_finding_review._apply_adjudications([finding], [candidate], parsed, "gpt-test")
 
-    assert not result.findings
-    assert result.suppressed_count == 1
-    assert result.export_rows[0]["Decision"] == "Suppress"
-    assert result.export_rows[0]["AI status"] == "likely_false_positive"
-
+    assert len(result.findings) == 1
+    assert result.suppressed_count == 0
+    assert result.export_rows[0]["Decision"] == "Keep"
+    assert "required amount evidence" in result.export_rows[0]["Guardrail applied"]
 
 def test_ai_finding_review_keeps_strong_narrative_contradiction_when_ai_is_weak():
     finding = reviewer.Finding(
@@ -1053,6 +1066,14 @@ def test_ai_finding_review_includes_page_and_note_context_and_can_suppress_mediu
                     "confidence": "High",
                     "reason": "The page and note snippets show a split-digit extraction pattern rather than a genuine note-total defect.",
                     "recommended_action": "Do not elevate unless the signed PDF still disagrees after manual recast.",
+                    "amount_evidence": {
+                        "page_number": "Page 28",
+                        "statement_or_note_name": "Note 18 Cash and cash equivalents",
+                        "reported_amount": "875,869",
+                        "expected_amount": "175,252",
+                        "difference": "700,617",
+                        "evidence": "The page and note snippets show a split-digit extraction pattern rather than a genuine note-total defect.",
+                    },
                 }
             ],
         },
@@ -1064,6 +1085,48 @@ def test_ai_finding_review_includes_page_and_note_context_and_can_suppress_mediu
     assert result.suppressed_count == 1
     assert result.export_rows[0]["Note snippet"].startswith("18 Cash and cash equivalents")
 
+
+def test_ai_finding_review_attaches_source_pdf_when_available(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%tiny test pdf\n")
+    captured_payloads = []
+
+    def fake_call(_api_key, payload):
+        captured_payloads.append(payload)
+        return {
+            "output_text": (
+                '{"summary":"reviewed","adjudications":[{"finding_id":"F1","decision":"keep",'
+                '"revised_severity":"Low","status":"review_prompt","confidence":"Medium",'
+                '"reason":"Evidence remains suitable for reviewer follow-up.",'
+                '"recommended_action":"Review the page."}]}'
+            )
+        }
+
+    monkeypatch.setattr(ai_finding_review, "_call_openai", fake_call)
+    document = PdfDocument([PdfPage(1, "Statement of financial position\nFormatting issue context", [])])
+    finding = reviewer.Finding(
+        category="Formatting",
+        severity="Low",
+        location="Page 1",
+        issue="Possible formatting issue.",
+        evidence="Formatting issue context.",
+        recommendation="Review formatting.",
+    )
+
+    result = ai_finding_review.run_ai_finding_review(
+        document,
+        CompanyProfile(company_name="Sample Limited"),
+        [finding],
+        model="gpt-test",
+        pdf_path=pdf_path,
+    )
+
+    assert result.status == "completed"
+    user_content = captured_payloads[0]["input"][1]["content"]
+    assert any(item.get("type") == "input_file" for item in user_content)
+    source_rows = [row for row in (result.evidence_rows or []) if row.get("Evidence type") == "Original PDF"]
+    assert source_rows and source_rows[0]["Status"] == "Attached"
 
 def test_narrative_dates_do_not_trigger_format_findings():
     document = PdfDocument(
