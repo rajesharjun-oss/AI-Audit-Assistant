@@ -472,6 +472,113 @@ def test_signature_underscores_are_not_unreadable_placeholders():
     assert document.unreadable_value_count == 0
     assert not [finding for finding in check_extraction_quality(document) if "Unreadable or placeholder" in finding.issue]
 
+
+def test_combined_ai_package_includes_full_qc_scope_context():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Directors' Report\nThe directors present their report under CAMA 2020 and FRC requirements.", []),
+            PdfPage(2, "Independent Auditor's Report\nBasis for opinion under ISA and Nigerian reporting requirements.", []),
+            PdfPage(3, "Statement of cash flows\nNet cash generated from operating activities 100\nCash and cash equivalents 500", []),
+            PdfPage(4, "Notes to the financial statements\n1. Significant accounting policies\nBasis of preparation under IFRS.", []),
+            PdfPage(5, "Five-Year Financial Summary\nRevenue 100 90 80", []),
+        ]
+    )
+    package = ai_combined_review._build_compact_review_package(
+        document,
+        CompanyProfile(company_name="Scope Test Limited", presentation_standard="IFRS"),
+        {"1": "Significant accounting policies\nBasis of preparation under IFRS."},
+        {"revenue": True},
+        [],
+        [],
+        "standard",
+    )
+    prompt = ai_combined_review._build_prompt(package)
+
+    assert any(row["section"] == "directors_report" for row in package["front_matter_and_other_sections"])
+    assert any("cash equivalents" in row["snippet"].lower() for row in package["cash_flow_context"])
+    assert any("cama" in row["snippet"].lower() for row in package["regulatory_reference_snippets"])
+    assert "CAMA 2020" in prompt
+    assert "review_comment_rows" in prompt
+    assert "Spelling / Grammar|Regulatory Reference|Note Cross-reference|Casting|Cross-casting|Cash Flow|Disclosure|Presentation|Internal Consistency" in prompt
+
+
+def test_excel_export_adds_review_comments_and_enhanced_summary(monkeypatch):
+    document = PdfDocument([
+        PdfPage(1, "Statement of cash flows\nNet increase in cash 100\nCash at end 500", []),
+        PdfPage(2, "Notes to the financial statements\n1. Significant accounting policies", []),
+    ])
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+    monkeypatch.setattr(reviewer, "check_extraction_quality", lambda _document: [])
+    monkeypatch.setattr(reviewer, "check_primary_statement_consistency", lambda _document: ([], [], []))
+    monkeypatch.setattr(reviewer, "check_totals_and_rounding", lambda _document: [])
+    monkeypatch.setattr(reviewer, "check_formatting", lambda _document, _profile: [])
+    monkeypatch.setattr(reviewer, "check_notes_agreement", lambda _document, cautious_low_confidence=False: [])
+    monkeypatch.setattr(reviewer, "_check_note_contradictions", lambda _document: [])
+    monkeypatch.setattr(reviewer, "review_notes_1_and_2", lambda *args, **kwargs: ([], []))
+    monkeypatch.setattr(reviewer, "check_cross_page_consistency", lambda _document: ([], {}))
+    ai_finding = reviewer.Finding(
+        category="AI full review",
+        severity="High",
+        location="Page 1 | Statement of cash flows",
+        issue="Cash-flow subtotal does not agree to the reported net movement.",
+        evidence="Reported net movement: 100; recomputed movement: 90; difference: 10.",
+        recommendation="Correct the cash-flow subtotal or supporting line items before sign-off.",
+        metadata={"page_reference": "Page 1", "statement": "Statement of cash flows", "line_item": "Net movement in cash"},
+    )
+    monkeypatch.setattr(
+        ai_review_pipeline,
+        "run_combined_ai_review",
+        lambda *args, **kwargs: ai_combined_review.CombinedAiReviewResult(
+            findings=list(args[4]) + [ai_finding],
+            full_export=[{"Title": "Cash-flow subtotal", "Status": "exception", "Severity": "High", "Page reference": "Page 1"}],
+            review_comment_rows=[
+                {
+                    "section_or_statement_or_note": "Statement of cash flows",
+                    "page_number": "Page 1",
+                    "account_or_line_item": "Net movement in cash",
+                    "current_wording_amount_reference": "Reported 100; expected 90; difference 10",
+                    "issue_identified": "Cash-flow subtotal does not agree to the reported net movement.",
+                    "expected_correction_recommendation": "Correct the cash-flow subtotal or supporting line items.",
+                    "category": "Cash Flow",
+                    "priority": "High",
+                    "status": "Open",
+                }
+            ],
+            summary_fields={
+                "Overall sign-off conclusion": "Not ready for final sign-off until cash-flow issue is cleared.",
+                "Cash flow correctness note": "Cash-flow subtotal requires correction.",
+            },
+            status="completed",
+            model="gpt-5-mini",
+            reviewed_count=0,
+            review_mode="standard",
+        ),
+    )
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_full_review=True))
+    workbook = openpyxl.load_workbook(BytesIO(build_excel_export(result)), data_only=True)
+
+    assert "Review comments" in workbook.sheetnames
+    header = [cell.value for cell in workbook["Review comments"][1]]
+    assert header[:11] == [
+        "S/N",
+        "Section / Statement / Note",
+        "Page number",
+        "Account / line item",
+        "Current wording / amount / reference",
+        "Issue identified",
+        "Expected correction / recommendation",
+        "Category",
+        "Priority",
+        "Status",
+        "Reviewer comments",
+    ]
+    rows = list(workbook["Review comments"].iter_rows(min_row=2, values_only=True))
+    assert any("Cash-flow subtotal" in str(row[5] or "") and row[7] == "Cash Flow" and row[8] == "High" for row in rows)
+    summary = {row[0].value: row[1].value for row in workbook["Summary"].iter_rows(min_row=2, max_col=2)}
+    assert summary["Overall conclusion on final sign-off"] == "Not ready for final sign-off until cash-flow issue is cleared."
+    assert summary["Category - Cash Flow"] >= 1
+
 def test_optional_ai_policy_review_adds_findings_and_export(monkeypatch):
     filler = "Additional extracted policy context.\n" * 80
     document = PdfDocument(

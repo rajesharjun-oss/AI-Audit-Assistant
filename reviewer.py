@@ -495,6 +495,8 @@ def review_document(
     ai_review_mode = ai_pipeline.review_mode
     ai_combined_summary = ai_pipeline.combined_summary
     ai_combined_memo = ai_pipeline.combined_memo
+    ai_review_comment_rows = ai_pipeline.review_comment_rows
+    ai_summary_fields = ai_pipeline.summary_fields
     return _build_result(
         document,
         findings,
@@ -526,6 +528,8 @@ def review_document(
         ai_review_mode,
         ai_combined_summary,
         ai_combined_memo,
+        ai_review_comment_rows,
+        ai_summary_fields,
     )
 
 
@@ -604,6 +608,8 @@ def rerun_ai_review_from_cached_result(
         ai_pipeline.review_mode,
         ai_pipeline.combined_summary,
         ai_pipeline.combined_memo,
+        ai_pipeline.review_comment_rows,
+        ai_pipeline.summary_fields,
     )
 
 
@@ -990,6 +996,8 @@ def _build_result(
     ai_review_mode: str = "standard",
     ai_combined_summary: str = "",
     ai_combined_memo: str = "",
+    ai_review_comment_rows: list[dict[str, str]] | None = None,
+    ai_summary_fields: dict[str, str] | None = None,
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     
@@ -1087,6 +1095,8 @@ def _build_result(
         "ai_combined_review_summary": ai_combined_summary,
         "ai_combined_review_memo": ai_combined_memo,
         "ai_error_log": ai_error_rows or [],
+        "ai_review_comment_rows": ai_review_comment_rows or [],
+        "ai_summary_fields": ai_summary_fields or {},
         "ai_policy_export": ai_policy_export or [],
         "ai_policy_review_status": ai_policy_status,
         "ai_policy_review_model": ai_policy_model,

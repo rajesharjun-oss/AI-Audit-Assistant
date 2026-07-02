@@ -22,10 +22,20 @@ from models import DEFAULT_AI_MODEL, CompanyProfile, Finding, PdfDocument
 COMBINED_AI_OUTPUT_TOKENS = max(1200, min(int(os.getenv("OPENAI_COMBINED_REVIEW_OUTPUT_TOKENS", "3500")), 6000))
 COMBINED_AI_REPAIR_SHAPE = (
     '{"summary":"short conclusion","executive_review_memo":"short memo",'
+    '"overall_signoff_conclusion":"ready|not ready|manual review required with reason",'
+    '"immediate_action_points":["action 1","action 2"],'
+    '"cash_flow_conclusion":"short note on cash flow correctness",'
+    '"regulatory_reference_conclusion":"short note on regulatory-reference issues",'
+    '"casting_cross_casting_conclusion":"short note on casting and cross-casting issues",'
+    '"review_comment_rows":[{"section_or_statement_or_note":"...","page_number":"Page X",'
+    '"account_or_line_item":"...","current_wording_amount_reference":"...",'
+    '"issue_identified":"...","expected_correction_recommendation":"...",'
+    '"category":"Spelling / Grammar|Regulatory Reference|Note Cross-reference|Casting|Cross-casting|Cash Flow|Disclosure|Presentation|Internal Consistency",'
+    '"priority":"High|Medium|Low","status":"Open","reviewer_comments":"..."}],'
     '"policy_review_findings":[{"title":"...","severity":"High|Medium|Low","confidence":"High|Medium|Low",'
     '"status":"exception|review_prompt|ok","page_reference":"Page X","note_reference":"Note X","issue":"...",'
     '"evidence_snippet":"...","recommendation":"...","rationale":"..."}],'
-    '"missed_review_findings":[{"title":"...","category":"Formatting|Grammar|Disclosure|Presentation|Notes agreement",'
+    '"missed_review_findings":[{"title":"...","category":"Formatting|Grammar|Disclosure|Presentation|Notes agreement|Cash Flow|Regulatory Reference|Internal Consistency",'
     '"severity":"High|Medium|Low","confidence":"High|Medium|Low","status":"exception|review_prompt|ok",'
     '"page_reference":"Page X","note_reference":"Note X","issue":"...","evidence_snippet":"...",'
     '"recommendation":"...","rationale":"..."}],'
@@ -91,6 +101,8 @@ class CombinedAiReviewResult:
     reviewed_count: int = 0
     evidence_rows: list[dict[str, str]] = field(default_factory=list)
     error_rows: list[dict[str, str]] = field(default_factory=list)
+    review_comment_rows: list[dict[str, str]] = field(default_factory=list)
+    summary_fields: dict[str, str] = field(default_factory=dict)
     review_mode: str = "standard"
 
 
@@ -188,24 +200,33 @@ def _build_payload(model: str, package: dict[str, Any]) -> dict[str, Any]:
 
 def _build_prompt(package: dict[str, Any]) -> str:
     return (
-        "Review this compact financial-statement evidence package.\n\n"
+        "Perform a detailed quality-control review of this compact draft financial-statement evidence package.\n\n"
+        "Scope to consider where evidence is supplied:\n"
+        "- Directors' Report, Directors' Responsibility Statement, management certifications, ICFR report, independent auditor's report, primary statements, notes, value-added statement, and five-year financial summary.\n"
+        "- Spelling, grammar, typographical, formatting, wording, duplicate caption, terminology, and presentation issues.\n"
+        "- Improper, outdated, inconsistent, or incomplete regulatory references, including CAMA 2020, FRC Nigeria requirements, FRC ICFR guidance, Investments and Securities Act, tax laws, IFRS/IAS, and other applicable Nigerian reporting references.\n"
+        "- Note references on the face of profit or loss/OCI, financial position, changes in equity, and cash flows; check note numbering, page references, note descriptions, and line-item compatibility.\n"
+        "- Casting and cross-casting: vertical/horizontal casts, subtotals, grand totals, movement tables, comparatives, Group versus Company columns, and ties between primary statements and notes.\n"
+        "- IAS 7 cash flow correctness: operating/investing/financing subtotals, net movement, opening/closing cash, overdrafts, interest, tax, non-cash items, fair value/impairment adjustments, PPE/investment-property movements, financial asset/liability movements, subsidiaries/associates.\n\n"
         "Tasks:\n"
-        "1. Assess policy relevance, standards context, disclosure completeness, and industry fit.\n"
-        "2. Identify missed presentation, spelling, grammar, note-reference, narrative contradiction, and disclosure issues.\n"
+        "1. Assess policy relevance, standards context, disclosure completeness, industry fit, and regulatory-reference quality.\n"
+        "2. Identify missed presentation, spelling, grammar, note-reference, narrative contradiction, disclosure, cash-flow, casting, and internal-consistency issues.\n"
         "3. Review deterministic draft findings and recommend keep, downgrade, suppress, or rewrite where evidence supports it.\n"
-        "4. Identify false positives caused by OCR, watermarks, signatures, repeated headers, five-year summaries, value-added statements, or table parsing drift.\n\n"
+        "4. Identify false positives caused by OCR, watermarks, signatures, repeated headers, five-year summaries, value-added statements, or table parsing drift.\n"
+        "5. Populate review_comment_rows using the audit-style categories and High/Medium/Low priorities from the JSON schema.\n\n"
         "Rules:\n"
-        "- Do not invent evidence.\n"
+        "- Use only the supplied compact evidence package; do not invent missing pages or note content.\n"
         "- Do not suppress arithmetic findings unless supplied amount evidence supports suppression.\n"
         "- For amount findings, include page number, statement/note name, reported amount, expected amount, difference, and evidence in the rationale/recommendation fields where available.\n"
-        "- For judgement findings, include page number, issue, evidence, recommendation, severity, and confidence.\n"
-        "- Use conservative severity. Low confidence issues should be review_prompt, not confirmed exceptions.\n\n"
+        "- For cross-reference issues, show both the incorrect reference and the correct reference where evidence supports it.\n"
+        "- For regulatory-reference issues, quote or paraphrase the current wording and recommend the revised wording.\n"
+        "- High priority means material arithmetic, regulatory issue, cash-flow error, incorrect primary-statement tie-in, or audit sign-off issue. Medium means disclosure inconsistency, note-reference error, significant wording, or presentation correction. Low means minor spelling, grammar, formatting, or style.\n"
+        "- Low-confidence issues should be review_prompt, not confirmed exceptions.\n\n"
         "Return JSON with this shape:\n"
         f"{COMBINED_AI_REPAIR_SHAPE}\n\n"
         "Compact evidence package:\n"
         f"{json.dumps(package, ensure_ascii=False, indent=2)}"
     )
-
 
 
 def _build_compact_review_package(
@@ -242,6 +263,9 @@ def _build_compact_review_package(
         "primary_statements": _primary_statement_context(document, limits["primary_chars"]),
         "notes_1_and_2": _notes_1_and_2_context(document, note_sections, limits["notes_chars"]),
         "note_heading_map": _note_heading_map(note_sections),
+        "front_matter_and_other_sections": _section_context(document, limits),
+        "cash_flow_context": _cash_flow_context(document, limits["primary_chars"]),
+        "regulatory_reference_snippets": _regulatory_reference_context(document, limits["key_pages"], limits["key_page_chars"]),
         "draft_exception_register": _draft_findings(findings, limits["findings"]),
         "checks_skipped": [str(item)[:700] for item in checks_skipped[: limits["skipped"]]],
         "key_pages_or_snippets": _key_page_snippets(document, findings, limits["key_pages"], limits["key_page_chars"]),
@@ -311,6 +335,79 @@ def _notes_1_and_2_context(document: PdfDocument, note_sections: dict[str, str],
             rows.append({"note": "policy-page", "page": str(page.number), "snippet": snippet})
             used += len(snippet)
         if used >= char_limit:
+            break
+    return rows
+
+
+
+
+def _section_context(document: PdfDocument, limits: dict[str, int]) -> list[dict[str, str]]:
+    section_keywords = {
+        "directors_report": ("directors' report", "directors report", "report of the directors"),
+        "directors_responsibility": ("directors' responsibility", "directors responsibility", "statement of directors"),
+        "management_certification": ("management certification", "certification", "chief executive officer", "chief financial officer"),
+        "icfr": ("internal control over financial reporting", "icfr", "internal control"),
+        "auditor_report": ("independent auditor", "auditor's report", "independent auditors"),
+        "value_added_statement": ("value added statement", "statement of value added"),
+        "five_year_summary": ("five-year financial summary", "five year financial summary", "five-year summary", "five year summary"),
+    }
+    max_rows = max(4, min(int(limits.get("key_pages", 8)), 14))
+    chars_per_row = max(500, min(int(limits.get("key_page_chars", 900)), 1400))
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, int]] = set()
+    for page in document.pages:
+        lower = str(page.text or "").lower()
+        for section, keywords in section_keywords.items():
+            if not any(keyword in lower for keyword in keywords):
+                continue
+            key = (section, page.number)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"section": section, "page": str(page.number), "snippet": _compact(page.text, chars_per_row)})
+            if len(rows) >= max_rows:
+                return rows
+    return rows
+
+
+def _cash_flow_context(document: PdfDocument, char_limit: int) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    used = 0
+    cash_terms = (
+        "statement of cash flows",
+        "cash flows",
+        "cash and cash equivalents",
+        "net cash",
+        "operating activities",
+        "investing activities",
+        "financing activities",
+    )
+    for page in document.pages:
+        lower = str(page.text or "").lower()
+        if not any(term in lower for term in cash_terms):
+            continue
+        snippet = _compact(page.text, min(1800, char_limit - used))
+        if snippet:
+            rows.append({"page": str(page.number), "snippet": snippet})
+            used += len(snippet)
+        if used >= char_limit:
+            break
+    return rows
+
+
+def _regulatory_reference_context(document: PdfDocument, max_pages: int, chars_per_page: int) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    patterns = (
+        "cama", "companies and allied matters", "financial reporting council", "frc", "icfr",
+        "investments and securities", "securities and exchange", "companies income tax", "finance act",
+        "ifrs", "ias ", "isa ", "nigerian", "corporate governance",
+    )
+    for page in document.pages:
+        lower = str(page.text or "").lower()
+        if not any(pattern in lower for pattern in patterns):
+            continue
+        rows.append({"page": str(page.number), "snippet": _compact(page.text, chars_per_page)})
+        if len(rows) >= max_pages:
             break
     return rows
 
@@ -387,6 +484,7 @@ def _parsed_to_result(
     policy_findings, policy_rows = _observations_to_outputs(parsed.get("policy_review_findings", []) or parsed.get("policy_findings", []), "AI policy judgement")
     missed_findings, missed_rows = _observations_to_outputs(parsed.get("missed_review_findings", []) or parsed.get("missed_findings", []), "AI full review")
     final_findings = findings_after_adjudication + policy_findings + missed_findings
+    review_comment_rows = _review_comment_rows_from_parsed(parsed, policy_rows + missed_rows)
     return CombinedAiReviewResult(
         findings=final_findings,
         policy_export=policy_rows,
@@ -401,6 +499,8 @@ def _parsed_to_result(
         reviewed_count=reviewed_count,
         evidence_rows=[evidence_row],
         error_rows=error_rows,
+        review_comment_rows=review_comment_rows,
+        summary_fields=_summary_fields_from_parsed(parsed),
         review_mode=review_mode,
     )
 
@@ -447,6 +547,91 @@ def _observations_to_outputs(observations: list[dict[str, Any]], category: str) 
             }
         )
     return findings, rows
+
+
+
+
+def _summary_fields_from_parsed(parsed: dict[str, Any]) -> dict[str, str]:
+    action_points = parsed.get("immediate_action_points", [])
+    if isinstance(action_points, list):
+        action_text = "\n".join(str(item).strip() for item in action_points if str(item).strip())
+    else:
+        action_text = str(action_points or "").strip()
+    return {
+        "Overall sign-off conclusion": str(parsed.get("overall_signoff_conclusion", "") or "").strip(),
+        "Recommended immediate action points": action_text,
+        "Cash flow correctness note": str(parsed.get("cash_flow_conclusion", "") or "").strip(),
+        "Regulatory-reference note": str(parsed.get("regulatory_reference_conclusion", "") or "").strip(),
+        "Casting and cross-casting note": str(parsed.get("casting_cross_casting_conclusion", "") or "").strip(),
+    }
+
+
+def _review_comment_rows_from_parsed(parsed: dict[str, Any], fallback_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    raw_rows = parsed.get("review_comment_rows", [])
+    rows: list[dict[str, str]] = []
+    if isinstance(raw_rows, list):
+        for index, row in enumerate(raw_rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            normalized = _normalize_review_comment_row(row, index)
+            if normalized["Issue identified"]:
+                rows.append(normalized)
+    if rows:
+        return rows
+    for index, row in enumerate(fallback_rows, start=1):
+        rows.append(
+            {
+                "S/N": str(index),
+                "Section / Statement / Note": str(row.get("Title", "") or row.get("Note reference", "") or "AI review"),
+                "Page number": str(row.get("Page reference", "") or ""),
+                "Account / line item": str(row.get("Title", "") or ""),
+                "Current wording / amount / reference": str(row.get("Evidence", "") or ""),
+                "Issue identified": str(row.get("Issue", "") or ""),
+                "Expected correction / recommendation": str(row.get("Recommendation", "") or ""),
+                "Category": _normalize_review_comment_category(row.get("Title", "") or row.get("Issue", "")),
+                "Priority": _normalize_severity(row.get("Severity", "Low")),
+                "Status": "Open",
+                "Reviewer comments": str(row.get("Rationale", "") or ""),
+            }
+        )
+    return rows
+
+
+def _normalize_review_comment_row(row: dict[str, Any], index: int) -> dict[str, str]:
+    return {
+        "S/N": str(row.get("S/N") or row.get("s_n") or row.get("sn") or index),
+        "Section / Statement / Note": str(row.get("Section / Statement / Note") or row.get("section_or_statement_or_note") or row.get("section") or "").strip(),
+        "Page number": str(row.get("Page number") or row.get("page_number") or row.get("page_reference") or "").strip(),
+        "Account / line item": str(row.get("Account / line item") or row.get("account_or_line_item") or row.get("line_item") or "").strip(),
+        "Current wording / amount / reference": str(row.get("Current wording / amount / reference") or row.get("current_wording_amount_reference") or row.get("current_reference") or row.get("evidence") or "").strip(),
+        "Issue identified": str(row.get("Issue identified") or row.get("issue_identified") or row.get("issue") or "").strip(),
+        "Expected correction / recommendation": str(row.get("Expected correction / recommendation") or row.get("expected_correction_recommendation") or row.get("recommendation") or "").strip(),
+        "Category": _normalize_review_comment_category(row.get("Category") or row.get("category") or row.get("issue_identified") or ""),
+        "Priority": _normalize_severity(row.get("Priority") or row.get("priority") or row.get("severity") or "Low"),
+        "Status": str(row.get("Status") or row.get("status") or "Open").strip() or "Open",
+        "Reviewer comments": str(row.get("Reviewer comments") or row.get("reviewer_comments") or row.get("rationale") or "").strip(),
+    }
+
+
+def _normalize_review_comment_category(value: object) -> str:
+    lower = str(value or "").lower()
+    if "spell" in lower or "grammar" in lower or "typograph" in lower or "wording" in lower:
+        return "Spelling / Grammar"
+    if "regulat" in lower or "cama" in lower or "frc" in lower or "icfr" in lower or "securities" in lower or "tax law" in lower:
+        return "Regulatory Reference"
+    if "note" in lower and ("reference" in lower or "cross" in lower):
+        return "Note Cross-reference"
+    if "cross" in lower and ("cast" in lower or "tie" in lower or "agreement" in lower):
+        return "Cross-casting"
+    if "cash" in lower or "ias 7" in lower:
+        return "Cash Flow"
+    if "cast" in lower or "total" in lower or "subtotal" in lower or "arithmetic" in lower:
+        return "Casting"
+    if "disclosure" in lower or "missing" in lower:
+        return "Disclosure"
+    if "present" in lower or "format" in lower or "caption" in lower:
+        return "Presentation"
+    return "Internal Consistency"
 
 
 

@@ -57,6 +57,8 @@ class AiReviewPipelineResult:
     finding_reviewed: int = 0
     evidence_pack_rows: list[dict[str, str]] = field(default_factory=list)
     error_rows: list[dict[str, str]] = field(default_factory=list)
+    review_comment_rows: list[dict[str, str]] = field(default_factory=list)
+    summary_fields: dict[str, str] = field(default_factory=dict)
     review_mode: str = "standard"
     combined_summary: str = ""
     combined_memo: str = ""
@@ -127,6 +129,8 @@ def _merge_combined_result(result: AiReviewPipelineResult, combined, review_cont
     result.finding_reviewed = combined.reviewed_count
     result.evidence_pack_rows.extend(combined.evidence_rows)
     result.error_rows.extend(combined.error_rows)
+    result.review_comment_rows = list(getattr(combined, "review_comment_rows", []) or [])
+    result.summary_fields = dict(getattr(combined, "summary_fields", {}) or {})
     result.review_mode = combined.review_mode
     result.combined_summary = combined.summary
     result.combined_memo = combined.executive_memo

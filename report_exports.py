@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from io import BytesIO
 import re
 
@@ -57,6 +58,7 @@ def build_excel_export(result) -> bytes:
         {"Metric": "AI finding review count", "Value": result.metrics.get("ai_finding_reviewed", 0)},
         {"Metric": "AI finding review suppressed", "Value": result.metrics.get("ai_finding_suppressed", 0)},
     ]
+    summary_rows.extend(ai_enhanced_summary_rows(result))
     checks_performed = [{"Check performed": item} for item in metric_lines(result.metrics.get("checks_performed"), "No deterministic checks completed.")]
     checks_skipped = checks_skipped_rows(result) or [{"Check area": "None", "Reason skipped": "No major checks skipped."}]
     check_results = result.metrics.get("check_results", [])
@@ -69,6 +71,8 @@ def build_excel_export(result) -> bytes:
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
         finding_summary_rows = finding_summary_rows_for_result(result) or [{"Severity": "", "Category": "", "Page reference": "", "Issue": "No automated findings were identified.", "Recommendation": ""}]
         pd.DataFrame(finding_summary_rows).to_excel(writer, sheet_name="Findings summary", index=False)
+        review_comment_rows = review_comment_rows_for_result(result) or [{"S/N": "", "Section / Statement / Note": "", "Page number": "", "Account / line item": "", "Current wording / amount / reference": "", "Issue identified": "No automated findings were identified.", "Expected correction / recommendation": "", "Category": "", "Priority": "", "Status": "Noted", "Reviewer comments": ""}]
+        pd.DataFrame(review_comment_rows).to_excel(writer, sheet_name="Review comments", index=False)
         review_prompt_rows = review_prompts_not_elevated_rows(result) or [{"Issue": "No low-confidence review prompts were withheld from the exception register."}]
         pd.DataFrame(review_prompt_rows).to_excel(writer, sheet_name="Review prompts not elevated", index=False)
         ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
@@ -210,6 +214,7 @@ def build_excel_export(result) -> bytes:
 
         format_exception_register_sheet(writer.book["Exception register"])
         format_excel_table_sheet(writer.book["Findings summary"], "FindingsSummary")
+        format_excel_table_sheet(writer.book["Review comments"], "ReviewComments")
         format_excel_table_sheet(writer.book["Review prompts not elevated"], "ReviewPromptsNotElevated")
         format_excel_table_sheet(writer.book["Primary statement line items"], "PrimaryLineItems")
         format_excel_table_sheet(writer.book["Items without notes summary"], "NoNotesSummary")
@@ -259,6 +264,163 @@ def review_prompts_not_elevated_rows(result) -> list[dict[str, str]]:
                 translated[field] = translate_page_tokens(translated.get(field, ""), result)
         cleaned.append(translated)
     return cleaned
+
+
+
+def ai_enhanced_summary_rows(result) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    priority_counts = Counter(str(finding.severity or "") for finding in result.findings)
+    category_counts = Counter(review_comment_category_for_finding(finding) for finding in result.findings)
+    rows.extend(
+        [
+            {"Metric": "Priority - High", "Value": priority_counts.get("High", 0)},
+            {"Metric": "Priority - Medium", "Value": priority_counts.get("Medium", 0)},
+            {"Metric": "Priority - Low", "Value": priority_counts.get("Low", 0)},
+        ]
+    )
+    for category in REVIEW_COMMENT_CATEGORIES:
+        rows.append({"Metric": f"Category - {category}", "Value": category_counts.get(category, 0)})
+    high_findings = [finding for finding in result.findings if finding.severity == "High"]
+    if high_findings:
+        rows.append({"Metric": "Key high-priority findings", "Value": "\n".join(f"{page_reference_for_finding(finding, result) or finding.location}: {finding.issue}" for finding in high_findings[:5])})
+    else:
+        rows.append({"Metric": "Key high-priority findings", "Value": "No high-priority findings identified."})
+    ai_summary = result.metrics.get("ai_summary_fields", {}) if isinstance(result.metrics.get("ai_summary_fields", {}), dict) else {}
+    default_conclusion = "Not ready for final sign-off until open High and Medium findings are cleared." if (priority_counts.get("High", 0) or priority_counts.get("Medium", 0)) else "No high- or medium-priority automated findings; reviewer should still complete professional review procedures."
+    rows.extend(
+        [
+            {"Metric": "Overall conclusion on final sign-off", "Value": ai_summary.get("Overall sign-off conclusion") or default_conclusion},
+            {"Metric": "Recommended immediate action points", "Value": ai_summary.get("Recommended immediate action points") or immediate_action_points(result)},
+            {"Metric": "Cash flow correctness note", "Value": ai_summary.get("Cash flow correctness note") or cash_flow_summary_note(result)},
+            {"Metric": "Regulatory-reference note", "Value": ai_summary.get("Regulatory-reference note") or regulatory_summary_note(result)},
+            {"Metric": "Casting and cross-casting note", "Value": ai_summary.get("Casting and cross-casting note") or casting_summary_note(result)},
+        ]
+    )
+    return rows
+
+
+REVIEW_COMMENT_CATEGORIES = (
+    "Spelling / Grammar",
+    "Regulatory Reference",
+    "Note Cross-reference",
+    "Casting",
+    "Cross-casting",
+    "Cash Flow",
+    "Disclosure",
+    "Presentation",
+    "Internal Consistency",
+)
+
+
+def review_comment_rows_for_result(result) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for finding in result.findings:
+        metadata = finding.metadata or {}
+        row = {
+            "S/N": str(len(rows) + 1),
+            "Section / Statement / Note": metadata.get("statement") or note_reference_for_finding(finding, result) or finding.category,
+            "Page number": page_reference_for_finding(finding, result),
+            "Account / line item": metadata.get("line_item", ""),
+            "Current wording / amount / reference": translate_page_tokens(finding.evidence, result),
+            "Issue identified": finding.issue,
+            "Expected correction / recommendation": finding.recommendation,
+            "Category": review_comment_category_for_finding(finding),
+            "Priority": finding.severity,
+            "Status": "Open",
+            "Reviewer comments": metadata.get("ai_review_reason", ""),
+        }
+        key = (row["Page number"], row["Category"], row["Issue identified"])
+        if key not in seen:
+            seen.add(key)
+            rows.append(row)
+    for raw_row in result.metrics.get("ai_review_comment_rows", []) or []:
+        if not isinstance(raw_row, dict):
+            continue
+        row = normalize_ai_review_comment_row(raw_row, len(rows) + 1, result)
+        key = (row["Page number"], row["Category"], row["Issue identified"])
+        if row["Issue identified"] and key not in seen:
+            seen.add(key)
+            rows.append(row)
+    for index, row in enumerate(rows, start=1):
+        row["S/N"] = str(index)
+    return rows
+
+
+def normalize_ai_review_comment_row(row: dict[str, object], index: int, result) -> dict[str, str]:
+    return {
+        "S/N": str(row.get("S/N") or row.get("s_n") or row.get("sn") or index),
+        "Section / Statement / Note": str(row.get("Section / Statement / Note") or row.get("section_or_statement_or_note") or row.get("section") or "").strip(),
+        "Page number": translate_page_tokens(row.get("Page number") or row.get("page_number") or row.get("page_reference") or "", result),
+        "Account / line item": str(row.get("Account / line item") or row.get("account_or_line_item") or row.get("line_item") or "").strip(),
+        "Current wording / amount / reference": str(row.get("Current wording / amount / reference") or row.get("current_wording_amount_reference") or row.get("current_reference") or row.get("evidence") or "").strip(),
+        "Issue identified": str(row.get("Issue identified") or row.get("issue_identified") or row.get("issue") or "").strip(),
+        "Expected correction / recommendation": str(row.get("Expected correction / recommendation") or row.get("expected_correction_recommendation") or row.get("recommendation") or "").strip(),
+        "Category": normalize_review_comment_category(row.get("Category") or row.get("category") or row.get("issue_identified") or ""),
+        "Priority": normalize_priority(row.get("Priority") or row.get("priority") or row.get("severity") or "Low"),
+        "Status": str(row.get("Status") or row.get("status") or "Open").strip() or "Open",
+        "Reviewer comments": str(row.get("Reviewer comments") or row.get("reviewer_comments") or row.get("rationale") or "").strip(),
+    }
+
+
+def review_comment_category_for_finding(finding) -> str:
+    text = " ".join(str(part or "") for part in (finding.category, finding.issue, finding.evidence, finding.recommendation))
+    return normalize_review_comment_category(text)
+
+
+def normalize_review_comment_category(value: object) -> str:
+    lower = str(value or "").lower()
+    if "spell" in lower or "grammar" in lower or "typograph" in lower or "wording" in lower:
+        return "Spelling / Grammar"
+    if "regulat" in lower or "cama" in lower or "frc" in lower or "icfr" in lower or "securities" in lower or "tax law" in lower:
+        return "Regulatory Reference"
+    if "note" in lower and ("reference" in lower or "cross" in lower or "agreement" in lower):
+        return "Note Cross-reference"
+    if "cross" in lower and ("cast" in lower or "tie" in lower or "agreement" in lower):
+        return "Cross-casting"
+    if "cash" in lower or "ias 7" in lower:
+        return "Cash Flow"
+    if "cast" in lower or "total" in lower or "subtotal" in lower or "arithmetic" in lower or "rounding" in lower:
+        return "Casting"
+    if "disclosure" in lower or "missing" in lower:
+        return "Disclosure"
+    if "present" in lower or "format" in lower or "caption" in lower:
+        return "Presentation"
+    return "Internal Consistency"
+
+
+def normalize_priority(value: object) -> str:
+    text = str(value or "").strip().title()
+    return text if text in {"High", "Medium", "Low"} else "Low"
+
+
+def immediate_action_points(result) -> str:
+    if result.metrics.get("high", 0):
+        return "Clear high-priority findings first, then rerun the review on the updated draft."
+    if result.metrics.get("medium", 0):
+        return "Review medium-priority drafting, reference, casting, and disclosure findings before final sign-off."
+    return "Review low-priority formatting/drafting points and complete professional sign-off procedures."
+
+
+def cash_flow_summary_note(result) -> str:
+    related = [finding.issue for finding in result.findings if review_comment_category_for_finding(finding) == "Cash Flow"]
+    if related:
+        return "Cash-flow review identified: " + "; ".join(related[:3])
+    performed = str(result.metrics.get("checks_performed", ""))
+    if "cash flow" in performed.lower():
+        return "Automated cash-flow checks were performed where rows were confidently extracted; no elevated cash-flow finding was identified."
+    return "Cash-flow correctness requires manual review where extraction did not confidently parse the statement."
+
+
+def regulatory_summary_note(result) -> str:
+    related = [finding.issue for finding in result.findings if review_comment_category_for_finding(finding) == "Regulatory Reference"]
+    return "Regulatory-reference review identified: " + "; ".join(related[:3]) if related else "No elevated regulatory-reference finding was identified from extracted evidence."
+
+
+def casting_summary_note(result) -> str:
+    related = [finding.issue for finding in result.findings if review_comment_category_for_finding(finding) in {"Casting", "Cross-casting"}]
+    return "Casting/cross-casting review identified: " + "; ".join(related[:3]) if related else "No elevated casting or cross-casting issue was identified from automated checks."
+
 
 
 def finding_rows(result) -> list[dict[str, str]]:
