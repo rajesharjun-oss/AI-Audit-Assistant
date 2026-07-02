@@ -40,6 +40,11 @@ def _sample_result() -> ReviewResult:
             "ai_policy_review_message": "",
             "ai_policy_review_summary": "AI policy completed.",
             "ai_policy_review_model": "gpt-5-mini",
+            "ai_full_review_status": "completed",
+            "ai_full_review_message": "",
+            "ai_full_review_summary": "AI full completed.",
+            "ai_full_review_model": "gpt-5-mini",
+            "ai_full_export": [{"Title": "Full review item", "Status": "review_prompt"}],
             "ai_finding_review_status": "skipped",
             "ai_finding_review_message": "No eligible findings.",
             "ai_finding_review_summary": "",
@@ -78,11 +83,13 @@ def test_write_review_outputs_creates_standard_artifacts(monkeypatch, tmp_path: 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["company_name"] == "Example Limited"
     assert payload["ai_policy_review_status"] == "completed"
+    assert payload["ai_full_review_status"] == "completed"
     assert payload["ai_finding_review_status"] == "skipped"
 
     workbook = openpyxl.load_workbook(excel_path, data_only=True)
     assert "Summary" in workbook.sheetnames
     assert "AI policy judgement" in workbook.sheetnames
+    assert "AI full review" in workbook.sheetnames
     assert "AI finding review" in workbook.sheetnames
     assert "AI evidence packs" in workbook.sheetnames
 
@@ -90,6 +97,7 @@ def test_write_review_outputs_creates_standard_artifacts(monkeypatch, tmp_path: 
 def test_ai_verification_errors_flag_unavailable_statuses() -> None:
     result = _sample_result()
     result.metrics["ai_policy_review_status"] = "unavailable"
+    result.metrics["ai_full_review_status"] = "unavailable"
     result.metrics["ai_finding_review_status"] = "deferred"
 
     errors = job_runner.ai_verification_errors(
@@ -100,6 +108,7 @@ def test_ai_verification_errors_flag_unavailable_statuses() -> None:
     )
 
     assert any("policy review status is unavailable" in error.lower() for error in errors)
+    assert any("full review status is unavailable" in error.lower() for error in errors)
     assert any("finding review status is deferred" in error.lower() for error in errors)
 
 

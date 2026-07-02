@@ -8,6 +8,7 @@ import reviewer
 import ai_finding_review
 import ai_policy_review
 from ai_finding_review import AiFindingReviewResult, run_ai_finding_review
+from ai_full_review import AiFullReviewResult
 from ai_policy_review import AiPolicyReviewResult, _parse_response_json
 from cross_page_consistency import _names_look_like_spelling_variants, check_cross_page_consistency
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
@@ -522,6 +523,71 @@ def test_optional_ai_policy_review_adds_findings_and_export(monkeypatch):
     assert result.metrics["ai_evidence_packs"][0]["Evidence type"] == "Policy/note context"
     assert "AI policy and standards judgement completed using gpt-5-mini." in result.metrics["checks_performed"]
 
+
+def test_optional_ai_full_review_adds_findings_and_export(monkeypatch):
+    filler = "Additional extracted review context.\n" * 80
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nCash and cash equivalents 100 90\nTotal assets 100 90\nEquity 100 90\nTotal equity and liabilities 100 90\n"
+                + filler,
+                [],
+            ),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n1. Significant accounting policies\nRevenue from contracts with customers.\n" + filler,
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+    monkeypatch.setattr(
+        reviewer,
+        "run_ai_full_review",
+        lambda *args, **kwargs: AiFullReviewResult(
+            findings=[
+                reviewer.Finding(
+                    category="AI full review",
+                    severity="Medium",
+                    location="Page 2 | Note 1",
+                    issue="Revenue policy wording needs reviewer confirmation.",
+                    evidence="AI reviewed supplied policy context and found a possible tailoring issue.",
+                    recommendation="Review Note 1 and tailor the revenue wording where required.",
+                    metadata={"match_confidence": "Medium", "page_reference": "Page 2", "note_reference": "Note 1"},
+                )
+            ],
+            export_rows=[{"Title": "Revenue policy", "Status": "review_prompt", "Page reference": "Page 2"}],
+            summary="Full AI review found one policy tailoring prompt.",
+            status="completed",
+            model="gpt-5-mini",
+            evidence_rows=[{"Evidence type": "Full AI review prompt", "Source page": "Document extracted pages"}],
+        ),
+    )
+    monkeypatch.setattr(
+        reviewer,
+        "run_ai_finding_review",
+        lambda document, profile, findings, model: AiFindingReviewResult(
+            findings=findings,
+            export_rows=[],
+            summary="",
+            status="skipped",
+            model=model,
+            message="No weak findings were eligible.",
+            reviewed_count=0,
+            suppressed_count=0,
+            evidence_rows=[],
+        ),
+    )
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_full_review=True))
+
+    assert any(f.category == "AI full review" for f in result.findings)
+    assert result.metrics["ai_full_review_status"] == "completed"
+    assert result.metrics["ai_full_review_model"] == "gpt-5-mini"
+    assert result.metrics["ai_full_export"] == [{"Title": "Revenue policy", "Status": "review_prompt", "Page reference": "Page 2"}]
+    assert result.metrics["ai_evidence_packs"][0]["Evidence type"] == "Full AI review prompt"
+    assert "AI full financial statement review completed using gpt-5-mini." in result.metrics["checks_performed"]
 
 def test_ai_policy_review_missing_key_is_reported_as_skipped(monkeypatch):
     filler = "Additional extracted policy context.\n" * 80
@@ -3264,7 +3330,6 @@ def test_changes_statement_page_is_inferred_from_contents_when_rotated():
 
     assert page is not None
     assert page.number == 16
-
 
 def test_rotated_gibberish_page_is_marked_for_ocr_retry():
     gibberish = "(â‚¬8zâ€˜6â‚¬L) = (p16â€˜E0rT) TTHPEE= i z pT8IZ7â€˜E6OLrTT"

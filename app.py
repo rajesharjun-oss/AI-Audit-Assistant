@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -20,7 +21,7 @@ from models import CompanyProfile, DEFAULT_AI_MODEL, ReviewOptions
 from report_exports import build_excel_export, exported_file_stem
 from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
 
-st.set_page_config(page_title="AI Audit Assistant", page_icon="✨", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AI Audit Assistant", page_icon="AI", layout="wide", initial_sidebar_state="expanded")
 
 def _friendly_review_failure_message(exc: Exception) -> str:
     text = str(exc or "").strip()
@@ -1118,8 +1119,19 @@ with st.container(border=True):
                 "Requires OPENAI_API_KEY on the server."
             ),
         )
+        use_ai_full_review = st.checkbox(
+            "Run full AI financial statement review",
+            value=True,
+            help=(
+                "Runs a ChatGPT-style quality-control pass over extracted statement text and note context. "
+                "Outputs concise findings, evidence snippets, page/note references, reviewer rationale, and recommended actions."
+            ),
+        )
     if review_mode != "Advanced Review":
-        use_ai_policy_review = False
+        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not openai_key:
+            use_ai_policy_review = False
+            use_ai_full_review = False
 
 st.markdown('<div class="section-label">Audit review modules</div>', unsafe_allow_html=True)
 st.markdown(
@@ -1195,6 +1207,7 @@ try:
                 ocr_dpi=int(ocr_dpi),
                 run_cautious_note_agreement=cautious_note_agreement,
                 use_ai_policy_review=use_ai_policy_review,
+                use_ai_full_review=use_ai_full_review,
                 ai_model=DEFAULT_AI_MODEL,
             ),
         )
@@ -1247,6 +1260,24 @@ elif use_ai_policy_review:
             st.warning(f"Status: {ai_status}. {ai_message}")
     else:
         st.warning(f"Status: {ai_status}. No AI policy observations were returned.")
+
+if result.metrics.get("ai_full_review_status") == "completed":
+    ai_full_summary = str(result.metrics.get("ai_full_review_summary", "") or "").strip()
+    if ai_full_summary:
+        st.markdown('<div class="section-label">AI full review</div>', unsafe_allow_html=True)
+        st.info(ai_full_summary)
+elif use_ai_full_review:
+    ai_full_status = str(result.metrics.get("ai_full_review_status", "disabled") or "disabled")
+    ai_full_message = str(result.metrics.get("ai_full_review_message", "") or "").strip()
+    if ai_full_status != "disabled":
+        st.markdown('<div class="section-label">AI full review</div>', unsafe_allow_html=True)
+        if ai_full_message:
+            if ai_full_status == "deferred":
+                st.info(ai_full_message)
+            else:
+                st.warning(f"Status: {ai_full_status}. {ai_full_message}")
+        else:
+            st.info(f"Status: {ai_full_status}.")
 
 if result.metrics.get("ai_finding_review_status") == "completed":
     ai_finding_summary = str(result.metrics.get("ai_finding_review_summary", "") or "").strip()

@@ -22,7 +22,8 @@ def main() -> int:
     parser.add_argument("--ocr-max-pages", type=int, default=60, help="Maximum scanned pages to OCR")
     parser.add_argument("--ocr-dpi", type=int, default=200, help="OCR render DPI, usually 150-300")
     parser.add_argument("--ai-policy-review", action="store_true", help="Run optional AI judgement for policy relevance, disclosure completeness, and industry fit")
-    parser.add_argument("--ai-model", default=DEFAULT_AI_MODEL, help="Model to use for optional AI policy judgement")
+    parser.add_argument("--ai-full-review", action="store_true", help="Run optional full AI quality-control review over extracted statement text and note context")
+    parser.add_argument("--ai-model", default=DEFAULT_AI_MODEL, help="Model to use for optional AI review")
     parser.add_argument("--output", type=Path, help="Optional markdown report path")
     parser.add_argument("--export-dir", type=Path, help="Optional directory for standard backend artifacts (Excel, markdown, JSON summary).")
     parser.add_argument("--skip-excel-export", action="store_true", help="When using --export-dir, skip the Excel exception register export.")
@@ -46,6 +47,7 @@ def main() -> int:
         ocr_max_pages=args.ocr_max_pages,
         ocr_dpi=args.ocr_dpi,
         use_ai_policy_review=args.ai_policy_review,
+        use_ai_full_review=args.ai_full_review,
         ai_model=args.ai_model,
     )
 
@@ -66,6 +68,7 @@ def main() -> int:
         print(
             "AI status:",
             f"policy={summary.get('ai_policy_review_status', 'disabled')},",
+            f"full={summary.get('ai_full_review_status', 'disabled')},",
             f"finding={summary.get('ai_finding_review_status', 'disabled')}",
         )
     else:

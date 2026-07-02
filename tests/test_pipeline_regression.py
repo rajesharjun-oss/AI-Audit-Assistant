@@ -68,6 +68,7 @@ def _build_options(options_data: dict | None) -> ReviewOptions:
         ocr_dpi=options_data.get("ocr_dpi", 300),
         run_cautious_note_agreement=bool(options_data.get("run_cautious_note_agreement", False)),
         use_ai_policy_review=bool(options_data.get("use_ai_policy_review", False)),
+        use_ai_full_review=bool(options_data.get("use_ai_full_review", False)),
     )
 
 

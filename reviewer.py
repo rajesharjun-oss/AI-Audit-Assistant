@@ -12,6 +12,7 @@ from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage,
 from cross_page_consistency import check_cross_page_consistency
 from policy_reviewer import review_notes_1_and_2
 from ai_finding_review import run_ai_finding_review
+from ai_full_review import run_ai_full_review
 from ai_policy_review import run_ai_policy_review, _is_rate_limit_error
 from extraction import extract_pdf, extract_pdf_with_ocr
 
@@ -432,6 +433,12 @@ def review_pdf(
     ai_policy_status = "disabled"
     ai_policy_model = options.ai_model
     ai_policy_message = ""
+    ai_full_export: list[dict[str, str]] = []
+    ai_full_summary = ""
+    ai_full_status = "disabled"
+    ai_full_model = options.ai_model
+    ai_full_message = ""
+    ai_full_rate_limited = False
     ai_evidence_pack_rows: list[dict[str, str]] = []
     ai_finding_export: list[dict[str, str]] = []
     ai_finding_summary = ""
@@ -463,6 +470,31 @@ def review_pdf(
             if ai_review.message:
                 checks_skipped.append(ai_review.message)
             ai_policy_rate_limited = ai_review.status == "deferred"
+    if options.use_ai_full_review and not ai_policy_rate_limited:
+        ai_full_review = run_ai_full_review(
+            document,
+            profile,
+            note_sections,
+            policy_map=policy_map,
+            model=options.ai_model,
+        )
+        ai_full_status = ai_full_review.status
+        ai_full_model = ai_full_review.model
+        ai_full_summary = ai_full_review.summary
+        ai_full_export = ai_full_review.export_rows
+        ai_full_message = ai_full_review.message
+        ai_evidence_pack_rows.extend(getattr(ai_full_review, "evidence_rows", None) or [])
+        if ai_full_review.status == "completed":
+            findings.extend(ai_full_review.findings)
+            checks_performed.append(f"AI full financial statement review completed using {ai_full_review.model}.")
+        else:
+            if ai_full_review.message:
+                checks_skipped.append(ai_full_review.message)
+            ai_full_rate_limited = ai_full_review.status == "deferred"
+    elif options.use_ai_full_review and ai_policy_rate_limited:
+        ai_full_status = "skipped"
+        ai_full_message = "AI full review was skipped because the AI service is in cooldown after a rate-limit response."
+        checks_skipped.append(ai_full_message)
     if getattr(document, "skipped_table_details", None):
         checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables; details are listed in Skipped table details.")
     
@@ -475,7 +507,9 @@ def review_pdf(
         f for f in findings
         if not (f.category == "Notes agreement" and f.metadata and f.metadata.get("match_confidence") == "Low")
     ]
-    if options.use_ai_policy_review and not ai_policy_rate_limited:
+    ai_review_enabled = options.use_ai_policy_review or options.use_ai_full_review
+    ai_rate_limited = ai_policy_rate_limited or ai_full_rate_limited
+    if ai_review_enabled and not ai_rate_limited:
         ai_finding_review = run_ai_finding_review(
             document,
             profile,
@@ -498,9 +532,10 @@ def review_pdf(
             )
         elif ai_finding_review.message:
             checks_skipped.append(ai_finding_review.message)
-    elif options.use_ai_policy_review and ai_policy_rate_limited:
+    elif ai_review_enabled and ai_rate_limited:
         ai_finding_status = "skipped"
         ai_finding_message = "AI finding review was skipped because the AI service is in cooldown after a rate-limit response."
+        checks_skipped.append(ai_finding_message)
     return _build_result(
         document,
         findings,
@@ -514,6 +549,11 @@ def review_pdf(
         ai_policy_model,
         ai_policy_summary,
         ai_policy_message,
+        ai_full_export,
+        ai_full_status,
+        ai_full_model,
+        ai_full_summary,
+        ai_full_message,
         ai_finding_export,
         ai_finding_status,
         ai_finding_model,
@@ -653,6 +693,12 @@ def _not_elevated_reason(finding: Finding, document: PdfDocument) -> str:
             return "Low-confidence AI policy judgement; retained for reviewer context rather than a confirmed exception."
         if not _finding_has_page_evidence(finding) and not _finding_has_note_evidence(finding):
             return "AI policy judgement did not identify a specific page or note reference."
+    if finding.category == "AI full review":
+        ai_confidence = str(metadata.get("match_confidence", "") or metadata.get("ai_review_confidence", "") or "").strip().lower()
+        if ai_confidence == "low":
+            return "Low-confidence AI full-review observation; retained for reviewer context rather than a confirmed exception."
+        if not _finding_has_page_evidence(finding) and not _finding_has_note_evidence(finding):
+            return "AI full review did not identify a specific page or note reference."
     if finding.category in _PAGE_REQUIRED_FINDING_CATEGORIES and not _finding_has_page_evidence(finding):
         return "Finding did not include a specific page reference, so it is retained as a review prompt instead of an exception."
     if document.ocr_used and str(metadata.get("ocr_review", "") or "").lower() in {"true", "1", "yes"}:
@@ -668,6 +714,7 @@ _PAGE_REQUIRED_FINDING_CATEGORIES = {
     "Narrative consistency",
     "Key amount consistency",
     "AI policy judgement",
+    "AI full review",
 }
 
 
@@ -758,6 +805,11 @@ def _build_result(
     ai_policy_model: str = "",
     ai_policy_summary: str = "",
     ai_policy_message: str = "",
+    ai_full_export: list[dict] | None = None,
+    ai_full_status: str = "disabled",
+    ai_full_model: str = "",
+    ai_full_summary: str = "",
+    ai_full_message: str = "",
     ai_finding_export: list[dict] | None = None,
     ai_finding_status: str = "disabled",
     ai_finding_model: str = "",
@@ -853,6 +905,11 @@ def _build_result(
         "ai_policy_review_model": ai_policy_model,
         "ai_policy_review_summary": ai_policy_summary,
         "ai_policy_review_message": ai_policy_message,
+        "ai_full_export": ai_full_export or [],
+        "ai_full_review_status": ai_full_status,
+        "ai_full_review_model": ai_full_model,
+        "ai_full_review_summary": ai_full_summary,
+        "ai_full_review_message": ai_full_message,
         "ai_finding_export": ai_finding_export or [],
         "ai_finding_review_status": ai_finding_status,
         "ai_finding_review_model": ai_finding_model,
@@ -861,7 +918,7 @@ def _build_result(
         "ai_finding_reviewed": ai_finding_reviewed,
         "ai_finding_suppressed": ai_finding_suppressed,
         "ai_evidence_packs": ai_evidence_pack_rows or [],
-        "hybrid_review_mode": "AI-assisted evidence review" if (ai_policy_status != "disabled" or ai_finding_status != "disabled") else "Deterministic engine only",
+        "hybrid_review_mode": "AI-assisted evidence review" if (ai_policy_status != "disabled" or ai_full_status != "disabled" or ai_finding_status != "disabled") else "Deterministic engine only",
         "hybrid_review_principle": "Engine performs extraction, arithmetic, and structural checks; AI reviews evidence packs for policy/disclosure judgement and likely false positives.",
         "checks_performed_count": len(checks_performed_list),
         "checks_passed_count": sum(1 for row in check_result_rows if row.get("Result") == "Passed"),
@@ -2485,7 +2542,25 @@ def _normalise_year_end_format(value: str) -> str:
     return cleaned
 
 
+
+def _normalise_currency_text(value: str) -> str:
+    text = str(value or "")
+    replacements = {
+        "\u00e2\u201a\u00a6": chr(0x20A6),
+        "\u00e2\u20ac\u2122": "'",
+        "\u00e2\u20ac\u02dc": "'",
+        "\u00e2\u20ac\u0153": "'",
+        "\u00e2\u20ac\u009d": "'",
+        "\u00c3\u00a2\u00e2\u201a\u00ac\u00e2\u201e\u00a2": "'",
+        "\u00c3\u00a2\u00e2\u201a\u00ac\u00cb\u0153": "'",
+        "\u00c3\u00a2\u00e2\u201a\u00ac\u00c2\u009d": "'",
+    }
+    for bad, good in replacements.items():
+        text = text.replace(bad, good)
+    return text
+
 def _detect_currency(text: str) -> str:
+    text = _normalise_currency_text(text)
     naira_symbol = chr(0x20A6)
     naira_quotes = r"['\u2019\u2018`\u201c\u201d]"
     naira_thousands = (
@@ -4363,6 +4438,8 @@ def findings_to_markdown(result: ReviewResult) -> str:
         f"note_reference_findings: {result.metrics.get('note_reference_findings', 0)}",
         f"ai_policy_review_status: {result.metrics.get('ai_policy_review_status', 'disabled')}",
         f"ai_policy_review_model: {result.metrics.get('ai_policy_review_model', '')}",
+        f"ai_full_review_status: {result.metrics.get('ai_full_review_status', 'disabled')}",
+        f"ai_full_review_model: {result.metrics.get('ai_full_review_model', '')}",
         "",
         "## Review dimensions",
         "",
@@ -4384,9 +4461,12 @@ def findings_to_markdown(result: ReviewResult) -> str:
         "",
     ]
     ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
+    ai_full_summary = str(result.metrics.get("ai_full_review_summary", "") or "").strip()
     ai_finding_summary = str(result.metrics.get("ai_finding_review_summary", "") or "").strip()
     if ai_summary:
         lines.extend(["## AI Policy Judgement", "", ai_summary, ""])
+    if ai_full_summary:
+        lines.extend(["## AI Full Review", "", ai_full_summary, ""])
     if ai_finding_summary:
         lines.extend(["## AI Finding Review", "", ai_finding_summary, ""])
     if not result.findings:
@@ -4410,6 +4490,8 @@ def build_ai_review_memo(result: ReviewResult) -> str:
     assurance = str(result.metrics.get("positive_assurance", ""))
     ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
     ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
+    ai_full_summary = str(result.metrics.get("ai_full_review_summary", "") or "").strip()
+    ai_full_status = str(result.metrics.get("ai_full_review_status", "disabled") or "disabled")
     ai_finding_summary = str(result.metrics.get("ai_finding_review_summary", "") or "").strip()
     ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
     scope_intro = ""
@@ -4419,6 +4501,8 @@ def build_ai_review_memo(result: ReviewResult) -> str:
         ai_parts = []
         if ai_summary and ai_status == "completed":
             ai_parts.append(f"AI policy judgement: {ai_summary}")
+        if ai_full_summary and ai_full_status == "completed":
+            ai_parts.append(f"AI full review: {ai_full_summary}")
         if ai_finding_summary and ai_finding_status == "completed":
             ai_parts.append(f"AI finding review: {ai_finding_summary}")
         ai_text = f" {' ' .join(ai_parts)}" if ai_parts else ""
@@ -4458,6 +4542,8 @@ def build_ai_review_memo(result: ReviewResult) -> str:
         ai_text = f" AI policy judgement: {ai_summary}"
     elif ai_status in {"unavailable", "error", "skipped"}:
         ai_text = " AI policy judgement was not completed, so policy/context conclusions remain based on deterministic checks only."
+    if ai_full_status == "completed" and ai_full_summary:
+        ai_text += f" AI full review: {ai_full_summary}"
     if ai_finding_status == "completed" and ai_finding_summary:
         ai_text += f" AI finding review: {ai_finding_summary}"
     return (
@@ -7776,6 +7862,7 @@ def _contextual_currency_markers(document: PdfDocument) -> list[str]:
 
 
 def _normalise_currency_marker(marker: str) -> str:
+    marker = _normalise_currency_text(marker)
     normalized_marker = re.sub(r"\s+", "", marker.upper())
     normalized_marker = normalized_marker.replace(chr(0x2019), "'").replace(chr(0x2018), "'").replace("`", "'")
     normalized_marker = normalized_marker.replace(chr(0x20A6), "NGN")
@@ -7794,6 +7881,7 @@ def _normalise_currency_marker(marker: str) -> str:
     return normalized_marker
 
 def normalize_reporting_currency(value: str) -> str:
+    value = _normalise_currency_text(value)
     normalized_value = re.sub(r"\s+", "", value.strip().upper())
     normalized_value = normalized_value.replace(chr(0x2019), "'").replace(chr(0x2018), "'").replace("`", "'")
     normalized_value = normalized_value.replace(chr(0x20A6), "NGN")

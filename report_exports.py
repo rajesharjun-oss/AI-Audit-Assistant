@@ -46,6 +46,9 @@ def build_excel_export(result) -> bytes:
         {"Metric": "AI policy review status", "Value": result.metrics.get("ai_policy_review_status", "disabled")},
         {"Metric": "AI policy review message", "Value": result.metrics.get("ai_policy_review_message", "")},
         {"Metric": "AI policy review summary", "Value": result.metrics.get("ai_policy_review_summary", "")},
+        {"Metric": "AI full review status", "Value": result.metrics.get("ai_full_review_status", "disabled")},
+        {"Metric": "AI full review message", "Value": result.metrics.get("ai_full_review_message", "")},
+        {"Metric": "AI full review summary", "Value": result.metrics.get("ai_full_review_summary", "")},
         {"Metric": "AI finding review status", "Value": result.metrics.get("ai_finding_review_status", "disabled")},
         {"Metric": "AI finding review message", "Value": result.metrics.get("ai_finding_review_message", "")},
         {"Metric": "AI finding review summary", "Value": result.metrics.get("ai_finding_review_summary", "")},
@@ -77,6 +80,18 @@ def build_excel_export(result) -> bytes:
         }.get(ai_status, "AI policy review returned no rows.")
         ai_policy_rows = result.metrics.get("ai_policy_export", []) or [{"Title": ai_default_title, "Status": ai_status, "Message": ai_message}]
         pd.DataFrame(ai_policy_rows).to_excel(writer, sheet_name="AI policy judgement", index=False)
+        ai_full_status = str(result.metrics.get("ai_full_review_status", "disabled") or "disabled")
+        ai_full_message = str(result.metrics.get("ai_full_review_message", "") or "").strip()
+        ai_full_default_title = {
+            "disabled": "AI full review not enabled.",
+            "unavailable": "AI full review was enabled but is unavailable in this environment.",
+            "skipped": "AI full review was enabled but no suitable extracted context was detected.",
+            "error": "AI full review was enabled but failed during execution.",
+            "deferred": "AI full review was deferred due to API availability or rate limiting.",
+            "completed": "AI full review completed but returned no observation rows.",
+        }.get(ai_full_status, "AI full review returned no rows.")
+        ai_full_rows = result.metrics.get("ai_full_export", []) or [{"Title": ai_full_default_title, "Status": ai_full_status, "Message": ai_full_message}]
+        pd.DataFrame(ai_full_rows).to_excel(writer, sheet_name="AI full review", index=False)
         ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
         ai_finding_message = str(result.metrics.get("ai_finding_review_message", "") or "").strip()
         ai_finding_default_title = {
@@ -198,6 +213,7 @@ def build_excel_export(result) -> bytes:
         format_excel_table_sheet(writer.book["OCR statement rows"], "OCRStatementRows")
         format_excel_table_sheet(writer.book["Notes 1 and 2 policy review"], "PolicyReview")
         format_excel_table_sheet(writer.book["AI policy judgement"], "AIPolicyJudgement")
+        format_excel_table_sheet(writer.book["AI full review"], "AIFullReview")
         format_excel_table_sheet(writer.book["AI finding review"], "AIFindingReview")
         format_excel_table_sheet(writer.book["AI evidence packs"], "AIEvidencePacks")
         format_excel_table_sheet(writer.book["Unreferenced notes"], "UnreferencedNotes")

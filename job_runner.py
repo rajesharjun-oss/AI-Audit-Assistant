@@ -27,6 +27,9 @@ def review_summary(result: ReviewResult, pdf_path: Path) -> dict[str, Any]:
         "ai_policy_review_status": metrics.get("ai_policy_review_status", "disabled"),
         "ai_policy_review_message": metrics.get("ai_policy_review_message", ""),
         "ai_policy_review_summary": metrics.get("ai_policy_review_summary", ""),
+        "ai_full_review_status": metrics.get("ai_full_review_status", "disabled"),
+        "ai_full_review_message": metrics.get("ai_full_review_message", ""),
+        "ai_full_review_summary": metrics.get("ai_full_review_summary", ""),
         "ai_finding_review_status": metrics.get("ai_finding_review_status", "disabled"),
         "ai_finding_review_message": metrics.get("ai_finding_review_message", ""),
         "ai_finding_review_summary": metrics.get("ai_finding_review_summary", ""),
@@ -81,11 +84,14 @@ def ai_verification_errors(
     metrics = result.metrics
     errors: list[str] = []
     policy_status = str(metrics.get("ai_policy_review_status", "disabled") or "disabled")
+    full_status = str(metrics.get("ai_full_review_status", "disabled") or "disabled")
     finding_status = str(metrics.get("ai_finding_review_status", "disabled") or "disabled")
 
     if require_ai_available:
         if policy_status in {"unavailable", "error", "deferred"}:
             errors.append(f"AI policy review status is {policy_status}.")
+        if full_status in {"unavailable", "error", "deferred"}:
+            errors.append(f"AI full review status is {full_status}.")
         if finding_status in {"unavailable", "error", "deferred"}:
             errors.append(f"AI finding review status is {finding_status}.")
 

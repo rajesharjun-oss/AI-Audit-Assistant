@@ -7,7 +7,7 @@ from typing import Any
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
-UNREADABLE_RE = re.compile(r"(#{3,}|�|□)")
+UNREADABLE_RE = re.compile("(#{3,}|\uFFFD|\u25A1)")
 DEFAULT_AI_MODEL = os.getenv("AI_AUDIT_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1"))
 
 
@@ -134,6 +134,7 @@ class ReviewOptions:
     ocr_dpi: int = 300
     run_cautious_note_agreement: bool = False
     use_ai_policy_review: bool = False
+    use_ai_full_review: bool = False
     ai_model: str = DEFAULT_AI_MODEL
 
 
