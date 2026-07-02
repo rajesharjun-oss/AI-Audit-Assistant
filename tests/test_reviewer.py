@@ -659,6 +659,46 @@ def test_full_ai_review_takes_priority_over_separate_policy_call(monkeypatch):
     assert "included in the AI full financial statement review" in result.metrics["ai_policy_review_summary"]
     assert result.metrics["ai_policy_export"] == result.metrics["ai_full_export"]
 
+def test_full_ai_timeout_marks_shared_ai_layers_deferred(monkeypatch):
+    filler = "Additional extracted review context.\n" * 80
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nCash and cash equivalents 100 90\nTotal assets 100 90\nEquity 100 90\nTotal equity and liabilities 100 90\n"
+                + filler,
+                [],
+            ),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n1. Significant accounting policies\nRevenue from contracts with customers.\n" + filler,
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+    monkeypatch.setattr(
+        reviewer,
+        "run_ai_full_review",
+        lambda *args, **kwargs: AiFullReviewResult(
+            findings=[],
+            export_rows=[],
+            summary="",
+            status="deferred",
+            model="gpt-5-mini",
+            message="AI review was deferred because the AI service is temporarily busy; the deterministic review and exports were still completed. Try the AI layer again in about 20 second(s).",
+            evidence_rows=[],
+        ),
+    )
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_policy_review=True, use_ai_full_review=True))
+
+    assert result.metrics["ai_full_review_status"] == "deferred"
+    assert result.metrics["ai_policy_review_status"] == "deferred"
+    assert result.metrics["ai_finding_review_status"] == "deferred"
+    assert "temporarily busy" in result.metrics["ai_policy_review_message"]
+    assert "cooldown" in result.metrics["ai_finding_review_message"]
+
 def test_ai_policy_review_missing_key_is_reported_as_skipped(monkeypatch):
     filler = "Additional extracted policy context.\n" * 80
     document = PdfDocument(

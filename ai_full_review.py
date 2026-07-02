@@ -244,4 +244,19 @@ def _compact(text: str, limit: int = 12000) -> str:
 
 def _is_rate_limit_related(exc: Exception) -> bool:
     text = str(exc or "").lower()
-    return "rate limit" in text or "rate-limit" in text or "too many requests" in text or "busy" in text
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "rate limit",
+            "rate-limit",
+            "rate exceeded",
+            "too many requests",
+            "busy",
+            "service busy",
+            "temporarily busy",
+            "cooldown",
+            "timed out",
+            "timeout",
+        )
+    )

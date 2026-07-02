@@ -478,12 +478,18 @@ def review_pdf(
                 checks_skipped.append(ai_full_review.message)
             ai_full_rate_limited = ai_full_review.status == "deferred"
             if options.use_ai_policy_review:
-                ai_policy_status = "skipped" if ai_full_rate_limited else ai_full_review.status
+                ai_policy_status = "deferred" if ai_full_rate_limited else ai_full_review.status
                 ai_policy_model = ai_full_review.model
-                ai_policy_message = (
-                    "AI policy judgement was not run separately because AI full review already attempted the shared AI review request. "
-                    f"Full review status: {ai_full_review.status}. {ai_full_review.message}"
-                ).strip()
+                if ai_full_rate_limited:
+                    ai_policy_message = (
+                        "AI policy judgement was deferred because the shared AI full review request is temporarily busy. "
+                        f"{ai_full_review.message}"
+                    ).strip()
+                else:
+                    ai_policy_message = (
+                        "AI policy judgement was not run separately because AI full review already attempted the shared AI review request. "
+                        f"Full review status: {ai_full_review.status}. {ai_full_review.message}"
+                    ).strip()
                 checks_skipped.append(ai_policy_message)
                 ai_policy_rate_limited = ai_full_rate_limited
     elif options.use_ai_policy_review:
@@ -548,8 +554,8 @@ def review_pdf(
         elif ai_finding_review.message:
             checks_skipped.append(ai_finding_review.message)
     elif ai_review_enabled and ai_rate_limited:
-        ai_finding_status = "skipped"
-        ai_finding_message = "AI finding review was skipped because the AI service is in cooldown after a rate-limit response."
+        ai_finding_status = "deferred"
+        ai_finding_message = "AI finding review was deferred because the shared AI review request is in cooldown after a rate-limit response."
         checks_skipped.append(ai_finding_message)
     return _build_result(
         document,
