@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -20,7 +21,7 @@ NOTES_HEADING_PATTERNS = (
 )
 
 def _parse_retry_backoff_seconds() -> tuple[int, ...]:
-    raw = os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", "5,10,20,40")
+    raw = os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", "5,10,20,40,60")
     values: list[int] = []
     for part in raw.split(","):
         text = part.strip()
@@ -122,6 +123,12 @@ class MalformedAiResponseError(RuntimeError):
     def __init__(self, message: str, text: str):
         super().__init__(message)
         self.text = text
+
+
+class AiProviderError(RuntimeError):
+    def __init__(self, message: str, diagnostics: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
 
 
 def run_ai_policy_review(
@@ -372,18 +379,30 @@ def _note_page_reference(document: PdfDocument, ref: str, clean_text: str) -> st
     return "Page not isolated"
 
 def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = _base_ai_diagnostics(payload)
     acquired = _AI_REQUEST_LOCK.acquire(timeout=AI_REQUEST_LOCK_TIMEOUT_SECONDS)
     if not acquired:
-        raise RuntimeError(
-            "AI service busy: another AI review request did not finish before the queue wait timeout."
+        diagnostics.update(
+            {
+                "error_type": "AIRequestQueueTimeout",
+                "error_category": "busy",
+                "error_message": "Another AI review request did not finish before the queue wait timeout.",
+                "retry_count": 0,
+            }
+        )
+        raise AiProviderError(
+            "AI service busy: another AI review request did not finish before the queue wait timeout.",
+            diagnostics,
         )
 
     try:
         endpoint = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
         last_error: Exception | None = None
         for attempt in range(AI_MAX_ATTEMPTS):
+            diagnostics["retry_count"] = attempt
             cooldown_remaining = _rate_limit_wait_seconds()
             if cooldown_remaining > 0:
+                diagnostics.setdefault("retry_wait_seconds", []).append(cooldown_remaining)
                 _sleep_before_ai_retry(cooldown_remaining)
 
             req = request.Request(
@@ -397,39 +416,63 @@ def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
             )
             try:
                 with request.urlopen(req, timeout=AI_REQUEST_TIMEOUT_SECONDS) as response:
+                    diagnostics["status_code"] = getattr(response, "status", 200)
                     return json.loads(response.read().decode("utf-8"))
             except error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
                 retryable = exc.code == 429 or exc.code in {500, 502, 503, 504}
-                last_error = RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}")
+                diagnostics.update(
+                    {
+                        "status_code": exc.code,
+                        "error_type": type(exc).__name__,
+                        "error_message": body[:1200],
+                        "error_category": _classify_ai_error(exc.code, body),
+                    }
+                )
+                last_error = AiProviderError(f"OpenAI API error {exc.code}: {body[:240]}", dict(diagnostics))
                 if not retryable:
                     raise last_error from exc
                 wait_seconds = _retry_after_seconds(exc.headers.get("Retry-After", ""))
                 if wait_seconds is None:
                     wait_seconds = _retry_wait_seconds(attempt)
+                diagnostics.setdefault("retry_wait_seconds", []).append(wait_seconds)
                 if exc.code == 429:
                     _set_rate_limit_block(wait_seconds)
                 if attempt + 1 < AI_MAX_ATTEMPTS:
                     _sleep_before_ai_retry(wait_seconds)
                     continue
-                raise RuntimeError(
-                    f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {last_error}"
+                diagnostics["retry_count"] = attempt + 1
+                raise AiProviderError(
+                    f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): OpenAI API error {exc.code}.",
+                    dict(diagnostics),
                 ) from exc
             except Exception as exc:
+                diagnostics.update(
+                    {
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc)[:1200],
+                        "error_category": _classify_ai_error(None, str(exc)),
+                    }
+                )
                 last_error = exc
                 if _is_retryable_ai_error(exc) and attempt + 1 < AI_MAX_ATTEMPTS:
-                    _sleep_before_ai_retry(_retry_wait_seconds(attempt))
+                    wait_seconds = _retry_wait_seconds(attempt)
+                    diagnostics.setdefault("retry_wait_seconds", []).append(wait_seconds)
+                    _sleep_before_ai_retry(wait_seconds)
                     continue
                 if _is_retryable_ai_error(exc):
-                    raise RuntimeError(
-                        f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {exc}"
+                    diagnostics["retry_count"] = attempt + 1
+                    raise AiProviderError(
+                        f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {exc}",
+                        dict(diagnostics),
                     ) from exc
-                raise
+                raise AiProviderError(f"AI review could not be completed: {exc}", dict(diagnostics)) from exc
         if last_error:
-            raise RuntimeError(
-                f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {last_error}"
+            raise AiProviderError(
+                f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {last_error}",
+                dict(diagnostics),
             ) from last_error
-        raise RuntimeError("OpenAI API call failed without a specific error.")
+        raise AiProviderError("OpenAI API call failed without a specific error.", dict(diagnostics))
     finally:
         _AI_REQUEST_LOCK.release()
 
@@ -751,11 +794,57 @@ def _keyword_evidence(text: str) -> str:
     return "\n".join(snippets) or "- No focused policy snippets were extracted."
 
 
-def _retry_wait_seconds(attempt: int) -> int:
+def _base_ai_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": str(payload.get("model", "") or ""),
+        "input_token_estimate": _estimate_payload_tokens(payload),
+        "max_output_tokens": payload.get("max_output_tokens", ""),
+        "retry_count": 0,
+        "retry_wait_seconds": [],
+        "status_code": "",
+        "error_type": "",
+        "error_category": "",
+        "error_message": "",
+    }
+
+
+def _estimate_payload_tokens(payload: dict[str, Any]) -> int:
+    try:
+        text = json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        text = str(payload)
+    return max(1, int(len(text) / 4))
+
+
+def _classify_ai_error(status_code: int | None, message: str) -> str:
+    lower = str(message or "").lower()
+    if status_code == 429 or "rate limit" in lower or "too many requests" in lower:
+        if "insufficient_quota" in lower or "quota" in lower or "billing" in lower:
+            return "insufficient_quota"
+        return "rate_limit"
+    if status_code in {408, 504} or "timeout" in lower or "timed out" in lower:
+        return "timeout"
+    if status_code == 400 and any(marker in lower for marker in ("context", "token", "too large", "maximum", "payload")):
+        return "payload_too_large"
+    if status_code == 413 or "payload too large" in lower or "request too large" in lower:
+        return "payload_too_large"
+    if "insufficient_quota" in lower or "quota" in lower or "billing" in lower or "credit" in lower:
+        return "insufficient_quota"
+    if status_code in {500, 502, 503} or "temporarily unavailable" in lower or "service busy" in lower:
+        return "temporary_service_error"
+    if "invalid" in lower and "api key" in lower:
+        return "authentication"
+    return "other"
+
+
+def _retry_wait_seconds(attempt: int) -> float:
     if not AI_RETRY_BACKOFF_SECONDS:
-        return AI_RATE_LIMIT_COOLDOWN_SECONDS
-    index = min(max(attempt, 0), len(AI_RETRY_BACKOFF_SECONDS) - 1)
-    return AI_RETRY_BACKOFF_SECONDS[index]
+        base = AI_RATE_LIMIT_COOLDOWN_SECONDS
+    else:
+        index = min(max(attempt, 0), len(AI_RETRY_BACKOFF_SECONDS) - 1)
+        base = AI_RETRY_BACKOFF_SECONDS[index]
+    jitter = random.uniform(0, max(0.5, min(5.0, base * 0.25)))
+    return min(120.0, max(1.0, base + jitter))
 
 
 def _sleep_before_ai_retry(wait_seconds: int | float) -> None:
@@ -825,6 +914,17 @@ def _is_retryable_ai_error(exc: Exception) -> bool:
 
 
 def _friendly_ai_error_message(exc: Exception) -> str:
+    if isinstance(exc, AiProviderError):
+        category = str(exc.diagnostics.get("error_category", "") or "").lower()
+        if category == "insufficient_quota":
+            return "AI review was not completed because the OpenAI API quota or billing credit appears unavailable. The deterministic review and exports were still completed."
+        if category == "payload_too_large":
+            return "AI review was not completed because the AI evidence package was too large. Retry with Quick AI review mode. The deterministic review and exports were still completed."
+        if category == "authentication":
+            return "AI review was not completed because the OpenAI API key could not be authenticated. The deterministic review and exports were still completed."
+        if category in {"rate_limit", "timeout", "temporary_service_error", "busy"}:
+            return "AI review was not completed after automatic retry attempts because the AI service remained busy or rate-limited. The deterministic review and exports were still completed. Use Retry AI Review to run only the AI layer again."
+        return "AI review was not completed. The deterministic review and exports were still completed; see AI debug details for the provider error."
     if _is_rate_limit_error(exc):
         return (
             "AI review was not completed after automatic retry attempts because the AI service remained temporarily busy; "

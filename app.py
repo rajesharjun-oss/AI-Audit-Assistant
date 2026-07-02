@@ -20,7 +20,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from export_utils import clean_name_consistency_rows
 from models import CompanyProfile, DEFAULT_AI_MODEL, ReviewOptions
 from report_exports import build_excel_export, exported_file_stem
-from reviewer import build_ai_review_memo, extract_review_document, findings_to_markdown, normalize_reporting_currency, review_document
+from reviewer import build_ai_review_memo, extract_review_document, findings_to_markdown, normalize_reporting_currency, rerun_ai_review_from_cached_result, review_document
 
 st.set_page_config(page_title="AI Audit Assistant", page_icon="AI", layout="wide", initial_sidebar_state="expanded")
 
@@ -1100,6 +1100,7 @@ with st.container(border=True):
         value=300,
         help="Higher DPI can improve OCR accuracy but takes longer.",
     )
+    ai_review_mode = "Standard review"
     with st.expander("Advanced settings", expanded=review_mode == "Advanced Review"):
         cautious_note_agreement = st.checkbox(
             "Run cautious note-reference validation anyway",
@@ -1118,6 +1119,15 @@ with st.container(border=True):
                 "Runs an optional AI review over accounting policies and related disclosures to assess "
                 "policy relevance, standards context, disclosure completeness, and industry fit. "
                 "Requires OPENAI_API_KEY on the server."
+            ),
+        )
+        ai_review_mode = st.selectbox(
+            "AI review mode",
+            ["Quick review", "Standard review", "Deep review"],
+            index=1,
+            help=(
+                "Quick uses the smallest compact evidence package. Standard reviews primary statements, Notes 1 and 2, and the draft register. "
+                "Deep includes broader context and may use more tokens."
             ),
         )
         use_ai_full_review = st.checkbox(
@@ -1201,6 +1211,7 @@ review_options = ReviewOptions(
     use_ai_policy_review=use_ai_policy_review,
     use_ai_full_review=use_ai_full_review,
     ai_model=DEFAULT_AI_MODEL,
+    ai_review_mode=ai_review_mode,
 )
 uploaded_bytes = uploaded.getvalue()
 file_hash = hashlib.sha256(uploaded_bytes).hexdigest()
@@ -1221,6 +1232,7 @@ settings_key = repr(
         bool(use_ai_policy_review),
         bool(use_ai_full_review),
         DEFAULT_AI_MODEL,
+        ai_review_mode,
     )
 )
 cache = st.session_state.get("review_cache", {})
@@ -1247,10 +1259,10 @@ else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
             temp_file.write(uploaded_bytes)
             temp_path = Path(temp_file.name)
-        if retry_ai_requested and same_cached_file and cache.get("document") is not None:
+        if retry_ai_requested and same_cached_file and cache.get("document") is not None and cache.get("result") is not None:
             with st.spinner("Retrying AI review using cached extraction and deterministic context..."):
                 document = cache["document"]
-                result = review_document(document, temp_path, profile, review_options)
+                result = rerun_ai_review_from_cached_result(document, temp_path, profile, review_options, cache["result"])
         else:
             with st.spinner("Extracting PDF text, running OCR if needed, and performing review checks..."):
                 document = extract_review_document(temp_path, review_options)
@@ -1300,8 +1312,13 @@ elif ai_overall_status.startswith("Failed"):
     st.warning("AI review failed after automatic retries. The deterministic review and exports are still available; use Retry AI Review to run the AI layer again.")
 else:
     st.info(f"AI review status: {ai_overall_status}")
+st.caption(f"AI review mode: {result.metrics.get('ai_review_mode', 'standard')}")
 if isinstance(ai_stage_rows, list) and ai_stage_rows:
     st.dataframe(pd.DataFrame(ai_stage_rows), use_container_width=True, hide_index=True)
+ai_error_rows = result.metrics.get("ai_error_log", [])
+if isinstance(ai_error_rows, list) and ai_error_rows:
+    with st.expander("AI debug details", expanded=False):
+        st.dataframe(pd.DataFrame(ai_error_rows), use_container_width=True, hide_index=True)
 detected_profile = result.metrics.get("detected_profile", {})
 if isinstance(detected_profile, dict):
     st.markdown('<div class="section-label">Detected profile after upload</div>', unsafe_allow_html=True)
@@ -1428,6 +1445,8 @@ if not result.findings:
                 "note_structure_confidence": result.metrics.get("note_structure_confidence", "0%"),
                 "table_arithmetic_confidence": result.metrics.get("table_arithmetic_confidence", "0%"),
                 "primary_statement_pages": result.metrics.get("primary_statement_pages", "No primary statement pages detected."),
+                "ai_review_mode": result.metrics.get("ai_review_mode", "standard"),
+                "ai_error_log": result.metrics.get("ai_error_log", []),
             }
         )
         markdown_report = findings_to_markdown(result)

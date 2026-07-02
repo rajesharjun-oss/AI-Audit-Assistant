@@ -136,6 +136,7 @@ class ReviewOptions:
     use_ai_policy_review: bool = False
     use_ai_full_review: bool = False
     ai_model: str = DEFAULT_AI_MODEL
+    ai_review_mode: str = "Standard review"
 
 
 @dataclass(frozen=True)

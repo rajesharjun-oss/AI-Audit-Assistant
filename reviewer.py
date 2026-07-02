@@ -465,6 +465,8 @@ def review_document(
             pdf_path=path,
             use_policy_review=options.use_ai_policy_review,
             use_full_review=options.use_ai_full_review,
+            checks_skipped=checks_skipped,
+            review_mode=options.ai_review_mode,
         )
     )
     findings = ai_pipeline.findings
@@ -489,6 +491,10 @@ def review_document(
     ai_finding_suppressed = ai_pipeline.finding_suppressed
     ai_finding_suppressed_rows = ai_pipeline.finding_suppressed_rows
     ai_finding_reviewed = ai_pipeline.finding_reviewed
+    ai_error_rows = ai_pipeline.error_rows
+    ai_review_mode = ai_pipeline.review_mode
+    ai_combined_summary = ai_pipeline.combined_summary
+    ai_combined_memo = ai_pipeline.combined_memo
     return _build_result(
         document,
         findings,
@@ -516,6 +522,134 @@ def review_document(
         ai_finding_suppressed,
         ai_finding_suppressed_rows,
         ai_evidence_pack_rows,
+        ai_error_rows,
+        ai_review_mode,
+        ai_combined_summary,
+        ai_combined_memo,
+    )
+
+
+def rerun_ai_review_from_cached_result(
+    document: PdfDocument,
+    path: str | Path,
+    profile: CompanyProfile | None,
+    options: ReviewOptions,
+    cached_result: ReviewResult,
+) -> ReviewResult:
+    """Rerun only the optional AI layer against cached extraction and deterministic findings."""
+    options = options or ReviewOptions()
+    profile = _profile_with_detected_defaults(profile or CompanyProfile(), document)
+    deterministic_findings = [
+        _clone_cached_finding(finding)
+        for finding in cached_result.findings
+        if not _is_cached_ai_finding(finding) and not _is_generated_manual_review_finding(finding)
+    ]
+    checks_performed = [
+        item
+        for item in _metric_text_lines(cached_result.metrics.get("checks_performed"), "No deterministic checks completed.")
+        if not _is_ai_status_line(item)
+    ]
+    checks_skipped = [
+        item
+        for item in _metric_text_lines(cached_result.metrics.get("checks_skipped"), "No major checks skipped.")
+        if not _is_ai_status_line(item)
+    ]
+    note_sections = _note_sections(document)
+    policy_map = _accounting_policy_map(document)
+    ai_pipeline = run_ai_review_pipeline(
+        AiReviewContext(
+            document=document,
+            profile=profile,
+            note_sections=note_sections,
+            policy_map=policy_map,
+            findings=deterministic_findings,
+            model=options.ai_model,
+            pdf_path=path,
+            use_policy_review=options.use_ai_policy_review,
+            use_full_review=options.use_ai_full_review,
+            checks_skipped=checks_skipped,
+            review_mode=options.ai_review_mode,
+        )
+    )
+    checks_performed.extend(ai_pipeline.checks_performed)
+    checks_skipped.extend(ai_pipeline.checks_skipped)
+    return _build_result(
+        document,
+        ai_pipeline.findings,
+        checks_performed,
+        checks_skipped,
+        _note_validation_debug(document, options.run_cautious_note_agreement, []),
+        cached_result.metrics.get("cross_page_export", {}) or {},
+        cached_result.metrics.get("policy_export", []) or [],
+        ai_pipeline.policy_export,
+        ai_pipeline.policy_status,
+        ai_pipeline.policy_model,
+        ai_pipeline.policy_summary,
+        ai_pipeline.policy_message,
+        ai_pipeline.full_export,
+        ai_pipeline.full_status,
+        ai_pipeline.full_model,
+        ai_pipeline.full_summary,
+        ai_pipeline.full_message,
+        ai_pipeline.finding_export,
+        ai_pipeline.finding_status,
+        ai_pipeline.finding_model,
+        ai_pipeline.finding_summary,
+        ai_pipeline.finding_message,
+        ai_pipeline.finding_reviewed,
+        ai_pipeline.finding_suppressed,
+        ai_pipeline.finding_suppressed_rows,
+        ai_pipeline.evidence_pack_rows,
+        ai_pipeline.error_rows,
+        ai_pipeline.review_mode,
+        ai_pipeline.combined_summary,
+        ai_pipeline.combined_memo,
+    )
+
+
+def _metric_text_lines(value: object, empty_marker: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text or text == empty_marker:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _is_ai_status_line(text: str) -> bool:
+    lower = str(text or "").lower()
+    return any(
+        marker in lower
+        for marker in (
+            "ai review",
+            "combined ai",
+            "ai policy",
+            "ai full",
+            "ai finding",
+            "openai_api_key",
+            "openai",
+        )
+    )
+
+
+def _is_cached_ai_finding(finding: Finding) -> bool:
+    category = str(finding.category or "").strip().lower()
+    metadata = finding.metadata or {}
+    return category.startswith("ai ") or bool(metadata.get("ai_review_status"))
+
+
+def _is_generated_manual_review_finding(finding: Finding) -> bool:
+    metadata = finding.metadata or {}
+    return finding.category == "Manual review" and metadata.get("check_type") == "manual_review_required"
+
+
+def _clone_cached_finding(finding: Finding) -> Finding:
+    return Finding(
+        finding.category,
+        finding.severity,
+        finding.location,
+        finding.issue,
+        finding.evidence,
+        finding.recommendation,
+        dict(finding.metadata or {}),
     )
 
 
@@ -852,6 +986,10 @@ def _build_result(
     ai_finding_suppressed: int = 0,
     ai_finding_suppressed_rows: list[dict[str, str]] | None = None,
     ai_evidence_pack_rows: list[dict[str, str]] | None = None,
+    ai_error_rows: list[dict[str, str]] | None = None,
+    ai_review_mode: str = "standard",
+    ai_combined_summary: str = "",
+    ai_combined_memo: str = "",
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     
@@ -944,7 +1082,11 @@ def _build_result(
         "cross_page_export": cross_page_export or {},
         "policy_export": policy_export or [],
         "ai_review_status": ai_overall_status,
+        "ai_review_mode": ai_review_mode,
         "ai_review_stage_status": ai_stage_rows,
+        "ai_combined_review_summary": ai_combined_summary,
+        "ai_combined_review_memo": ai_combined_memo,
+        "ai_error_log": ai_error_rows or [],
         "ai_policy_export": ai_policy_export or [],
         "ai_policy_review_status": ai_policy_status,
         "ai_policy_review_model": ai_policy_model,
@@ -4506,9 +4648,12 @@ def findings_to_markdown(result: ReviewResult) -> str:
         str(result.metrics.get("checks_skipped", "No major checks skipped.")),
         "",
     ]
+    ai_combined_summary = str(result.metrics.get("ai_combined_review_summary", "") or "").strip()
     ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
     ai_full_summary = str(result.metrics.get("ai_full_review_summary", "") or "").strip()
     ai_finding_summary = str(result.metrics.get("ai_finding_review_summary", "") or "").strip()
+    if ai_combined_summary:
+        lines.extend(["## Combined AI Review", "", ai_combined_summary, ""])
     if ai_summary:
         lines.extend(["## AI Policy Judgement", "", ai_summary, ""])
     if ai_full_summary:
@@ -4534,6 +4679,9 @@ def findings_to_markdown(result: ReviewResult) -> str:
 
 def build_ai_review_memo(result: ReviewResult) -> str:
     assurance = str(result.metrics.get("positive_assurance", ""))
+    ai_combined_summary = str(result.metrics.get("ai_combined_review_summary", "") or "").strip()
+    ai_combined_memo = str(result.metrics.get("ai_combined_review_memo", "") or "").strip()
+    ai_overall_status = str(result.metrics.get("ai_review_status", "Not started") or "Not started")
     ai_summary = str(result.metrics.get("ai_policy_review_summary", "") or "").strip()
     ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
     ai_full_summary = str(result.metrics.get("ai_full_review_summary", "") or "").strip()
@@ -4545,6 +4693,10 @@ def build_ai_review_memo(result: ReviewResult) -> str:
         scope_intro = "Limited-scope review performed on Statement of Financial Position only. "
     if not result.findings:
         ai_parts = []
+        if ai_combined_memo:
+            ai_parts.append(f"Combined AI review: {ai_combined_memo}")
+        elif ai_combined_summary:
+            ai_parts.append(f"Combined AI review: {ai_combined_summary}")
         if ai_summary and ai_status == "completed":
             ai_parts.append(f"AI policy judgement: {ai_summary}")
         if ai_full_summary and ai_full_status == "completed":
@@ -4584,10 +4736,14 @@ def build_ai_review_memo(result: ReviewResult) -> str:
         likely_causes.append("boilerplate policy wording not tailored to the entity")
     cause_text = "; ".join(likely_causes) if likely_causes else "presentation or extraction exceptions"
     ai_text = ""
+    if ai_combined_memo:
+        ai_text = f" Combined AI review: {ai_combined_memo}"
+    elif ai_combined_summary:
+        ai_text = f" Combined AI review: {ai_combined_summary}"
     if ai_status == "completed" and ai_summary:
-        ai_text = f" AI policy judgement: {ai_summary}"
-    elif ai_status in {"unavailable", "error", "skipped"}:
-        ai_text = " AI policy judgement was not completed, so policy/context conclusions remain based on deterministic checks only."
+        ai_text += f" AI policy judgement: {ai_summary}"
+    elif ai_overall_status.startswith("Failed") or ai_status in {"unavailable", "error", "skipped", "deferred"}:
+        ai_text += " AI review was not completed, so policy/context conclusions remain based on deterministic checks only."
     if ai_full_status == "completed" and ai_full_summary:
         ai_text += f" AI full review: {ai_full_summary}"
     if ai_finding_status == "completed" and ai_finding_summary:

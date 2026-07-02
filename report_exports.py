@@ -44,6 +44,7 @@ def build_excel_export(result) -> bytes:
         {"Metric": "note_headings_detected", "Value": result.metrics.get("note_headings_detected", 0)},
         {"Metric": "note_reference_findings", "Value": result.metrics.get("note_reference_findings", 0)},
         {"Metric": "AI review status", "Value": result.metrics.get("ai_review_status", "Not started")},
+        {"Metric": "AI review mode", "Value": result.metrics.get("ai_review_mode", "standard")},
         {"Metric": "AI policy review status", "Value": result.metrics.get("ai_policy_review_status", "disabled")},
         {"Metric": "AI policy review message", "Value": result.metrics.get("ai_policy_review_message", "")},
         {"Metric": "AI policy review summary", "Value": result.metrics.get("ai_policy_review_summary", "")},
@@ -109,6 +110,8 @@ def build_excel_export(result) -> bytes:
         pd.DataFrame(ai_suppressed_rows).to_excel(writer, sheet_name="AI suppressed findings", index=False)
         ai_evidence_rows = result.metrics.get("ai_evidence_packs", []) or [{"Evidence type": "None", "AI role": "AI review was not run or no evidence packs were eligible."}]
         pd.DataFrame(ai_evidence_rows).to_excel(writer, sheet_name="AI evidence packs", index=False)
+        ai_error_rows = result.metrics.get("ai_error_log", []) or [{"Attempt": "", "Error category": "None", "Error message": "No AI provider errors recorded."}]
+        pd.DataFrame(ai_error_rows).to_excel(writer, sheet_name="AI error log", index=False)
         exception_rows = finding_rows(result) or [
             {
                 "ID": "",
@@ -220,6 +223,7 @@ def build_excel_export(result) -> bytes:
         format_excel_table_sheet(writer.book["AI finding review"], "AIFindingReview")
         format_excel_table_sheet(writer.book["AI suppressed findings"], "AISuppressedFindings")
         format_excel_table_sheet(writer.book["AI evidence packs"], "AIEvidencePacks")
+        format_excel_table_sheet(writer.book["AI error log"], "AIErrorLog")
         format_excel_table_sheet(writer.book["Unreferenced notes"], "UnreferencedNotes")
         format_excel_table_sheet(writer.book["Key amount consistency"], "AmountConsistency")
         format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
