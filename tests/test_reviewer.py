@@ -7,6 +7,7 @@ import extraction
 import reviewer
 import ai_finding_review
 import ai_policy_review
+import ai_review_pipeline
 from ai_finding_review import AiFindingReviewResult, run_ai_finding_review
 from ai_full_review import AiFullReviewResult
 from ai_policy_review import AiPolicyReviewResult, _parse_response_json
@@ -492,7 +493,7 @@ def test_optional_ai_policy_review_adds_findings_and_export(monkeypatch):
     )
     monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
     monkeypatch.setattr(
-        reviewer,
+        ai_review_pipeline,
         "run_ai_policy_review",
         lambda *args, **kwargs: AiPolicyReviewResult(
             findings=[
@@ -543,7 +544,7 @@ def test_optional_ai_full_review_adds_findings_and_export(monkeypatch):
     )
     monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
     monkeypatch.setattr(
-        reviewer,
+        ai_review_pipeline,
         "run_ai_full_review",
         lambda *args, **kwargs: AiFullReviewResult(
             findings=[
@@ -565,7 +566,7 @@ def test_optional_ai_full_review_adds_findings_and_export(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        reviewer,
+        ai_review_pipeline,
         "run_ai_finding_review",
         lambda document, profile, findings, model, **kwargs: AiFindingReviewResult(
             findings=findings,
@@ -589,7 +590,60 @@ def test_optional_ai_full_review_adds_findings_and_export(monkeypatch):
     assert result.metrics["ai_evidence_packs"][0]["Evidence type"] == "Full AI review prompt"
     assert "AI full financial statement review completed using gpt-5-mini." in result.metrics["checks_performed"]
 
-def test_full_ai_review_takes_priority_over_separate_policy_call(monkeypatch):
+def test_ai_review_pipeline_runs_steps_sequentially(monkeypatch):
+    document = PdfDocument([PdfPage(1, "Notes to the financial statements\n1. Significant accounting policies", [])])
+    profile = CompanyProfile(company_name="Test Limited")
+    base_finding = reviewer.Finding("Formatting", "Low", "Page 1", "Weak issue", "Evidence", "Review")
+    calls = []
+
+    monkeypatch.setattr(ai_review_pipeline, "_AI_PIPELINE_LOCK", __import__("threading").Lock())
+    monkeypatch.setattr(
+        ai_review_pipeline,
+        "run_ai_policy_review",
+        lambda *args, **kwargs: calls.append("policy") or AiPolicyReviewResult([], [], "policy ok", "completed", "gpt-5-mini", ""),
+    )
+    monkeypatch.setattr(
+        ai_review_pipeline,
+        "run_ai_full_review",
+        lambda *args, **kwargs: calls.append("full") or AiFullReviewResult([], [], "full ok", "completed", "gpt-5-mini", ""),
+    )
+    monkeypatch.setattr(
+        ai_review_pipeline,
+        "run_ai_finding_review",
+        lambda document, profile, findings, model, **kwargs: calls.append("finding") or AiFindingReviewResult(
+            findings=findings,
+            export_rows=[],
+            summary="cleanup ok",
+            status="skipped",
+            model=model,
+            message="No weak findings were eligible.",
+            reviewed_count=0,
+            suppressed_count=0,
+            evidence_rows=[],
+        ),
+    )
+
+    result = ai_review_pipeline.run_ai_review_pipeline(
+        ai_review_pipeline.AiReviewContext(
+            document=document,
+            profile=profile,
+            note_sections={"1": "Significant accounting policies"},
+            policy_map={"revenue": True},
+            findings=[base_finding],
+            model="gpt-5-mini",
+            use_policy_review=True,
+            use_full_review=True,
+        )
+    )
+
+    assert calls == ["policy", "full", "finding"]
+    assert result.policy_status == "completed"
+    assert result.full_status == "completed"
+    assert result.finding_status == "skipped"
+    assert result.findings == [base_finding]
+
+
+def test_ai_policy_review_runs_before_full_review_and_blocks_later_ai_after_retry_failure(monkeypatch):
     filler = "Additional extracted review context.\n" * 80
     document = PdfDocument(
         [
@@ -610,54 +664,32 @@ def test_full_ai_review_takes_priority_over_separate_policy_call(monkeypatch):
     policy_calls = []
     full_calls = []
     monkeypatch.setattr(
-        reviewer,
+        ai_review_pipeline,
         "run_ai_policy_review",
         lambda *args, **kwargs: policy_calls.append((args, kwargs)) or AiPolicyReviewResult([], [], "", "deferred", "gpt-5-mini", "rate limit"),
     )
     monkeypatch.setattr(
-        reviewer,
+        ai_review_pipeline,
         "run_ai_full_review",
         lambda *args, **kwargs: full_calls.append((args, kwargs)) or AiFullReviewResult(
             findings=[],
-            export_rows=[
-                {
-                    "Title": "Revenue policy",
-                    "Dimension": "policy_relevance",
-                    "Status": "review_prompt",
-                    "Page reference": "Page 2",
-                    "Issue": "Review revenue policy tailoring.",
-                }
-            ],
+            export_rows=[],
             summary="Full AI review completed.",
             status="completed",
             model="gpt-5-mini",
             evidence_rows=[{"Evidence type": "Full AI review prompt"}],
         ),
     )
-    monkeypatch.setattr(
-        reviewer,
-        "run_ai_finding_review",
-        lambda *args, **kwargs: AiFindingReviewResult(
-            findings=args[2],
-            export_rows=[],
-            summary="",
-            status="skipped",
-            model="gpt-5-mini",
-            message="No weak findings were eligible.",
-            reviewed_count=0,
-            suppressed_count=0,
-            evidence_rows=[],
-        ),
-    )
 
     result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_policy_review=True, use_ai_full_review=True))
 
-    assert full_calls
-    assert not policy_calls
-    assert result.metrics["ai_full_review_status"] == "completed"
-    assert result.metrics["ai_policy_review_status"] == "completed"
-    assert "included in the AI full financial statement review" in result.metrics["ai_policy_review_summary"]
-    assert result.metrics["ai_policy_export"] == result.metrics["ai_full_export"]
+    assert policy_calls
+    assert not full_calls
+    assert result.metrics["ai_policy_review_status"] == "deferred"
+    assert result.metrics["ai_full_review_status"] == "deferred"
+    assert result.metrics["ai_finding_review_status"] == "deferred"
+    assert result.metrics["ai_review_status"] == "Failed after retries / Not completed"
+
 
 def test_full_ai_timeout_marks_shared_ai_layers_deferred(monkeypatch):
     filler = "Additional extracted review context.\n" * 80
@@ -678,26 +710,40 @@ def test_full_ai_timeout_marks_shared_ai_layers_deferred(monkeypatch):
     )
     monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
     monkeypatch.setattr(
-        reviewer,
-        "run_ai_full_review",
-        lambda *args, **kwargs: AiFullReviewResult(
+        ai_review_pipeline,
+        "run_ai_policy_review",
+        lambda *args, **kwargs: AiPolicyReviewResult(
             findings=[],
             export_rows=[],
             summary="",
             status="deferred",
             model="gpt-5-mini",
-            message="AI review was deferred because the AI service is temporarily busy; the deterministic review and exports were still completed. Try the AI layer again in about 20 second(s).",
+            message="AI review was not completed after automatic retry attempts because the AI service remained temporarily busy.",
+            evidence_rows=[],
+        ),
+    )
+    monkeypatch.setattr(
+        ai_review_pipeline,
+        "run_ai_full_review",
+        lambda *args, **kwargs: AiFullReviewResult(
+            findings=[],
+            export_rows=[],
+            summary="",
+            status="completed",
+            model="gpt-5-mini",
+            message="",
             evidence_rows=[],
         ),
     )
 
     result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_policy_review=True, use_ai_full_review=True))
 
-    assert result.metrics["ai_full_review_status"] == "deferred"
     assert result.metrics["ai_policy_review_status"] == "deferred"
+    assert result.metrics["ai_full_review_status"] == "deferred"
     assert result.metrics["ai_finding_review_status"] == "deferred"
+    assert result.metrics["ai_review_status"] == "Failed after retries / Not completed"
     assert "temporarily busy" in result.metrics["ai_policy_review_message"]
-    assert "cooldown" in result.metrics["ai_finding_review_message"]
+    assert "earlier AI review step" in result.metrics["ai_finding_review_message"]
 
 def test_ai_policy_review_missing_key_is_reported_as_skipped(monkeypatch):
     filler = "Additional extracted policy context.\n" * 80
@@ -896,12 +942,12 @@ def test_optional_ai_finding_review_suppresses_low_false_positive_and_exports_sh
     monkeypatch.setattr(reviewer, "review_notes_1_and_2", lambda *args, **kwargs: ([], []))
     monkeypatch.setattr(reviewer, "check_cross_page_consistency", lambda _document: ([], {}))
     monkeypatch.setattr(
-        reviewer,
+        ai_review_pipeline,
         "run_ai_policy_review",
         lambda *args, **kwargs: AiPolicyReviewResult([], [], "", "skipped", "gpt-5-mini", "AI policy skipped."),
     )
     monkeypatch.setattr(
-        reviewer,
+        ai_review_pipeline,
         "run_ai_finding_review",
         lambda *args, **kwargs: AiFindingReviewResult(
             findings=[],
@@ -2097,8 +2143,9 @@ def test_ai_rate_limit_message_does_not_tell_user_to_refresh():
 
     assert "refresh" not in message.lower()
     assert "deterministic review" in message.lower()
-    assert "20 second(s)" in message
-    assert ai_policy_review._rate_limit_wait_seconds() <= 20
+    assert "automatic retry" in message.lower()
+    assert "20 second(s)" not in message
+    assert ai_policy_review._rate_limit_wait_seconds() <= 120
 
 
 def test_generic_arithmetic_skips_ocr_reconstructed_tables():
@@ -5858,6 +5905,50 @@ def test_ai_openai_call_uses_bounded_timeout(monkeypatch):
 
     assert captured["timeout"] == ai_policy_review.AI_REQUEST_TIMEOUT_SECONDS
     assert captured["timeout"] < 60
+
+
+def test_ai_openai_call_retries_rate_limit_with_retry_after(monkeypatch):
+    from urllib import error as url_error
+
+    attempts = []
+    sleeps = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"output_text":"{}"}'
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        ai_policy_review._AI_RATE_LIMIT_UNTIL = 0
+
+    def fake_urlopen(_req, timeout):
+        attempts.append(timeout)
+        if len(attempts) == 1:
+            raise url_error.HTTPError(
+                url="https://api.openai.com/v1/responses",
+                code=429,
+                msg="Too Many Requests",
+                hdrs={"Retry-After": "7"},
+                fp=BytesIO(b"rate limited"),
+            )
+        return FakeResponse()
+
+    ai_policy_review._AI_RATE_LIMIT_UNTIL = 0
+    monkeypatch.setattr(ai_policy_review, "AI_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(ai_policy_review.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(ai_policy_review, "_sleep_before_ai_retry", fake_sleep)
+
+    result = ai_policy_review._call_openai("test-key", {"model": "test", "input": []})
+
+    assert result == {"output_text": "{}"}
+    assert len(attempts) == 2
+    assert 7 in sleeps
 
 
 def test_skipped_table_summary_marks_supplementary_schedules_as_intentional_exclusions():

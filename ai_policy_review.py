@@ -19,10 +19,27 @@ NOTES_HEADING_PATTERNS = (
     "notes to the accounts",
 )
 
-AI_RATE_LIMIT_COOLDOWN_SECONDS = max(5, min(int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "20")), 20))
+def _parse_retry_backoff_seconds() -> tuple[int, ...]:
+    raw = os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", "5,10,20,40")
+    values: list[int] = []
+    for part in raw.split(","):
+        text = part.strip()
+        if not text:
+            continue
+        try:
+            value = int(float(text))
+        except ValueError:
+            continue
+        if value > 0:
+            values.append(max(1, min(value, 120)))
+    return tuple(values or [5, 10, 20, 40])
+
+
+AI_RETRY_BACKOFF_SECONDS = _parse_retry_backoff_seconds()
+AI_RATE_LIMIT_COOLDOWN_SECONDS = max(5, min(int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "20")), 120))
 AI_REQUEST_TIMEOUT_SECONDS = max(5, min(int(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "15")), 45))
-AI_MAX_ATTEMPTS = max(1, min(int(os.getenv("OPENAI_MAX_ATTEMPTS", "1")), 2))
-AI_REQUEST_LOCK_TIMEOUT_SECONDS = max(0.1, min(float(os.getenv("OPENAI_REQUEST_LOCK_TIMEOUT_SECONDS", "1.5")), 5.0))
+AI_MAX_ATTEMPTS = max(1, min(int(os.getenv("OPENAI_MAX_ATTEMPTS", str(min(5, len(AI_RETRY_BACKOFF_SECONDS) + 1)))), 5))
+AI_REQUEST_LOCK_TIMEOUT_SECONDS = max(1.0, min(float(os.getenv("OPENAI_REQUEST_LOCK_TIMEOUT_SECONDS", "180")), 300.0))
 _AI_RATE_LIMIT_UNTIL: float = 0.0
 _AI_RATE_LIMIT_LOCK = threading.Lock()
 _AI_REQUEST_LOCK = threading.Lock()
@@ -355,22 +372,20 @@ def _note_page_reference(document: PdfDocument, ref: str, clean_text: str) -> st
     return "Page not isolated"
 
 def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    blocked_remaining = _rate_limit_wait_seconds()
-    if blocked_remaining > 0:
-        raise RuntimeError(f"OpenAI rate limit cooldown active for {blocked_remaining} second(s).")
-
     acquired = _AI_REQUEST_LOCK.acquire(timeout=AI_REQUEST_LOCK_TIMEOUT_SECONDS)
     if not acquired:
-        raise RuntimeError("AI service busy: another AI review request is already running.")
+        raise RuntimeError(
+            "AI service busy: another AI review request did not finish before the queue wait timeout."
+        )
 
     try:
-        blocked_remaining = _rate_limit_wait_seconds()
-        if blocked_remaining > 0:
-            raise RuntimeError(f"OpenAI rate limit cooldown active for {blocked_remaining} second(s).")
-
         endpoint = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
         last_error: Exception | None = None
         for attempt in range(AI_MAX_ATTEMPTS):
+            cooldown_remaining = _rate_limit_wait_seconds()
+            if cooldown_remaining > 0:
+                _sleep_before_ai_retry(cooldown_remaining)
+
             req = request.Request(
                 endpoint,
                 data=json.dumps(payload).encode("utf-8"),
@@ -385,20 +400,35 @@ def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
                     return json.loads(response.read().decode("utf-8"))
             except error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
-                if exc.code == 429:
-                    block_seconds = _retry_after_seconds(exc.headers.get("Retry-After", ""))
-                    if block_seconds is None:
-                        block_seconds = AI_RATE_LIMIT_COOLDOWN_SECONDS
-                    _set_rate_limit_block(block_seconds)
-                    raise RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}") from exc
+                retryable = exc.code == 429 or exc.code in {500, 502, 503, 504}
                 last_error = RuntimeError(f"OpenAI API error {exc.code}: {body[:240]}")
-                if attempt + 1 >= AI_MAX_ATTEMPTS:
+                if not retryable:
                     raise last_error from exc
+                wait_seconds = _retry_after_seconds(exc.headers.get("Retry-After", ""))
+                if wait_seconds is None:
+                    wait_seconds = _retry_wait_seconds(attempt)
+                if exc.code == 429:
+                    _set_rate_limit_block(wait_seconds)
+                if attempt + 1 < AI_MAX_ATTEMPTS:
+                    _sleep_before_ai_retry(wait_seconds)
+                    continue
+                raise RuntimeError(
+                    f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {last_error}"
+                ) from exc
             except Exception as exc:
                 last_error = exc
-                break
+                if _is_retryable_ai_error(exc) and attempt + 1 < AI_MAX_ATTEMPTS:
+                    _sleep_before_ai_retry(_retry_wait_seconds(attempt))
+                    continue
+                if _is_retryable_ai_error(exc):
+                    raise RuntimeError(
+                        f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {exc}"
+                    ) from exc
+                raise
         if last_error:
-            raise last_error
+            raise RuntimeError(
+                f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {last_error}"
+            ) from last_error
         raise RuntimeError("OpenAI API call failed without a specific error.")
     finally:
         _AI_REQUEST_LOCK.release()
@@ -721,12 +751,25 @@ def _keyword_evidence(text: str) -> str:
     return "\n".join(snippets) or "- No focused policy snippets were extracted."
 
 
+def _retry_wait_seconds(attempt: int) -> int:
+    if not AI_RETRY_BACKOFF_SECONDS:
+        return AI_RATE_LIMIT_COOLDOWN_SECONDS
+    index = min(max(attempt, 0), len(AI_RETRY_BACKOFF_SECONDS) - 1)
+    return AI_RETRY_BACKOFF_SECONDS[index]
+
+
+def _sleep_before_ai_retry(wait_seconds: int | float) -> None:
+    wait = max(0.0, min(float(wait_seconds or 0), 120.0))
+    if wait > 0:
+        time.sleep(wait)
+
+
 def _retry_after_seconds(value: str) -> int | None:
     text = str(value or "").strip()
     if not text:
         return None
     if text.isdigit():
-        return max(1, min(int(text), 8))
+        return max(1, min(int(text), 120))
     return None
 
 
@@ -739,7 +782,7 @@ def _rate_limit_wait_seconds() -> int:
 
 
 def _set_rate_limit_block(wait_seconds: int) -> None:
-    wait = max(1, min(int(wait_seconds or AI_RATE_LIMIT_COOLDOWN_SECONDS), AI_RATE_LIMIT_COOLDOWN_SECONDS))
+    wait = max(1, min(int(wait_seconds or AI_RATE_LIMIT_COOLDOWN_SECONDS), 120))
     with _AI_RATE_LIMIT_LOCK:
         global _AI_RATE_LIMIT_UNTIL
         _AI_RATE_LIMIT_UNTIL = max(_AI_RATE_LIMIT_UNTIL, time.time() + wait)
@@ -754,20 +797,38 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return (
         "429" in text
         or "rate limit" in text
+        or "rate-limit" in text
         or "rate exceeded" in text
         or "too many requests" in text
         or "ai service busy" in text
+        or "service busy" in text
+        or "temporarily busy" in text
+        or "cooldown" in text
         or "timed out" in text
         or "timeout" in text
+    )
+
+
+def _is_retryable_ai_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return (
+        _is_rate_limit_error(exc)
+        or isinstance(exc, TimeoutError)
+        or "temporarily unavailable" in text
+        or "connection reset" in text
+        or "remote end closed" in text
+        or "503" in text
+        or "502" in text
+        or "500" in text
+        or "504" in text
     )
 
 
 def _friendly_ai_error_message(exc: Exception) -> str:
     if _is_rate_limit_error(exc):
         return (
-            "AI review was deferred because the AI service is temporarily busy; "
-            "the deterministic review and exports were still completed."
-            f" Try the AI layer again in about {AI_RATE_LIMIT_COOLDOWN_SECONDS} second(s)."
+            "AI review was not completed after automatic retry attempts because the AI service remained temporarily busy; "
+            "the deterministic review and exports were still completed. Use Retry AI Review to run only the AI layer again."
         )
     if isinstance(exc, MalformedAiResponseError):
         return (
@@ -782,7 +843,3 @@ def _sort_note_key(value: str) -> tuple[int, str]:
     if not match:
         return (999, str(value))
     return (int(match.group(1)), str(value))
-
-
-
-

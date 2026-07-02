@@ -11,9 +11,7 @@ from pathlib import Path
 from models import ChecklistItem, CompanyProfile, Finding, PdfDocument, PdfPage, ReviewOptions, ReviewResult
 from cross_page_consistency import check_cross_page_consistency
 from policy_reviewer import review_notes_1_and_2
-from ai_finding_review import run_ai_finding_review
-from ai_full_review import run_ai_full_review
-from ai_policy_review import run_ai_policy_review, _is_rate_limit_error
+from ai_review_pipeline import AiReviewContext, run_ai_review_pipeline
 from extraction import extract_pdf, extract_pdf_with_ocr
 
 
@@ -343,15 +341,31 @@ STANDARD_CHECKLIST = (
 )
 
 
+def extract_review_document(path: str | Path, options: ReviewOptions | None = None) -> PdfDocument:
+    options = options or ReviewOptions()
+    document = extract_pdf(path)
+    if _requires_ocr(document) and options.use_ocr:
+        document = extract_pdf_with_ocr(path, document, options)
+    return document
+
+
 def review_pdf(
     path: str | Path,
     profile: CompanyProfile | None = None,
     options: ReviewOptions | None = None,
 ) -> ReviewResult:
     options = options or ReviewOptions()
-    document = extract_pdf(path)
-    if _requires_ocr(document) and options.use_ocr:
-        document = extract_pdf_with_ocr(path, document, options)
+    document = extract_review_document(path, options)
+    return review_document(document, path, profile, options)
+
+
+def review_document(
+    document: PdfDocument,
+    path: str | Path,
+    profile: CompanyProfile | None = None,
+    options: ReviewOptions | None = None,
+) -> ReviewResult:
+    options = options or ReviewOptions()
     profile = _profile_with_detected_defaults(profile or CompanyProfile(), document)
     findings: list[Finding] = []
     checks_performed: list[str] = []
@@ -428,92 +442,6 @@ def review_pdf(
     policy_map = _accounting_policy_map(document)
     policy_findings, policy_export = review_notes_1_and_2(document, profile, note_sections, policy_map=policy_map)
     findings.extend(policy_findings)
-    ai_policy_export: list[dict[str, str]] = []
-    ai_policy_summary = ""
-    ai_policy_status = "disabled"
-    ai_policy_model = options.ai_model
-    ai_policy_message = ""
-    ai_full_export: list[dict[str, str]] = []
-    ai_full_summary = ""
-    ai_full_status = "disabled"
-    ai_full_model = options.ai_model
-    ai_full_message = ""
-    ai_full_rate_limited = False
-    ai_evidence_pack_rows: list[dict[str, str]] = []
-    ai_finding_export: list[dict[str, str]] = []
-    ai_finding_summary = ""
-    ai_finding_status = "disabled"
-    ai_finding_model = options.ai_model
-    ai_finding_message = ""
-    ai_finding_suppressed = 0
-    ai_finding_suppressed_rows: list[dict[str, str]] = []
-    ai_finding_reviewed = 0
-    ai_policy_rate_limited = False
-    if options.use_ai_full_review:
-        ai_full_review = run_ai_full_review(
-            document,
-            profile,
-            note_sections,
-            policy_map=policy_map,
-            model=options.ai_model,
-        )
-        ai_full_status = ai_full_review.status
-        ai_full_model = ai_full_review.model
-        ai_full_summary = ai_full_review.summary
-        ai_full_export = ai_full_review.export_rows
-        ai_full_message = ai_full_review.message
-        ai_evidence_pack_rows.extend(getattr(ai_full_review, "evidence_rows", None) or [])
-        if ai_full_review.status == "completed":
-            findings.extend(ai_full_review.findings)
-            checks_performed.append(f"AI full financial statement review completed using {ai_full_review.model}.")
-            if options.use_ai_policy_review:
-                ai_policy_status = "completed"
-                ai_policy_model = ai_full_review.model
-                ai_policy_summary = "AI policy and standards judgement was included in the AI full financial statement review."
-                ai_policy_message = "Covered by AI full review to avoid duplicate AI API calls and reduce rate-limit failures."
-                ai_policy_export = _policy_rows_from_ai_full_export(ai_full_export)
-                checks_performed.append("AI policy and standards judgement included in AI full financial statement review.")
-        else:
-            if ai_full_review.message:
-                checks_skipped.append(ai_full_review.message)
-            ai_full_rate_limited = ai_full_review.status == "deferred"
-            if options.use_ai_policy_review:
-                ai_policy_status = "deferred" if ai_full_rate_limited else ai_full_review.status
-                ai_policy_model = ai_full_review.model
-                if ai_full_rate_limited:
-                    ai_policy_message = (
-                        "AI policy judgement was deferred because the shared AI full review request is temporarily busy. "
-                        f"{ai_full_review.message}"
-                    ).strip()
-                else:
-                    ai_policy_message = (
-                        "AI policy judgement was not run separately because AI full review already attempted the shared AI review request. "
-                        f"Full review status: {ai_full_review.status}. {ai_full_review.message}"
-                    ).strip()
-                checks_skipped.append(ai_policy_message)
-                ai_policy_rate_limited = ai_full_rate_limited
-    elif options.use_ai_policy_review:
-        ai_review = run_ai_policy_review(
-            document,
-            profile,
-            note_sections,
-            policy_map=policy_map,
-            model=options.ai_model,
-        )
-        ai_policy_status = ai_review.status
-        ai_policy_model = ai_review.model
-        ai_policy_summary = ai_review.summary
-        ai_policy_export = ai_review.export_rows
-        ai_policy_message = ai_review.message
-        ai_evidence_pack_rows.extend(getattr(ai_review, "evidence_rows", None) or [])
-        if ai_review.status == "completed":
-            findings.extend(ai_review.findings)
-            checks_performed.append(f"AI policy and standards judgement completed using {ai_review.model}.")
-            ai_policy_rate_limited = False
-        else:
-            if ai_review.message:
-                checks_skipped.append(ai_review.message)
-            ai_policy_rate_limited = ai_review.status == "deferred"
     if getattr(document, "skipped_table_details", None):
         checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables; details are listed in Skipped table details.")
     
@@ -526,37 +454,41 @@ def review_pdf(
         f for f in findings
         if not (f.category == "Notes agreement" and f.metadata and f.metadata.get("match_confidence") == "Low")
     ]
-    ai_review_enabled = options.use_ai_policy_review or options.use_ai_full_review
-    ai_rate_limited = ai_policy_rate_limited or ai_full_rate_limited
-    if ai_review_enabled and not ai_rate_limited:
-        ai_finding_review = run_ai_finding_review(
-            document,
-            profile,
-            findings,
+    ai_pipeline = run_ai_review_pipeline(
+        AiReviewContext(
+            document=document,
+            profile=profile,
+            note_sections=note_sections,
+            policy_map=policy_map,
+            findings=findings,
             model=options.ai_model,
             pdf_path=path,
+            use_policy_review=options.use_ai_policy_review,
+            use_full_review=options.use_ai_full_review,
         )
-        findings = ai_finding_review.findings
-        ai_finding_export = ai_finding_review.export_rows
-        ai_finding_summary = ai_finding_review.summary
-        ai_finding_status = ai_finding_review.status
-        ai_finding_model = ai_finding_review.model
-        ai_finding_message = ai_finding_review.message
-        ai_evidence_pack_rows.extend(getattr(ai_finding_review, "evidence_rows", None) or [])
-        ai_finding_suppressed = ai_finding_review.suppressed_count
-        ai_finding_suppressed_rows = getattr(ai_finding_review, "suppressed_rows", None) or []
-        ai_finding_reviewed = ai_finding_review.reviewed_count
-        if ai_finding_review.status == "completed":
-            checks_performed.append(
-                f"AI finding review completed using {ai_finding_review.model} on {ai_finding_review.reviewed_count} weak finding(s); "
-                f"{ai_finding_review.suppressed_count} low-confidence finding(s) were suppressed."
-            )
-        elif ai_finding_review.message:
-            checks_skipped.append(ai_finding_review.message)
-    elif ai_review_enabled and ai_rate_limited:
-        ai_finding_status = "deferred"
-        ai_finding_message = "AI finding review was deferred because the shared AI review request is in cooldown after a rate-limit response."
-        checks_skipped.append(ai_finding_message)
+    )
+    findings = ai_pipeline.findings
+    checks_performed.extend(ai_pipeline.checks_performed)
+    checks_skipped.extend(ai_pipeline.checks_skipped)
+    ai_policy_export = ai_pipeline.policy_export
+    ai_policy_summary = ai_pipeline.policy_summary
+    ai_policy_status = ai_pipeline.policy_status
+    ai_policy_model = ai_pipeline.policy_model
+    ai_policy_message = ai_pipeline.policy_message
+    ai_full_export = ai_pipeline.full_export
+    ai_full_summary = ai_pipeline.full_summary
+    ai_full_status = ai_pipeline.full_status
+    ai_full_model = ai_pipeline.full_model
+    ai_full_message = ai_pipeline.full_message
+    ai_evidence_pack_rows = ai_pipeline.evidence_pack_rows
+    ai_finding_export = ai_pipeline.finding_export
+    ai_finding_summary = ai_pipeline.finding_summary
+    ai_finding_status = ai_pipeline.finding_status
+    ai_finding_model = ai_pipeline.finding_model
+    ai_finding_message = ai_pipeline.finding_message
+    ai_finding_suppressed = ai_pipeline.finding_suppressed
+    ai_finding_suppressed_rows = ai_pipeline.finding_suppressed_rows
+    ai_finding_reviewed = ai_pipeline.finding_reviewed
     return _build_result(
         document,
         findings,
@@ -840,6 +772,59 @@ def _note_reference_text(finding: Finding) -> str:
     return ", ".join(f"Note {ref.upper()}" for ref in dict.fromkeys(refs))
 
 
+def _ai_stage_status_rows(
+    ai_policy_status: str,
+    ai_policy_message: str,
+    ai_full_status: str,
+    ai_full_message: str,
+    ai_finding_status: str,
+    ai_finding_message: str,
+) -> list[dict[str, str]]:
+    stages = [
+        ("AI policy review", ai_policy_status, ai_policy_message),
+        ("AI full review", ai_full_status, ai_full_message),
+        ("AI finding cleanup", ai_finding_status, ai_finding_message),
+    ]
+    rows: list[dict[str, str]] = []
+    for stage, status, message in stages:
+        clean_status = str(status or "disabled").strip() or "disabled"
+        if clean_status == "disabled":
+            continue
+        rows.append(
+            {
+                "Stage": stage,
+                "Status": _ai_display_status(clean_status),
+                "Message": str(message or "").strip(),
+            }
+        )
+    return rows
+
+
+def _ai_display_status(status: str) -> str:
+    clean = str(status or "").strip().lower()
+    if clean == "completed":
+        return "Completed"
+    if clean in {"deferred", "error", "unavailable"}:
+        return "Failed after retries / Not completed"
+    if clean == "skipped":
+        return "Skipped"
+    if clean == "disabled":
+        return "Not started"
+    return clean.replace("_", " ").title()
+
+
+def _ai_overall_status(stage_rows: list[dict[str, str]]) -> str:
+    if not stage_rows:
+        return "Not started"
+    statuses = [str(row.get("Status", "")) for row in stage_rows]
+    if any(status == "Failed after retries / Not completed" for status in statuses):
+        return "Failed after retries / Not completed"
+    if any(status == "Completed" for status in statuses):
+        return "Completed"
+    if all(status == "Skipped" for status in statuses):
+        return "Skipped"
+    return "Not completed"
+
 def _build_result(
     document: PdfDocument,
     findings: list[Finding],
@@ -907,6 +892,15 @@ def _build_result(
     note_validation_debug = note_validation_debug or _note_validation_debug(document, False, [])
     rotated_pages = getattr(document, "rotated_page_details", []) or []
     notes_start_page = _notes_start_page(document)
+    ai_stage_rows = _ai_stage_status_rows(
+        ai_policy_status,
+        ai_policy_message,
+        ai_full_status,
+        ai_full_message,
+        ai_finding_status,
+        ai_finding_message,
+    )
+    ai_overall_status = _ai_overall_status(ai_stage_rows)
     metrics = {
         "document_scope": _document_scope(document),
         "pages": len(document.pages),
@@ -949,6 +943,8 @@ def _build_result(
         "check_results": check_result_rows,
         "cross_page_export": cross_page_export or {},
         "policy_export": policy_export or [],
+        "ai_review_status": ai_overall_status,
+        "ai_review_stage_status": ai_stage_rows,
         "ai_policy_export": ai_policy_export or [],
         "ai_policy_review_status": ai_policy_status,
         "ai_policy_review_model": ai_policy_model,

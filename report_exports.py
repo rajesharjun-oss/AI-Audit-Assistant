@@ -43,6 +43,7 @@ def build_excel_export(result) -> bytes:
         {"Metric": "note_reference_rows_detected", "Value": result.metrics.get("note_reference_rows_detected", 0)},
         {"Metric": "note_headings_detected", "Value": result.metrics.get("note_headings_detected", 0)},
         {"Metric": "note_reference_findings", "Value": result.metrics.get("note_reference_findings", 0)},
+        {"Metric": "AI review status", "Value": result.metrics.get("ai_review_status", "Not started")},
         {"Metric": "AI policy review status", "Value": result.metrics.get("ai_policy_review_status", "disabled")},
         {"Metric": "AI policy review message", "Value": result.metrics.get("ai_policy_review_message", "")},
         {"Metric": "AI policy review summary", "Value": result.metrics.get("ai_policy_review_summary", "")},

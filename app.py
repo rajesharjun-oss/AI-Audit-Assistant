@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import hashlib
 import os
 import re
 import tempfile
@@ -19,7 +20,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from export_utils import clean_name_consistency_rows
 from models import CompanyProfile, DEFAULT_AI_MODEL, ReviewOptions
 from report_exports import build_excel_export, exported_file_stem
-from reviewer import build_ai_review_memo, findings_to_markdown, normalize_reporting_currency, review_pdf
+from reviewer import build_ai_review_memo, extract_review_document, findings_to_markdown, normalize_reporting_currency, review_document
 
 st.set_page_config(page_title="AI Audit Assistant", page_icon="AI", layout="wide", initial_sidebar_state="expanded")
 
@@ -1192,30 +1193,81 @@ profile = CompanyProfile(
     checklist_areas=checklist_areas,
 )
 
-with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-    temp_file.write(uploaded.getbuffer())
-    temp_path = Path(temp_file.name)
+review_options = ReviewOptions(
+    use_ocr=use_ocr,
+    ocr_max_pages=int(ocr_max_pages),
+    ocr_dpi=int(ocr_dpi),
+    run_cautious_note_agreement=cautious_note_agreement,
+    use_ai_policy_review=use_ai_policy_review,
+    use_ai_full_review=use_ai_full_review,
+    ai_model=DEFAULT_AI_MODEL,
+)
+uploaded_bytes = uploaded.getvalue()
+file_hash = hashlib.sha256(uploaded_bytes).hexdigest()
+settings_key = repr(
+    (
+        review_mode,
+        company_name.strip(),
+        industry.strip(),
+        normalised_currency,
+        presentation_standard,
+        expected_policies,
+        significant_transactions,
+        checklist_areas,
+        bool(use_ocr),
+        int(ocr_max_pages),
+        int(ocr_dpi),
+        bool(cautious_note_agreement),
+        bool(use_ai_policy_review),
+        bool(use_ai_full_review),
+        DEFAULT_AI_MODEL,
+    )
+)
+cache = st.session_state.get("review_cache", {})
+same_cached_file = cache.get("file_hash") == file_hash and cache.get("settings_key") == settings_key
+cached_result = cache.get("result") if same_cached_file else None
+ai_retry_available = bool(
+    cached_result
+    and str(cached_result.metrics.get("ai_review_status", "")).lower().startswith("failed")
+    and cache.get("document") is not None
+)
+retry_ai_requested = False
+if ai_retry_available:
+    retry_ai_requested = st.button(
+        "Retry AI Review",
+        type="primary",
+        help="Reuse the cached extraction and deterministic review context, then rerun the AI review layer.",
+    )
 
-try:
-    with st.spinner("Extracting PDF text, running OCR if needed, and performing review checks..."):
-        result = review_pdf(
-            temp_path,
-            profile,
-            ReviewOptions(
-                use_ocr=use_ocr,
-                ocr_max_pages=int(ocr_max_pages),
-                ocr_dpi=int(ocr_dpi),
-                run_cautious_note_agreement=cautious_note_agreement,
-                use_ai_policy_review=use_ai_policy_review,
-                use_ai_full_review=use_ai_full_review,
-                ai_model=DEFAULT_AI_MODEL,
-            ),
-        )
-except Exception as exc:
-    st.error(_friendly_review_failure_message(exc))
-    st.stop()
-finally:
-    temp_path.unlink(missing_ok=True)
+if cached_result is not None and not retry_ai_requested:
+    result = cached_result
+else:
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+            temp_file.write(uploaded_bytes)
+            temp_path = Path(temp_file.name)
+        if retry_ai_requested and same_cached_file and cache.get("document") is not None:
+            with st.spinner("Retrying AI review using cached extraction and deterministic context..."):
+                document = cache["document"]
+                result = review_document(document, temp_path, profile, review_options)
+        else:
+            with st.spinner("Extracting PDF text, running OCR if needed, and performing review checks..."):
+                document = extract_review_document(temp_path, review_options)
+                result = review_document(document, temp_path, profile, review_options)
+        st.session_state["review_cache"] = {
+            "file_hash": file_hash,
+            "settings_key": settings_key,
+            "uploaded_bytes": uploaded_bytes,
+            "document": document,
+            "result": result,
+        }
+    except Exception as exc:
+        st.error(_friendly_review_failure_message(exc))
+        st.stop()
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 st.markdown('<div class="section-label">Review dashboard</div>', unsafe_allow_html=True)
 review_cols = st.columns(5)
@@ -1235,6 +1287,21 @@ risk_cols[5].metric("Statement structure", result.metrics.get("statement_structu
 risk_cols[6].metric("Note structure", result.metrics.get("note_structure_confidence", "0%"))
 risk_cols[7].metric("Table arithmetic", _table_arithmetic_display(result))
 
+ai_overall_status = str(result.metrics.get("ai_review_status", "Not started") or "Not started")
+ai_stage_rows = result.metrics.get("ai_review_stage_status", [])
+st.markdown('<div class="section-label">AI review status</div>', unsafe_allow_html=True)
+if ai_overall_status == "Completed":
+    st.success("AI review completed.")
+elif ai_overall_status == "Not started":
+    st.info("AI review not started.")
+elif ai_overall_status == "Skipped":
+    st.info("AI review was skipped because no suitable AI context was available.")
+elif ai_overall_status.startswith("Failed"):
+    st.warning("AI review failed after automatic retries. The deterministic review and exports are still available; use Retry AI Review to run the AI layer again.")
+else:
+    st.info(f"AI review status: {ai_overall_status}")
+if isinstance(ai_stage_rows, list) and ai_stage_rows:
+    st.dataframe(pd.DataFrame(ai_stage_rows), use_container_width=True, hide_index=True)
 detected_profile = result.metrics.get("detected_profile", {})
 if isinstance(detected_profile, dict):
     st.markdown('<div class="section-label">Detected profile after upload</div>', unsafe_allow_html=True)
@@ -1284,7 +1351,7 @@ if result.metrics.get("ai_finding_review_status") == "completed":
     if ai_finding_summary:
         st.markdown('<div class="section-label">AI finding review</div>', unsafe_allow_html=True)
         st.info(ai_finding_summary)
-elif use_ai_policy_review:
+elif use_ai_policy_review or use_ai_full_review:
     ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
     ai_finding_message = str(result.metrics.get("ai_finding_review_message", "") or "").strip()
     if ai_finding_status != "disabled":
