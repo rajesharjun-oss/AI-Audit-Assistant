@@ -449,7 +449,44 @@ def review_pdf(
     ai_finding_suppressed_rows: list[dict[str, str]] = []
     ai_finding_reviewed = 0
     ai_policy_rate_limited = False
-    if options.use_ai_policy_review:
+    if options.use_ai_full_review:
+        ai_full_review = run_ai_full_review(
+            document,
+            profile,
+            note_sections,
+            policy_map=policy_map,
+            model=options.ai_model,
+        )
+        ai_full_status = ai_full_review.status
+        ai_full_model = ai_full_review.model
+        ai_full_summary = ai_full_review.summary
+        ai_full_export = ai_full_review.export_rows
+        ai_full_message = ai_full_review.message
+        ai_evidence_pack_rows.extend(getattr(ai_full_review, "evidence_rows", None) or [])
+        if ai_full_review.status == "completed":
+            findings.extend(ai_full_review.findings)
+            checks_performed.append(f"AI full financial statement review completed using {ai_full_review.model}.")
+            if options.use_ai_policy_review:
+                ai_policy_status = "completed"
+                ai_policy_model = ai_full_review.model
+                ai_policy_summary = "AI policy and standards judgement was included in the AI full financial statement review."
+                ai_policy_message = "Covered by AI full review to avoid duplicate AI API calls and reduce rate-limit failures."
+                ai_policy_export = _policy_rows_from_ai_full_export(ai_full_export)
+                checks_performed.append("AI policy and standards judgement included in AI full financial statement review.")
+        else:
+            if ai_full_review.message:
+                checks_skipped.append(ai_full_review.message)
+            ai_full_rate_limited = ai_full_review.status == "deferred"
+            if options.use_ai_policy_review:
+                ai_policy_status = "skipped" if ai_full_rate_limited else ai_full_review.status
+                ai_policy_model = ai_full_review.model
+                ai_policy_message = (
+                    "AI policy judgement was not run separately because AI full review already attempted the shared AI review request. "
+                    f"Full review status: {ai_full_review.status}. {ai_full_review.message}"
+                ).strip()
+                checks_skipped.append(ai_policy_message)
+                ai_policy_rate_limited = ai_full_rate_limited
+    elif options.use_ai_policy_review:
         ai_review = run_ai_policy_review(
             document,
             profile,
@@ -471,31 +508,6 @@ def review_pdf(
             if ai_review.message:
                 checks_skipped.append(ai_review.message)
             ai_policy_rate_limited = ai_review.status == "deferred"
-    if options.use_ai_full_review and not ai_policy_rate_limited:
-        ai_full_review = run_ai_full_review(
-            document,
-            profile,
-            note_sections,
-            policy_map=policy_map,
-            model=options.ai_model,
-        )
-        ai_full_status = ai_full_review.status
-        ai_full_model = ai_full_review.model
-        ai_full_summary = ai_full_review.summary
-        ai_full_export = ai_full_review.export_rows
-        ai_full_message = ai_full_review.message
-        ai_evidence_pack_rows.extend(getattr(ai_full_review, "evidence_rows", None) or [])
-        if ai_full_review.status == "completed":
-            findings.extend(ai_full_review.findings)
-            checks_performed.append(f"AI full financial statement review completed using {ai_full_review.model}.")
-        else:
-            if ai_full_review.message:
-                checks_skipped.append(ai_full_review.message)
-            ai_full_rate_limited = ai_full_review.status == "deferred"
-    elif options.use_ai_full_review and ai_policy_rate_limited:
-        ai_full_status = "skipped"
-        ai_full_message = "AI full review was skipped because the AI service is in cooldown after a rate-limit response."
-        checks_skipped.append(ai_full_message)
     if getattr(document, "skipped_table_details", None):
         checks_skipped.append("Generic table arithmetic skipped on low-confidence/non-standard tables; details are listed in Skipped table details.")
     
@@ -781,6 +793,32 @@ def _not_elevated_page_reference(finding: Finding, document: PdfDocument, note_r
         return f"Page {ordered[0]}" if len(ordered) == 1 else "Pages " + ", ".join(str(page) for page in ordered)
     return ""
 
+
+def _policy_rows_from_ai_full_export(ai_full_export: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for row in ai_full_export or []:
+        if not isinstance(row, dict):
+            continue
+        combined = " ".join(
+            str(row.get(key, "") or "")
+            for key in ("Dimension", "Standard/topic", "Title", "Issue", "Rationale", "Evidence")
+        ).lower()
+        if any(
+            term in combined
+            for term in (
+                "policy",
+                "standard",
+                "ifrs",
+                "ias",
+                "disclosure",
+                "industry_fit",
+                "standard_context",
+                "policy_relevance",
+                "disclosure_completeness",
+            )
+        ):
+            rows.append(dict(row))
+    return rows
 
 def _page_reference_text(finding: Finding) -> str:
     text = "\n".join(str(part or "") for part in (finding.location, finding.evidence))

@@ -589,6 +589,76 @@ def test_optional_ai_full_review_adds_findings_and_export(monkeypatch):
     assert result.metrics["ai_evidence_packs"][0]["Evidence type"] == "Full AI review prompt"
     assert "AI full financial statement review completed using gpt-5-mini." in result.metrics["checks_performed"]
 
+def test_full_ai_review_takes_priority_over_separate_policy_call(monkeypatch):
+    filler = "Additional extracted review context.\n" * 80
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Statement of financial position\nCash and cash equivalents 100 90\nTotal assets 100 90\nEquity 100 90\nTotal equity and liabilities 100 90\n"
+                + filler,
+                [],
+            ),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n1. Significant accounting policies\nRevenue from contracts with customers.\n" + filler,
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+    policy_calls = []
+    full_calls = []
+    monkeypatch.setattr(
+        reviewer,
+        "run_ai_policy_review",
+        lambda *args, **kwargs: policy_calls.append((args, kwargs)) or AiPolicyReviewResult([], [], "", "deferred", "gpt-5-mini", "rate limit"),
+    )
+    monkeypatch.setattr(
+        reviewer,
+        "run_ai_full_review",
+        lambda *args, **kwargs: full_calls.append((args, kwargs)) or AiFullReviewResult(
+            findings=[],
+            export_rows=[
+                {
+                    "Title": "Revenue policy",
+                    "Dimension": "policy_relevance",
+                    "Status": "review_prompt",
+                    "Page reference": "Page 2",
+                    "Issue": "Review revenue policy tailoring.",
+                }
+            ],
+            summary="Full AI review completed.",
+            status="completed",
+            model="gpt-5-mini",
+            evidence_rows=[{"Evidence type": "Full AI review prompt"}],
+        ),
+    )
+    monkeypatch.setattr(
+        reviewer,
+        "run_ai_finding_review",
+        lambda *args, **kwargs: AiFindingReviewResult(
+            findings=args[2],
+            export_rows=[],
+            summary="",
+            status="skipped",
+            model="gpt-5-mini",
+            message="No weak findings were eligible.",
+            reviewed_count=0,
+            suppressed_count=0,
+            evidence_rows=[],
+        ),
+    )
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_policy_review=True, use_ai_full_review=True))
+
+    assert full_calls
+    assert not policy_calls
+    assert result.metrics["ai_full_review_status"] == "completed"
+    assert result.metrics["ai_policy_review_status"] == "completed"
+    assert "included in the AI full financial statement review" in result.metrics["ai_policy_review_summary"]
+    assert result.metrics["ai_policy_export"] == result.metrics["ai_full_export"]
+
 def test_ai_policy_review_missing_key_is_reported_as_skipped(monkeypatch):
     filler = "Additional extracted policy context.\n" * 80
     document = PdfDocument(
