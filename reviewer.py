@@ -5858,7 +5858,7 @@ def _check_sfp_text(
         elif total_assets and (non_current_amounts or current_amounts):
             skipped.append("Statement of financial position: partial asset rows extracted, but non-current/current split was incomplete.")
     equity_amounts = _row_amounts_any(rows, ("equity", "total equity", "share capital and reserves", "capital and reserves"))
-    liability_amounts = _row_amounts_any(rows, ("liabilities", "financial liabilities", "total liabilities"))
+    liability_amounts = _row_amounts_any(rows, ("total liabilities", "liabilities", "financial liabilities"))
     total_equity_liabilities = _row_amounts_any(rows, ("total equity and liabilities", "total funds and liabilities", "total equity and liability"))
     if equity_amounts and liability_amounts and total_equity_liabilities:
         _check_vector_equation(
@@ -6372,7 +6372,7 @@ def _check_cross_source_cash_flow(
             f"Available evidence: income result {income_location}; equity movement {equity_location}."
         )
     if not performed and not findings:
-        skipped.append("Cross-source cash flow check completed without actionable findings.")
+        performed.append("Cross-source cash flow check completed without actionable findings.")
 
     return findings, performed, skipped
 

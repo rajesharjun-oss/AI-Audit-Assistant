@@ -2097,6 +2097,36 @@ def test_ocr_sfp_requested_rows_are_parsed_with_fuzzy_labels():
     assert any("equity and liabilities equation checked" in item for item in performed)
 
 
+
+def test_sfp_equity_liabilities_uses_total_liabilities_when_financial_liabilities_row_exists():
+    document = PdfDocument(
+        [
+            PdfPage(
+                19,
+                "\n".join(
+                    [
+                        "Statement of financial position",
+                        "Assets",
+                        "Total assets 33,264,220 17,882,380 28,059,917 15,380,685",
+                        "Liabilities",
+                        "Financial liabilities 17,478,416 8,364,386 9,532,167 6,910,153",
+                        "Total liabilities 35,549,090 17,628,420 27,294,566 14,830,227",
+                        "Equity",
+                        "Total equity (2,284,870) 253,960 765,351 550,458",
+                        "Total liabilities and equity 33,264,220 17,882,380 28,059,917 15,380,685",
+                    ]
+                ),
+                [],
+            )
+        ]
+    )
+
+    findings, performed, skipped = check_primary_statement_consistency(document)
+
+    assert any("equity and liabilities equation checked" in item for item in performed)
+    assert not any("Equity plus liabilities" in finding.issue for finding in findings)
+    assert not findings
+
 def test_ocr_cash_beginning_and_end_rows_are_parsed():
     document = PdfDocument(
         [
