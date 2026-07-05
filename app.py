@@ -1260,9 +1260,7 @@ if ai_retry_available:
         type="primary",
         help="Reuse the cached extraction and deterministic review context, then rerun the AI review layer.",
     )
-run_ai_requested = bool(st.session_state.pop("run_ai_review_requested", False))
-
-if cached_result is not None and not retry_ai_requested and not run_ai_requested:
+if cached_result is not None and not retry_ai_requested:
     result = cached_result
 else:
     temp_path: Path | None = None
@@ -1270,7 +1268,7 @@ else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
             temp_file.write(uploaded_bytes)
             temp_path = Path(temp_file.name)
-        if (retry_ai_requested or run_ai_requested) and same_cached_file and cache.get("document") is not None and cache.get("result") is not None:
+        if retry_ai_requested and same_cached_file and cache.get("document") is not None and cache.get("result") is not None:
             with st.spinner("Running AI review using cached extraction and deterministic findings..."):
                 document = cache["document"]
                 result = rerun_ai_review_from_cached_result(document, temp_path, profile, review_options, cache["result"])
@@ -1295,11 +1293,37 @@ else:
 
 ai_layer_not_started = str(result.metrics.get("ai_review_status", "Not started") or "Not started") == "Not started"
 ai_layer_enabled = bool(use_ai_policy_review or use_ai_full_review)
-if ai_layer_enabled and ai_layer_not_started and cache.get("document") is not None:
-    st.info("Deterministic review is ready. Run the AI layer separately to avoid blocking the base exception register during extraction.")
-    if st.button("Run AI Review", type="primary", help="Use the cached extraction and deterministic findings; no PDF re-upload or OCR rerun is needed."):
-        st.session_state["run_ai_review_requested"] = True
-        st.rerun()
+if ai_layer_enabled and ai_layer_not_started and cache.get("document") is not None and cache.get("result") is not None:
+    ai_prompt_box = st.empty()
+    ai_button_box = st.empty()
+    ai_prompt_box.info("Deterministic review is ready. Run the AI layer separately to avoid blocking the base exception register during extraction.")
+    if ai_button_box.button("Run AI Review", type="primary", help="Use the cached extraction and deterministic findings; no PDF re-upload or OCR rerun is needed."):
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+                temp_file.write(uploaded_bytes)
+                temp_path = Path(temp_file.name)
+            with st.spinner("Running AI review using cached extraction and deterministic findings..."):
+                document = cache["document"]
+                result = rerun_ai_review_from_cached_result(document, temp_path, profile, review_options, cache["result"])
+            st.session_state["review_cache"] = {
+                "file_hash": file_hash,
+                "settings_key": settings_key,
+                "uploaded_bytes": uploaded_bytes,
+                "document": document,
+                "result": result,
+            }
+            cache = st.session_state["review_cache"]
+            ai_button_box.empty()
+            if str(result.metrics.get("ai_review_status", "")).lower() == "completed":
+                ai_prompt_box.success("AI review completed. The dashboard and downloads below now include AI-assisted results.")
+            else:
+                ai_prompt_box.warning("AI review finished without a completed status. Check AI review status and AI error log below.")
+        except Exception as exc:
+            ai_prompt_box.error(_friendly_review_failure_message(exc))
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
 
 st.markdown('<div class="section-label">Review dashboard</div>', unsafe_allow_html=True)
 review_cols = st.columns(5)
