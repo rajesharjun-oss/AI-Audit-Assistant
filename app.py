@@ -578,6 +578,10 @@ def _build_excel_export(result) -> bytes:
         pd.DataFrame(date_rows).to_excel(writer, sheet_name="Date consistency", index=False)
         pd.DataFrame(grammar_rows).to_excel(writer, sheet_name="Grammar review", index=False)
         
+        canonical_check_rows = result.metrics.get("canonical_recalculation_checks", []) or [{"Check": "None", "Status": "Not tested", "Recommendation": "No canonical recalculation checks were available."}]
+        canonical_audit_rows = result.metrics.get("canonical_extraction_audit", []) or [{"Page": "None", "Reason": "No canonical statement facts were parsed."}]
+        pd.DataFrame(canonical_check_rows).to_excel(writer, sheet_name="Canonical recalculation checks", index=False)
+        pd.DataFrame(canonical_audit_rows).to_excel(writer, sheet_name="Canonical extraction audit", index=False)
         pd.DataFrame(check_results).to_excel(writer, sheet_name="Checks results", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
@@ -611,6 +615,8 @@ def _build_excel_export(result) -> bytes:
         _format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
         _format_excel_table_sheet(writer.book["Date consistency"], "DateConsistency")
         _format_excel_table_sheet(writer.book["Grammar review"], "GrammarReview")
+        _format_excel_table_sheet(writer.book["Canonical recalculation checks"], "CanonicalRecalculationChecks")
+        _format_excel_table_sheet(writer.book["Canonical extraction audit"], "CanonicalExtractionAudit")
         _format_excel_table_sheet(writer.book["Checks results"], "ChecksResults")
         _format_excel_table_sheet(writer.book["Skipped checks summary"], "SkippedChecksSummary")
         _format_excel_table_sheet(writer.book["Skipped table details"], "SkippedTableDetails")

@@ -32,3 +32,16 @@ def test_note_heading_map_supports_numbered_notes():
     headings = note_heading_map(doc)
     assert headings["4"] == "Cash and cash equivalents"
     assert headings["5"] == "Interest income"
+
+
+def test_note_heading_map_ignores_numbered_front_matter_before_notes_section():
+    doc = PdfDocument([
+        PdfPage(1, "Directors' report\n7 Directors' interests in shares\n11 Employment and employees", []),
+        PdfPage(2, "Statement of financial position\n2025 2024\nTotal assets 100 90\nTotal equity and liabilities 100 90", []),
+        PdfPage(3, "Notes to the Financial Statements\n1. Significant accounting policies\n3 Investment property\nThis represents the fair value movement", []),
+    ])
+    headings = note_heading_map(doc)
+    assert headings["1"] == "Significant accounting policies"
+    assert headings["3"] == "Investment property"
+    assert "7" not in headings
+    assert "11" not in headings

@@ -13,6 +13,7 @@ from cross_page_consistency import check_cross_page_consistency
 from policy_reviewer import review_notes_1_and_2
 from ai_review_pipeline import AiReviewContext, run_ai_review_pipeline
 from extraction import extract_pdf, extract_pdf_with_ocr
+from canonical_checks import run_canonical_checks
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
@@ -375,6 +376,8 @@ def review_document(
         page_summary = ", ".join(f"Page {item['page']} ({item['rotation']}deg)" for item in rotated_pages)
         checks_performed.append(f"Auto-rotation recovery applied during extraction: {page_summary}.")
     note_validation_debug = _note_validation_debug(document, options.run_cautious_note_agreement, [])
+    canonical_check_rows: list[dict[str, object]] = []
+    canonical_audit_rows: list[dict[str, object]] = []
     document_scope = _document_scope(document)
     limited_scope_extract = document_scope == "Limited-scope statement extract"
     quality_findings = check_extraction_quality(document)
@@ -404,9 +407,22 @@ def review_document(
     checks_performed.extend(contents_performed)
     checks_skipped.extend(contents_skipped)
     if limited_scope_extract:
+        canonical_findings, canonical_check_rows, canonical_audit_rows, canonical_performed, canonical_skipped = _run_canonical_qc_layer(document, findings)
+        findings.extend(canonical_findings)
+        checks_performed.extend(canonical_performed)
+        checks_skipped.extend(canonical_skipped)
         checks_performed.append("Limited-scope review performed on Statement of Financial Position only.")
         checks_skipped.append("Full financial statement completeness, standards checklist, policies, formatting, and note agreement skipped because the upload is a limited-scope statement extract.")
-        return _build_result(document, findings, checks_performed, checks_skipped, note_validation_debug, {})
+        return _build_result(
+            document,
+            findings,
+            checks_performed,
+            checks_skipped,
+            note_validation_debug,
+            {},
+            canonical_check_rows=canonical_check_rows,
+            canonical_audit_rows=canonical_audit_rows,
+        )
     totals_findings = check_totals_and_rounding(document)
     findings.extend(totals_findings)
     findings.extend(check_formatting(document, profile))
@@ -449,6 +465,10 @@ def review_document(
     cross_page_findings, cross_page_export = check_cross_page_consistency(document)
     findings.extend(cross_page_findings)
     checks_performed.append("Notes 1 & 2 policy and standards alignment review")
+    canonical_findings, canonical_check_rows, canonical_audit_rows, canonical_performed, canonical_skipped = _run_canonical_qc_layer(document, findings)
+    findings.extend(canonical_findings)
+    checks_performed.extend(canonical_performed)
+    checks_skipped.extend(canonical_skipped)
 
     findings = [
         f for f in findings
@@ -530,6 +550,8 @@ def review_document(
         ai_combined_memo,
         ai_review_comment_rows,
         ai_summary_fields,
+        canonical_check_rows=canonical_check_rows,
+        canonical_audit_rows=canonical_audit_rows,
     )
 
 
@@ -998,6 +1020,8 @@ def _build_result(
     ai_combined_memo: str = "",
     ai_review_comment_rows: list[dict[str, str]] | None = None,
     ai_summary_fields: dict[str, str] | None = None,
+    canonical_check_rows: list[dict[str, object]] | None = None,
+    canonical_audit_rows: list[dict[str, object]] | None = None,
 ) -> ReviewResult:
     checks_performed_list = list(dict.fromkeys(checks_performed or []))
     
@@ -1032,7 +1056,10 @@ def _build_result(
         checks_skipped_list = [c for c in checks_skipped_list if not any(t in c.lower() for t in ngo_terms)]
     active_findings.extend(_manual_review_findings_for_skipped_checks(checks_skipped_list, document))
     findings, not_elevated_review_prompts = _split_elevated_findings(active_findings, document)
+    canonical_check_rows = canonical_check_rows or []
+    canonical_audit_rows = canonical_audit_rows or []
     check_result_rows = _check_result_rows(checks_performed_list, checks_skipped_list, findings, document, passed_check_evidence)
+    check_result_rows.extend(_canonical_checks_result_rows(canonical_check_rows))
         
     positive_assurance = _positive_assurance_text(findings, checks_performed_list)
     note_validation_debug = note_validation_debug or _note_validation_debug(document, False, [])
@@ -1087,6 +1114,8 @@ def _build_result(
         "checks_performed": "\n".join(checks_performed_list) or "No deterministic checks completed.",
         "checks_skipped": "\n".join(checks_skipped_list) or "No major checks skipped.",
         "check_results": check_result_rows,
+        "canonical_recalculation_checks": canonical_check_rows,
+        "canonical_extraction_audit": canonical_audit_rows,
         "cross_page_export": cross_page_export or {},
         "policy_export": policy_export or [],
         "ai_review_status": ai_overall_status,
@@ -1174,6 +1203,7 @@ def _skipped_check_requires_manual_review(check: str, document: PdfDocument | No
         "detailed note-reference reconciliation was skipped",
         "detailed note agreement skipped because table extraction confidence is below threshold",
         "contents agreement: skipped because statement references in contents were not detected",
+        "canonical deterministic recalculation skipped",
     )
     if any(term in lower for term in status_only_terms):
         return False
@@ -2327,6 +2357,137 @@ def _format_decimal_for_export(value: Decimal | None) -> str:
     if value is None:
         return ""
     return f"{value:,.0f}"
+
+
+
+def _run_canonical_qc_layer(
+    document: PdfDocument,
+    existing_findings: list[Finding],
+) -> tuple[list[Finding], list[dict[str, object]], list[dict[str, object]], list[str], list[str]]:
+    try:
+        canonical_findings, check_results, audit_rows = run_canonical_checks(document)
+    except Exception as exc:
+        return (
+            [],
+            [],
+            [],
+            [],
+            [f"Canonical QC skipped because the canonical parser raised {type(exc).__name__}: {exc}"],
+        )
+
+    check_rows = [result.to_row() for result in check_results]
+    findings_to_add = [
+        prepared
+        for finding in canonical_findings
+        if (prepared := _prepare_canonical_finding_for_main_register(finding, existing_findings)) is not None
+    ]
+    passed = sum(1 for result in check_results if result.status == "Pass")
+    failed = sum(1 for result in check_results if result.status == "Fail")
+    not_tested = sum(1 for result in check_results if result.status in {"Not tested", "Manual review required"})
+    performed: list[str] = []
+    skipped: list[str] = []
+    if passed or failed:
+        performed.append(
+            f"Canonical deterministic recalculation checks completed: {passed} passed, {failed} exception/review prompt(s)."
+        )
+    if not_tested:
+        skipped.append(
+            f"Canonical deterministic recalculation skipped {not_tested} check(s) because required source rows were not parsed with sufficient confidence; see Canonical recalculation checks."
+        )
+    if not check_results:
+        skipped.append(
+            "Canonical deterministic recalculation skipped because no primary statement facts were parsed; see Canonical extraction audit."
+        )
+    return findings_to_add, check_rows, audit_rows, performed, skipped
+
+
+def _prepare_canonical_finding_for_main_register(finding: Finding, existing_findings: list[Finding]) -> Finding | None:
+    metadata = dict(finding.metadata or {})
+    confidence = str(metadata.get("match_confidence") or metadata.get("confidence") or "Medium")
+    severity = finding.severity
+    if severity == "High" and confidence != "High":
+        severity = "Medium"
+    category = {
+        "Casting": "Totals and rounding",
+        "Cross-casting": "Totals and rounding",
+        "Cash Flow": "Totals and rounding",
+        "Note Cross-reference": "Notes agreement",
+    }.get(finding.category, finding.category)
+    prepared = Finding(
+        category,
+        severity,
+        finding.location,
+        finding.issue,
+        f"Canonical deterministic check. {finding.evidence}",
+        finding.recommendation,
+        metadata={**metadata, "source_engine": "Canonical QC", "check_type": metadata.get("check_type", "Canonical QC")},
+    )
+    if _canonical_finding_already_present(prepared, existing_findings):
+        return None
+    return prepared
+
+
+def _canonical_finding_already_present(candidate: Finding, existing_findings: list[Finding]) -> bool:
+    candidate_pages = set(re.findall(r"\bPage\s+(\d+)\b", f"{candidate.location} {candidate.evidence}", flags=re.I))
+    candidate_text = _canonical_normalise_words(f"{candidate.issue} {candidate.evidence}")
+    for existing in existing_findings:
+        if existing.severity == "Passed":
+            continue
+        existing_pages = set(re.findall(r"\bPage\s+(\d+)\b", f"{existing.location} {existing.evidence}", flags=re.I))
+        if candidate_pages and existing_pages and not (candidate_pages & existing_pages):
+            continue
+        existing_text = _canonical_normalise_words(f"{existing.issue} {existing.evidence}")
+        if not existing_text:
+            continue
+        if SequenceMatcher(None, candidate_text[:500], existing_text[:500]).ratio() >= 0.82:
+            return True
+    return False
+
+
+def _canonical_normalise_words(text: str) -> str:
+    value = str(text or "").lower().replace("&", "and")
+    value = re.sub(r"[^a-z0-9 ]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _canonical_checks_result_rows(canonical_check_rows: list[dict[str, object]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for row in canonical_check_rows:
+        status = str(row.get("Status", "") or "")
+        if status == "Pass":
+            result = "Passed"
+            severity = ""
+        elif status == "Fail":
+            result = "Failed / Review prompt"
+            severity = str(row.get("Priority", "") or "")
+        elif status == "Manual review required":
+            result = "Manual review required"
+            severity = str(row.get("Priority", "") or "")
+        else:
+            result = "Skipped"
+            severity = ""
+        evidence_parts = [
+            f"Statement: {row.get('Statement', '')}",
+            f"Entity: {row.get('Entity', '')}",
+            f"Year: {row.get('Year', '')}",
+            f"Formula: {row.get('Formula', '')}",
+            f"Reported: {row.get('Reported amount', '')}",
+            f"Expected: {row.get('Expected amount', '')}",
+            f"Difference: {row.get('Difference', '')}",
+            f"Source pages: {row.get('Source pages', '')}",
+            f"Source rows: {row.get('Source rows', '')}",
+            f"Confidence: {row.get('Confidence', '')}",
+        ]
+        rows.append(
+            {
+                "Check": f"Canonical QC - {row.get('Check', '')}",
+                "Result": result,
+                "Severity": severity,
+                "Evidence": " | ".join(part for part in evidence_parts if not part.endswith(': ')),
+            }
+        )
+    return rows
 
 
 def _check_result_rows(

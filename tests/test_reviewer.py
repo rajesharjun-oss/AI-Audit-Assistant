@@ -6385,3 +6385,32 @@ def test_ai_openai_call_defers_when_another_ai_request_is_active(monkeypatch):
 
     assert "AI service busy" in message
     assert ai_policy_review._is_rate_limit_error(RuntimeError(message))
+
+
+def test_review_document_wires_canonical_qc_into_metrics_and_check_results():
+    document = PdfDocument([
+        PdfPage(
+            1,
+            """Example Limited
+Statement of Financial Position
+2025 2024
+N'000 N'000
+Non-current assets 60 50
+Current assets 40 40
+Total assets 100 90
+Total equity 30 30
+Total liabilities 70 60
+Total equity and liabilities 100 90
+""",
+            [],
+        )
+    ])
+    result = reviewer.review_document(document, "example.pdf", CompanyProfile(), ReviewOptions())
+    canonical_rows = result.metrics.get("canonical_recalculation_checks", [])
+    assert canonical_rows
+    assert any(row.get("Check") == "SFP total assets cast" and row.get("Status") == "Pass" for row in canonical_rows)
+    assert any(
+        row.get("Check") == "Canonical QC - SFP total assets cast" and row.get("Result") == "Passed"
+        for row in result.metrics.get("check_results", [])
+    )
+    assert result.metrics.get("canonical_extraction_audit")

@@ -58,7 +58,7 @@ SECTION_LINES = {
 
 YEAR_RE = re.compile(r"\b20\d{2}\b")
 NOTE_REF_RE = re.compile(r"\b(?:note\(?s?\)?|notes?)\s*(\d+[A-Za-z]?)\b", re.I)
-AMOUNT_START_RE = re.compile(r"\(?-?\d{1,3}(?:,\d{3})+|\(?-?\d+(?:\.\d+)?\)?|[-–—]")
+AMOUNT_START_RE = re.compile(r"\(?-?\d{1,3}(?:,\d{3})+|\(?-?\d+(?:\.\d+)?\)?|(?<![A-Za-z])[-–—](?![A-Za-z])")
 
 
 def extract_canonical_tables(document: PdfDocument) -> list[CanonicalStatementTable]:
@@ -114,19 +114,100 @@ def extraction_audit_rows(document: PdfDocument, facts: list[StatementFact] | No
 
 def note_heading_map(document: PdfDocument) -> dict[str, str]:
     headings: dict[str, str] = {}
+    start_page = _notes_section_start_page(document)
+    if start_page is None:
+        return headings
     for page in document.pages:
+        if page.number < start_page:
+            continue
         for raw_line in page.text.splitlines():
             line = re.sub(r"\s+", " ", raw_line).strip()
+            if not line:
+                continue
+            if _line_ends_notes_section(line):
+                return headings
+            if _line_is_repeated_notes_header(line):
+                continue
             match = re.match(r"^(?:note\s+)?(\d{1,2}[A-Za-z]?)(?:[.)]\s*|\s+)(.{3,100})$", line, flags=re.I)
             if not match:
                 continue
             ref, title = match.groups()
-            if not _valid_note_ref(ref) or _line_looks_like_amount_row(title):
-                continue
             title = re.sub(r"\s+", " ", title).strip(" -:.")
-            if title and ref.upper() not in headings:
+            if not _valid_note_ref(ref) or not _title_looks_like_note_heading(title):
+                continue
+            if ref.upper() not in headings:
                 headings[ref.upper()] = title[:100]
     return headings
+
+
+def _notes_section_start_page(document: PdfDocument) -> int | None:
+    primary_pages = [page.number for page in document.pages if classify_statement_page(page)]
+    first_allowed = min(primary_pages) if primary_pages else 1
+    best_fallback: int | None = None
+    for page in document.pages:
+        if page.number < first_allowed:
+            continue
+        normalized = _normalise_words(page.text)
+        has_notes_heading = (
+            "notes financial statements" in normalized
+            or "notes financial statement" in normalized
+            or "notes accounts" in normalized
+            or "notes forming part financial statements" in normalized
+        )
+        has_policy_heading = bool(re.search(r"(?im)^\s*1\s*[.)]?\s*significant accounting policies\b", page.text))
+        if has_notes_heading and has_policy_heading:
+            return page.number
+        if has_notes_heading and best_fallback is None:
+            best_fallback = page.number
+        elif has_policy_heading and best_fallback is None and primary_pages and page.number > max(primary_pages):
+            best_fallback = page.number
+    return best_fallback
+
+
+def _line_is_repeated_notes_header(line: str) -> bool:
+    normalized = _normalise_words(line)
+    return normalized in {
+        "notes financial statements",
+        "notes financial statement",
+        "notes accounts",
+        "notes forming part financial statements",
+    } or "financial statements year ended" in normalized
+
+
+def _line_ends_notes_section(line: str) -> bool:
+    normalized = _normalise_words(line)
+    return any(
+        marker in normalized
+        for marker in (
+            "value added statement",
+            "statement value added",
+            "five year financial summary",
+            "5 year financial summary",
+            "detailed income statement",
+        )
+    )
+
+
+def _title_looks_like_note_heading(title: str) -> bool:
+    if not title or _line_looks_like_amount_row(title):
+        return False
+    normalized = _normalise_words(title)
+    if not normalized or _line_is_repeated_notes_header(title) or _line_ends_notes_section(title):
+        return False
+    narrative_starts = (
+        "this represents",
+        "this relates",
+        "the company",
+        "the group",
+        "these comprise",
+        "which represents",
+        "during year",
+    )
+    if any(normalized.startswith(start) for start in narrative_starts):
+        return False
+    if len(normalized.split()) > 12 and not any(keyword in normalized for keyword in ("accounting policies", "financial instruments", "risk management")):
+        return False
+    return True
 
 
 def classify_statement_page(page: PdfPage) -> str:
@@ -139,12 +220,14 @@ def classify_statement_page(page: PdfPage) -> str:
 
 def detect_statement_columns(text: str, statement: str = "") -> list[StatementColumn]:
     header_lines = [line for line in text.splitlines()[:30] if len(YEAR_RE.findall(line)) >= 2]
+    context_header = " ".join(text.splitlines()[:18])
     header = " ".join(header_lines or text.splitlines()[:18])
+    header_context = f"{context_header} {header}"
     years = [int(value) for value in YEAR_RE.findall(header)]
-    if len(years) >= 4 and _has_group_company_header(header):
+    if len(years) >= 4 and _has_group_company_header(header_context):
         years = years[-4:]
         entities = ["Group", "Group", "Company", "Company"]
-    elif _has_group_company_header(header) and len(years) >= 2:
+    elif _has_group_company_header(header_context) and len(years) >= 2:
         years = years[-2:]
         entities = ["Group", "Group", "Company", "Company"]
         years = [years[0], years[1], years[0], years[1]]
@@ -175,9 +258,9 @@ def _facts_from_page(page: PdfPage, statement: str, columns: list[StatementColum
             stop_after_statement = True
         if stop_after_statement or _line_is_header_or_section(line):
             continue
-        note_ref, label_part, amount_part = _split_note_ref(line)
+        note_ref, label_part, amount_part = _split_note_ref(line, expected)
         label = clean_line_label(label_part or line)
-        if not label or _line_is_header_or_section(label):
+        if not label:
             continue
         cells = extract_amount_cells(amount_part if amount_part else line, expected_amounts=expected, reject_years=True, reject_small_note_refs=False, context=line)
         if not cells:
@@ -208,15 +291,17 @@ def _facts_from_page(page: PdfPage, statement: str, columns: list[StatementColum
     return facts
 
 
-def _split_note_ref(line: str) -> tuple[str, str, str]:
+def _split_note_ref(line: str, expected_amounts: int = 0) -> tuple[str, str, str]:
     explicit = NOTE_REF_RE.search(line)
     if explicit:
         return explicit.group(1).upper(), line[: explicit.start()].strip(), line[explicit.end() :].strip()
     match = re.match(r"^([A-Za-z][A-Za-z&/'() .,-]{2,}?)\s+(\d{1,2}[A-Za-z]?)\s+(.+)$", line)
     if match:
         label, ref, tail = match.groups()
-        if _valid_note_ref(ref) and AMOUNT_START_RE.search(tail[:12]) and extract_amount_cells(tail, reject_years=True, reject_small_note_refs=False, context=line):
-            return ref.upper(), label.strip(), tail.strip()
+        if _valid_note_ref(ref) and AMOUNT_START_RE.search(tail[:12]):
+            tail_cells = extract_amount_cells(tail, reject_years=True, reject_small_note_refs=False, context=line)
+            if tail_cells and (not expected_amounts or len(tail_cells) >= expected_amounts):
+                return ref.upper(), label.strip(), tail.strip()
     return "", line, line
 
 
@@ -284,7 +369,7 @@ def _normalise_words(text: str) -> str:
 
 def _has_group_company_header(header: str) -> bool:
     lower = header.lower()
-    return ("group" in lower and "company" in lower) or ("consolidated" in lower and "separate" in lower)
+    return ("group" in lower and "company" in lower) or ("consolidated" in lower and "separate" in lower) or "consolidated and separate" in lower
 
 
 def _default_entity(text: str) -> str:
