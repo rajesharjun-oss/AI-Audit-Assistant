@@ -824,6 +824,10 @@ def _classify_ai_error(status_code: int | None, message: str) -> str:
         return "rate_limit"
     if status_code in {408, 504} or "timeout" in lower or "timed out" in lower:
         return "timeout"
+    if status_code == 400 and any(marker in lower for marker in ("json_schema", "response_format", "text.format", "schema", "structured output", "structured outputs")):
+        return "unsupported_structured_output"
+    if status_code == 400 and any(marker in lower for marker in ("model", "does not exist", "not found", "not supported", "unsupported model", "no access")):
+        return "unsupported_model"
     if status_code == 400 and any(marker in lower for marker in ("context", "token", "too large", "maximum", "payload")):
         return "payload_too_large"
     if status_code == 413 or "payload too large" in lower or "request too large" in lower:
@@ -922,6 +926,10 @@ def _friendly_ai_error_message(exc: Exception) -> str:
             return "AI review was not completed because the AI evidence package was too large. Retry with Quick AI review mode. The deterministic review and exports were still completed."
         if category == "authentication":
             return "AI review was not completed because the OpenAI API key could not be authenticated. The deterministic review and exports were still completed."
+        if category == "unsupported_model":
+            return "AI review was not completed because the configured AI model is not available to this API key. The deterministic review and exports were still completed; see AI debug details for the model name."
+        if category == "unsupported_structured_output":
+            return "AI review was not completed because the provider rejected the structured-output request format. The deterministic review and exports were still completed; see AI debug details."
         if category in {"rate_limit", "timeout", "temporary_service_error", "busy"}:
             return "AI review was not completed after automatic retry attempts because the AI service remained busy or rate-limited. The deterministic review and exports were still completed. Use Retry AI Review to run only the AI layer again."
         return "AI review was not completed. The deterministic review and exports were still completed; see AI debug details for the provider error."

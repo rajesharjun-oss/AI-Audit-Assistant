@@ -29,11 +29,32 @@ def _friendly_review_failure_message(exc: Exception) -> str:
     lower = text.lower()
     if any(marker in lower for marker in ("429", "rate limit", "rate exceeded", "too many requests", "ai service busy", "timed out", "timeout")):
         return (
-            "The AI service or review worker is temporarily busy, so this upload could not finish cleanly. "
-            "No exception register was produced for this run. Please wait about 20 seconds and try again. "
-            "If it happens again, temporarily turn off AI policy judgement to generate the deterministic review immediately."
+            "The review worker or AI service is temporarily busy, so this upload could not finish cleanly. "
+            "Please wait a moment and try again. If deterministic output was already produced, use Retry AI Review rather than re-uploading the PDF."
         )
     return f"The review could not be completed: {text or type(exc).__name__}."
+
+
+def _ai_failure_debug_summary(ai_error_rows: object) -> str:
+    if not isinstance(ai_error_rows, list) or not ai_error_rows:
+        return ""
+    last = next((row for row in reversed(ai_error_rows) if isinstance(row, dict)), None)
+    if not last:
+        return ""
+    model = str(last.get("Model", "") or "").strip()
+    category = str(last.get("Error category", "") or "").strip()
+    status_code = str(last.get("Status code", "") or "").strip()
+    structured = str(last.get("Structured outputs", "") or "").strip()
+    pieces = []
+    if category:
+        pieces.append(f"category: {category}")
+    if status_code:
+        pieces.append(f"status: {status_code}")
+    if model:
+        pieces.append(f"model: {model}")
+    if structured:
+        pieces.append(f"structured outputs: {structured}")
+    return " Last AI error (debug): " + "; ".join(pieces) + "." if pieces else ""
 
 def _metric_lines(value: object, empty: str) -> list[str]:
     text = str(value or "").strip()
@@ -1355,6 +1376,7 @@ risk_cols[7].metric("Table arithmetic", _table_arithmetic_display(result))
 
 ai_overall_status = str(result.metrics.get("ai_review_status", "Not started") or "Not started")
 ai_stage_rows = result.metrics.get("ai_review_stage_status", [])
+ai_error_rows = result.metrics.get("ai_error_log", [])
 st.markdown('<div class="section-label">AI review status</div>', unsafe_allow_html=True)
 if ai_overall_status == "Completed":
     st.success("AI review completed.")
@@ -1363,13 +1385,15 @@ elif ai_overall_status == "Not started":
 elif ai_overall_status == "Skipped":
     st.info("AI review was skipped because no suitable AI context was available.")
 elif ai_overall_status.startswith("Failed"):
-    st.warning("AI review failed after automatic retries. The deterministic review and exports are still available; use Retry AI Review to run the AI layer again.")
+    st.warning(
+        "AI review failed after automatic retries. The deterministic review and exports are still available; use Retry AI Review to run the AI layer again."
+        + _ai_failure_debug_summary(ai_error_rows)
+    )
 else:
     st.info(f"AI review status: {ai_overall_status}")
 st.caption(f"AI review mode: {result.metrics.get('ai_review_mode', 'standard')}")
 if isinstance(ai_stage_rows, list) and ai_stage_rows:
     st.dataframe(pd.DataFrame(ai_stage_rows), use_container_width=True, hide_index=True)
-ai_error_rows = result.metrics.get("ai_error_log", [])
 if isinstance(ai_error_rows, list) and ai_error_rows:
     with st.expander("AI debug details", expanded=False):
         st.dataframe(pd.DataFrame(ai_error_rows), use_container_width=True, hide_index=True)

@@ -130,8 +130,9 @@ def run_combined_ai_review(
 
     attempts = _model_attempts(model, normalized_mode)
     error_rows: list[dict[str, str]] = []
-    for attempt_index, attempt_model in enumerate(attempts, start=1):
-        attempt_mode = normalized_mode if attempt_index == 1 else "quick"
+    attempt_counter = 0
+    for model_index, attempt_model in enumerate(attempts, start=1):
+        attempt_mode = normalized_mode if model_index == 1 else "quick"
         package = _build_compact_review_package(
             document,
             profile,
@@ -141,29 +142,34 @@ def run_combined_ai_review(
             checks_skipped,
             attempt_mode,
         )
-        payload = _build_payload(attempt_model, package)
-        evidence_row = _evidence_pack_row(package, attempt_model, attempt_mode, attempt_index)
-        try:
-            response_json = _call_openai(api_key, payload)
+        structured_variants = [True, False] if _structured_outputs_enabled() else [False]
+        for structured_output in structured_variants:
+            attempt_counter += 1
+            payload = _build_payload(attempt_model, package, structured_output=structured_output)
+            evidence_row = _evidence_pack_row(package, attempt_model, attempt_mode, attempt_counter, structured_output)
             try:
-                parsed = _parse_response_json(response_json)
-            except MalformedAiResponseError as parse_exc:
-                parsed = _repair_response_json(api_key, attempt_model, parse_exc.text, COMBINED_AI_REPAIR_SHAPE)
-            return _parsed_to_result(parsed, findings, attempt_model, attempt_mode, evidence_row, error_rows)
-        except Exception as exc:  # pragma: no cover - network/runtime dependent
-            row = _error_row_from_exception(exc, attempt_model, attempt_mode, attempt_index, package)
-            error_rows.append(row)
-            if _should_try_fallback(exc) and attempt_index < len(attempts):
-                continue
-            return CombinedAiReviewResult(
-                findings=list(findings),
-                status="deferred" if _is_retryable_or_capacity_error(exc) else "error",
-                model=attempt_model,
-                message=_friendly_ai_error_message(exc),
-                evidence_rows=[evidence_row],
-                error_rows=error_rows,
-                review_mode=attempt_mode,
-            )
+                response_json = _call_openai(api_key, payload)
+                try:
+                    parsed = _parse_response_json(response_json)
+                except MalformedAiResponseError as parse_exc:
+                    parsed = _repair_response_json(api_key, attempt_model, parse_exc.text, COMBINED_AI_REPAIR_SHAPE)
+                return _parsed_to_result(parsed, findings, attempt_model, attempt_mode, evidence_row, error_rows)
+            except Exception as exc:  # pragma: no cover - network/runtime dependent
+                row = _error_row_from_exception(exc, attempt_model, attempt_mode, attempt_counter, package, structured_output)
+                error_rows.append(row)
+                if structured_output and _should_retry_without_structured_outputs(exc):
+                    continue
+                if _should_try_fallback(exc) and model_index < len(attempts):
+                    break
+                return CombinedAiReviewResult(
+                    findings=list(findings),
+                    status="deferred" if _is_retryable_or_capacity_error(exc) else "error",
+                    model=attempt_model,
+                    message=_friendly_ai_error_message(exc),
+                    evidence_rows=[evidence_row],
+                    error_rows=error_rows,
+                    review_mode=attempt_mode,
+                )
 
     return CombinedAiReviewResult(
         findings=list(findings),
@@ -176,7 +182,7 @@ def run_combined_ai_review(
 
 
 
-def _build_payload(model: str, package: dict[str, Any]) -> dict[str, Any]:
+def _build_payload(model: str, package: dict[str, Any], structured_output: bool | None = None) -> dict[str, Any]:
     payload = {
         "model": model,
         "max_output_tokens": COMBINED_AI_OUTPUT_TOKENS,
@@ -195,7 +201,9 @@ def _build_payload(model: str, package: dict[str, Any]) -> dict[str, Any]:
             },
         ],
     }
-    if _structured_outputs_enabled():
+    if structured_output is None:
+        structured_output = _structured_outputs_enabled()
+    if structured_output:
         payload["text"] = {"format": _combined_ai_structured_output_format()}
     return payload
 
@@ -835,12 +843,16 @@ def _clone_finding(finding: Finding) -> Finding:
 
 def _model_attempts(model: str, review_mode: str = "standard") -> list[str]:
     preferred = (model or "").strip() or _model_for_review_mode(review_mode)
-    fallbacks = [
-        os.getenv("OPENAI_FALLBACK_MODEL", DEFAULT_AI_STANDARD_MODEL).strip() or DEFAULT_AI_STANDARD_MODEL,
-        os.getenv("OPENAI_SECONDARY_FALLBACK_MODEL", DEFAULT_AI_QUICK_MODEL).strip() or DEFAULT_AI_QUICK_MODEL,
+    fallback_candidates = [
+        os.getenv("OPENAI_FALLBACK_MODEL", "").strip(),
+        DEFAULT_AI_STANDARD_MODEL,
+        os.getenv("OPENAI_SAFE_FALLBACK_MODEL", "gpt-4.1-mini").strip(),
+        os.getenv("OPENAI_SECONDARY_FALLBACK_MODEL", "gpt-4o-mini").strip(),
+        DEFAULT_AI_QUICK_MODEL,
     ]
     attempts: list[str] = []
-    for candidate in [preferred, *fallbacks]:
+    for candidate in [preferred, *fallback_candidates]:
+        candidate = str(candidate or "").strip()
         if candidate and candidate not in attempts:
             attempts.append(candidate)
     return attempts or [DEFAULT_AI_MODEL]
@@ -858,12 +870,16 @@ def _model_for_review_mode(review_mode: str) -> str:
 
 def _should_try_fallback(exc: Exception) -> bool:
     category = _error_category(exc)
-    return category in {"rate_limit", "timeout", "temporary_service_error", "payload_too_large", "busy", "other"}
+    return category in {"rate_limit", "timeout", "temporary_service_error", "payload_too_large", "busy", "unsupported_model", "unsupported_structured_output", "other"}
+
+
+def _should_retry_without_structured_outputs(exc: Exception) -> bool:
+    return _error_category(exc) == "unsupported_structured_output"
 
 
 
 def _is_retryable_or_capacity_error(exc: Exception) -> bool:
-    return _error_category(exc) in {"rate_limit", "timeout", "temporary_service_error", "payload_too_large", "busy", "insufficient_quota"}
+    return _error_category(exc) in {"rate_limit", "timeout", "temporary_service_error", "payload_too_large", "busy", "insufficient_quota", "unsupported_model", "unsupported_structured_output"}
 
 
 
@@ -873,6 +889,10 @@ def _error_category(exc: Exception) -> str:
     text = str(exc or "").lower()
     if "quota" in text or "billing" in text or "credit" in text:
         return "insufficient_quota"
+    if "json_schema" in text or "response_format" in text or "text.format" in text or "structured output" in text:
+        return "unsupported_structured_output"
+    if "model" in text and ("not found" in text or "does not exist" in text or "not supported" in text or "no access" in text):
+        return "unsupported_model"
     if "token" in text or "context" in text or "too large" in text:
         return "payload_too_large"
     if "429" in text or "rate" in text:
@@ -891,6 +911,7 @@ def _error_row_from_exception(
     review_mode: str,
     attempt_index: int,
     package: dict[str, Any],
+    structured_output: bool = False,
 ) -> dict[str, str]:
     diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
     return {
@@ -905,12 +926,13 @@ def _error_row_from_exception(
         "Output token limit": str(diagnostics.get("max_output_tokens", COMBINED_AI_OUTPUT_TOKENS)),
         "Retry count": str(diagnostics.get("retry_count", "")),
         "Retry wait time": json.dumps(diagnostics.get("retry_wait_seconds", [])),
+        "Structured outputs": "Yes" if structured_output else "No",
         "Package character count": str(package.get("package_character_count", "")),
     }
 
 
 
-def _evidence_pack_row(package: dict[str, Any], model: str, review_mode: str, attempt_index: int) -> dict[str, str]:
+def _evidence_pack_row(package: dict[str, Any], model: str, review_mode: str, attempt_index: int, structured_output: bool = False) -> dict[str, str]:
     return {
         "Evidence type": "Combined AI compact review package",
         "AI role": "Policy judgement, missed review findings, and deterministic finding cleanup in one request.",
@@ -918,6 +940,7 @@ def _evidence_pack_row(package: dict[str, Any], model: str, review_mode: str, at
         "Review mode": review_mode,
         "Attempt": str(attempt_index),
         "Input token estimate": str(package.get("input_token_estimate", "")),
+        "Structured outputs": "Yes" if structured_output else "No",
         "Package character count": str(package.get("package_character_count", "")),
         "Primary statements included": str(len(package.get("primary_statements", []))),
         "Notes 1 and 2 included": str(len(package.get("notes_1_and_2", []))),
