@@ -464,7 +464,10 @@ def review_document(
     checks_performed.extend(["Accounting policies relevance check", "IFRS/IAS standards alignment check"])
     cross_page_findings, cross_page_export = check_cross_page_consistency(document)
     findings.extend(cross_page_findings)
-    checks_performed.append("Notes 1 & 2 policy and standards alignment review")
+    if _policy_export_has_missing_rows(policy_export):
+        checks_skipped.append("Notes 1 & 2 policy and standards alignment review requires manual review because one or more expected policy sections were not found.")
+    else:
+        checks_performed.append("Notes 1 & 2 policy and standards alignment review")
     canonical_findings, canonical_check_rows, canonical_audit_rows, canonical_performed, canonical_skipped = _run_canonical_qc_layer(document, findings)
     findings.extend(canonical_findings)
     checks_performed.extend(canonical_performed)
@@ -1054,7 +1057,7 @@ def _build_result(
     if is_company:
         ngo_terms = ["gross operating revenue", "total income", "total expenditure", "surplus", "statement of changes in accumulated fund", "statement of income and expenditure"]
         checks_skipped_list = [c for c in checks_skipped_list if not any(t in c.lower() for t in ngo_terms)]
-    active_findings.extend(_manual_review_findings_for_skipped_checks(checks_skipped_list, document))
+    # Skipped/manual-review items belong in Checks skipped and Checks results only, not the Exception register.
     findings, not_elevated_review_prompts = _split_elevated_findings(active_findings, document)
     canonical_check_rows = canonical_check_rows or []
     canonical_audit_rows = canonical_audit_rows or []
@@ -1074,6 +1077,14 @@ def _build_result(
         ai_finding_message,
     )
     ai_overall_status = _ai_overall_status(ai_stage_rows)
+    performed_result_count = sum(
+        1
+        for row in check_result_rows
+        if row.get("Result") in {"Passed", "Failed", "Failed / Review prompt"}
+    )
+    passed_result_count = sum(1 for row in check_result_rows if row.get("Result") == "Passed")
+    checks_performed_count = max(len(checks_performed_list), performed_result_count)
+    checks_passed_count = min(passed_result_count, checks_performed_count)
     metrics = {
         "document_scope": _document_scope(document),
         "pages": len(document.pages),
@@ -1147,13 +1158,25 @@ def _build_result(
         "ai_evidence_packs": ai_evidence_pack_rows or [],
         "hybrid_review_mode": "AI-assisted evidence review" if (ai_policy_status != "disabled" or ai_full_status != "disabled" or ai_finding_status != "disabled") else "Deterministic engine only",
         "hybrid_review_principle": "Engine performs extraction, arithmetic, and structural checks; AI reviews evidence packs for policy/disclosure judgement and likely false positives.",
-        "checks_performed_count": len(checks_performed_list),
-        "checks_passed_count": sum(1 for row in check_result_rows if row.get("Result") == "Passed"),
+        "checks_performed_count": checks_performed_count,
+        "checks_passed_count": checks_passed_count,
         "checks_skipped_count": len(checks_skipped_list),
         "positive_assurance": positive_assurance,
         **note_validation_debug,
     }
     return ReviewResult(findings=findings, metrics=metrics)
+
+
+def _policy_export_has_missing_rows(policy_export: list[dict] | None) -> bool:
+    if not policy_export:
+        return False
+    missing_markers = ("none found", "missing", "not found", "not detected")
+    for row in policy_export:
+        result = str(row.get("Result") or row.get("Status") or row.get("Review result") or "").lower()
+        evidence = str(row.get("Evidence") or row.get("Policy text") or row.get("Extract") or row.get("Comment") or "").lower()
+        if any(marker in result for marker in missing_markers) or any(marker in evidence for marker in missing_markers):
+            return True
+    return False
 
 
 def _manual_review_findings_for_skipped_checks(checks_skipped: list[str], document: PdfDocument) -> list[Finding]:
@@ -1541,8 +1564,11 @@ def _apply_reviewer_page_labels_to_note_rows(document: PdfDocument, rows: list[d
 def _notes_start_page(document: PdfDocument) -> int | None:
     if hasattr(document, "_notes_start_page_cache"):
         return getattr(document, "_notes_start_page_cache")
+    search_start_page = _notes_candidate_search_start_page(document)
     pages = list(document.pages)
     for i, page in enumerate(pages):
+        if page.number < search_start_page:
+            continue
         text_lower = page.text.lower()
         if "notes to the financial" in text_lower:
             if "accounting policies" in text_lower or "material accounting" in text_lower:
@@ -1553,18 +1579,15 @@ def _notes_start_page(document: PdfDocument) -> int | None:
                 if not _looks_like_front_matter_page(page.text):
                     setattr(document, "_notes_start_page_cache", page.number)
                     return page.number
-        if _notes_heading_in_text(page.text):
+        if _notes_heading_in_text(page.text) and not _looks_like_front_matter_page(page.text):
             setattr(document, "_notes_start_page_cache", page.number)
             return page.number
-        if _looks_like_front_matter_page(page.text):
-            continue
-    if document.ocr_used:
-        candidates = _notes_heading_candidates(document, include_weak=False)
-        accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
-        if accepted:
-            start_page = int(accepted[0]["page"])
-            setattr(document, "_notes_start_page_cache", start_page)
-            return start_page
+    candidates = _notes_heading_candidates(document, include_weak=False)
+    accepted = [candidate for candidate in candidates if candidate["accepted"] == "Yes"]
+    if accepted:
+        start_page = int(min(accepted, key=lambda item: int(item["page"]))["page"])
+        setattr(document, "_notes_start_page_cache", start_page)
+        return start_page
     setattr(document, "_notes_start_page_cache", None)
     return None
 
@@ -1679,9 +1702,9 @@ def _notes_heading_candidates(document: PdfDocument, include_weak: bool = False)
     candidates: list[tuple[float, dict[str, str | int]]] = []
     search_start_page = _notes_candidate_search_start_page(document)
     for page in document.pages:
-        if document.ocr_used and page.number < search_start_page:
+        if page.number < search_start_page:
             continue
-        front_matter = document.ocr_used and _looks_like_front_matter_page(page.text)
+        front_matter = _looks_like_front_matter_page(page.text)
         lines = page.text.splitlines()
         for score, candidate_type, cleaned, normalized, page_reason in _raw_page_notes_heading_candidates(page.text, include_weak):
             line_candidates = [line for line in lines if line.strip()]
@@ -1889,10 +1912,8 @@ def _notes_candidate_diagnostic_only(line: str, snippet: str) -> bool:
 
 
 def _notes_candidate_search_start_page(document: PdfDocument) -> int:
-    if not document.ocr_used:
-        return 1
     statement_pages = [page.number for page in _classified_primary_statement_pages(document).values()]
-    return min(statement_pages) + 1 if statement_pages else 1
+    return max(statement_pages) + 1 if statement_pages else 1
 
 
 def _candidate_followed_by_numbered_policy(lines: list[str], index: int) -> bool:
@@ -5474,7 +5495,7 @@ def _find_statement_page(document: PdfDocument, statement_name: str) -> PdfPage 
         return page
     target = statement_name.lower()
     for page in document.pages:
-        if _looks_like_contents_or_front_matter_page(page.text):
+        if _looks_like_contents_or_front_matter_page(page.text) or _is_post_notes_supplement_page(page.text) or _looks_like_value_added_page(page.text):
             continue
         for line in page.text.splitlines():
             lower = line.strip().lower()
@@ -5510,7 +5531,7 @@ def _classified_primary_statement_pages(document: PdfDocument) -> dict[str, PdfP
     classified: dict[str, PdfPage] = {}
     for page in document.pages:
         page_head = "\n".join(page.text.splitlines()[:60 if document.ocr_used else 18])
-        if _looks_like_contents_or_front_matter_page(page.text):
+        if _looks_like_contents_or_front_matter_page(page.text) or _is_post_notes_supplement_page(page.text) or _looks_like_value_added_page(page.text):
             continue
         for canonical, candidates in aliases.items():
             if canonical in classified:
@@ -5934,7 +5955,7 @@ def _check_income_statement_text(
                     message += f" Corroborating lines indicate {_format_accounting_amount(corroboration.get('after_tax_value'))}. Manual confirmation required."
                 skipped.append(message)
             else:
-                _check_profit_tax_equation(
+                profit_tax_checked = _check_profit_tax_equation(
                     findings,
                     page.number,
                     stmt_name,
@@ -5946,10 +5967,13 @@ def _check_income_statement_text(
                     raw_lines=raw_lines,
                     document=document,
                 )
-                performed.append(f"{stmt_name}: profit after tax checked.")
-                if ocr_review:
-                    performed.append("Statement of profit or loss: profit/loss after tax checked.")
-                    performed.append("Income statement: revenue, tax, and profit/loss after tax checked")
+                if profit_tax_checked:
+                    performed.append(f"{stmt_name}: profit after tax checked.")
+                    if ocr_review:
+                        performed.append("Statement of profit or loss: profit/loss after tax checked.")
+                        performed.append("Income statement: revenue, tax, and profit/loss after tax checked")
+                else:
+                    skipped.append(f"{stmt_name}: profit/loss after-tax arithmetic skipped because the row may include OCI or the current/prior-year columns could not be mapped reliably.")
             
         return findings, performed, skipped
 
@@ -6717,6 +6741,8 @@ def _check_supplementary_summary_consistency(
         for label, summary_aliases, source_page, source_aliases in specs:
             if not source_page:
                 continue
+            if _has_group_company_columns(summary_page.text) or _has_group_company_columns(source_page.text):
+                continue
             summary_amounts, summary_line = _line_amounts_for_aliases_preserving_zero(summary_page.text, summary_aliases)
             source_amounts, source_line = _line_amounts_for_aliases_preserving_zero(source_page.text, source_aliases)
             if not summary_amounts or not source_amounts:
@@ -6745,6 +6771,11 @@ def _check_supplementary_summary_consistency(
                 )
             )
     return findings, performed
+
+
+def _has_group_company_columns(text: str) -> bool:
+    head = "\n".join(text.splitlines()[:80]).lower()
+    return bool(re.search(r"\bgroup\b.{0,80}\bcompany\b|\bcompany\b.{0,80}\bgroup\b", head, flags=re.I))
 
 
 def _line_amounts_for_aliases_preserving_zero(text: str, aliases: tuple[str, ...]) -> tuple[list[Decimal], str]:
@@ -7634,6 +7665,8 @@ def _check_profit_tax_equation(
     width = min(len(before_tax), len(taxation), len(after_tax))
     if width < 1 or (width < 2 and not ocr_review):
         return False
+    if _after_tax_line_affected_by_oci(raw_lines or {}, document):
+        return False
     for index in range(width):
         before = before_tax[index]
         tax = taxation[index]
@@ -7660,6 +7693,19 @@ def _check_profit_tax_equation(
         else:
             _check_scalar_equation(findings, page_number, location, issue, closest, reported, tolerance)
     return True
+
+
+def _after_tax_line_affected_by_oci(raw_lines: dict[str, str], document: PdfDocument | None = None) -> bool:
+    joined = " ".join(str(value or "") for value in raw_lines.values()).lower()
+    if re.search(r"\b(total comprehensive income|total comprehensive loss|other comprehensive income|oci)\b", joined):
+        return True
+    if not document:
+        return False
+    for page in document.pages:
+        normalized = _normalise_match_words(page.text)
+        if "other comprehensive income" in normalized and "profit" in normalized and "tax" in normalized:
+            return True
+    return False
 
 
 def _ocr_income_tax_debug(
@@ -8797,7 +8843,7 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
             continue
         if notes_start_page is not None and page.number > notes_start_page and _is_post_notes_supplement_page(page.text):
             break
-        if strict_notes_start and _notes_heading_in_text(page.text):
+        if strict_notes_start and (page.number == notes_start_page or _notes_heading_in_text(page.text)):
             in_notes = True
         if strict_notes_start and not in_notes:
             continue
@@ -8850,7 +8896,6 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
         # body instead of the policy subsection, regardless of which page has tables.
         best = valid_occs[-1]
         headings[number] = (best[0], best[1])
-    _augment_note_headings_from_statement_refs(headings, document)
     setattr(document, "_note_headings_by_page_cache", headings)
     return headings
 
@@ -9355,6 +9400,9 @@ def _line_item_not_face_linked(line_item: str, statement_name: str, explicit_ref
         "total comprehensive income",
         "total comprehensive loss",
     }
+    explicit_pnl_note_labels = {"taxation", "tax expense", "income tax expense"}
+    if explicit_ref and any(token in statement for token in ("profit or loss", "comprehensive", "income and expenditure")) and label in explicit_pnl_note_labels:
+        return False
     if label in broad_labels:
         return True
     if raw_label.startswith(("total ", "net cash", "surplus for the year")) and not explicit_ref:

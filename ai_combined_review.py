@@ -17,7 +17,7 @@ from ai_policy_review import (
     _parse_response_json,
     _repair_response_json,
 )
-from models import DEFAULT_AI_MODEL, CompanyProfile, Finding, PdfDocument
+from models import DEFAULT_AI_DEEP_MODEL, DEFAULT_AI_MODEL, DEFAULT_AI_QUICK_MODEL, DEFAULT_AI_STANDARD_MODEL, CompanyProfile, Finding, PdfDocument
 
 COMBINED_AI_OUTPUT_TOKENS = max(1200, min(int(os.getenv("OPENAI_COMBINED_REVIEW_OUTPUT_TOKENS", "3500")), 6000))
 COMBINED_AI_REPAIR_SHAPE = (
@@ -128,7 +128,7 @@ def run_combined_ai_review(
             review_mode=normalized_mode,
         )
 
-    attempts = _model_attempts(model)
+    attempts = _model_attempts(model, normalized_mode)
     error_rows: list[dict[str, str]] = []
     for attempt_index, attempt_model in enumerate(attempts, start=1):
         attempt_mode = normalized_mode if attempt_index == 1 else "quick"
@@ -177,7 +177,7 @@ def run_combined_ai_review(
 
 
 def _build_payload(model: str, package: dict[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         "model": model,
         "max_output_tokens": COMBINED_AI_OUTPUT_TOKENS,
         "input": [
@@ -194,6 +194,106 @@ def _build_payload(model: str, package: dict[str, Any]) -> dict[str, Any]:
                 "content": _build_prompt(package),
             },
         ],
+    }
+    if _structured_outputs_enabled():
+        payload["text"] = {"format": _combined_ai_structured_output_format()}
+    return payload
+
+
+def _structured_outputs_enabled() -> bool:
+    return str(os.getenv("OPENAI_STRUCTURED_OUTPUTS", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _combined_ai_structured_output_format() -> dict[str, Any]:
+    finding_schema = _ai_finding_schema()
+    adjudication_schema = _ai_adjudication_schema()
+    return {
+        "type": "json_schema",
+        "name": "audit_assistant_combined_review",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "summary",
+                "executive_review_memo",
+                "executive_memo",
+                "confidence",
+                "overall_signoff_conclusion",
+                "immediate_action_points",
+                "cash_flow_conclusion",
+                "regulatory_reference_conclusion",
+                "casting_cross_casting_conclusion",
+                "review_comment_rows",
+                "policy_review_findings",
+                "policy_review",
+                "missed_review_findings",
+                "findings_to_add",
+                "finding_adjudications",
+                "findings_to_remove",
+                "findings_to_downgrade",
+                "findings_to_rewrite",
+            ],
+            "properties": {
+                "summary": {"type": "string"},
+                "executive_review_memo": {"type": "string"},
+                "executive_memo": {"type": "string"},
+                "confidence": {"type": "string"},
+                "overall_signoff_conclusion": {"type": "string"},
+                "immediate_action_points": {"type": "array", "items": {"type": "string"}},
+                "cash_flow_conclusion": {"type": "string"},
+                "regulatory_reference_conclusion": {"type": "string"},
+                "casting_cross_casting_conclusion": {"type": "string"},
+                "review_comment_rows": {"type": "array", "items": _ai_review_comment_schema()},
+                "policy_review_findings": {"type": "array", "items": finding_schema},
+                "policy_review": {"type": "array", "items": finding_schema},
+                "missed_review_findings": {"type": "array", "items": finding_schema},
+                "findings_to_add": {"type": "array", "items": finding_schema},
+                "finding_adjudications": {"type": "array", "items": adjudication_schema},
+                "findings_to_remove": {"type": "array", "items": adjudication_schema},
+                "findings_to_downgrade": {"type": "array", "items": adjudication_schema},
+                "findings_to_rewrite": {"type": "array", "items": adjudication_schema},
+            },
+        },
+    }
+
+
+def _ai_finding_schema() -> dict[str, Any]:
+    required = [
+        "title", "category", "severity", "confidence", "status", "page_reference", "note_reference",
+        "issue", "evidence_snippet", "recommendation", "rationale",
+    ]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": required,
+        "properties": {key: {"type": "string"} for key in required},
+    }
+
+
+def _ai_adjudication_schema() -> dict[str, Any]:
+    required = [
+        "finding_id", "decision", "revised_severity", "confidence", "status", "reason", "recommended_action", "rewrite",
+    ]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": required,
+        "properties": {key: {"type": "string"} for key in required},
+    }
+
+
+def _ai_review_comment_schema() -> dict[str, Any]:
+    required = [
+        "section_or_statement_or_note", "page_number", "account_or_line_item",
+        "current_wording_amount_reference", "issue_identified", "expected_correction_recommendation",
+        "category", "priority", "status", "reviewer_comments",
+    ]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": required,
+        "properties": {key: {"type": "string"} for key in required},
     }
 
 
@@ -222,7 +322,7 @@ def _build_prompt(package: dict[str, Any]) -> str:
         "- For regulatory-reference issues, quote or paraphrase the current wording and recommend the revised wording.\n"
         "- High priority means material arithmetic, regulatory issue, cash-flow error, incorrect primary-statement tie-in, or audit sign-off issue. Medium means disclosure inconsistency, note-reference error, significant wording, or presentation correction. Low means minor spelling, grammar, formatting, or style.\n"
         "- Low-confidence issues should be review_prompt, not confirmed exceptions.\n\n"
-        "Return JSON with this shape:\n"
+        "Return JSON with this shape. Populate the findings_to_add/remove/downgrade/rewrite and policy_review arrays as aliases for the detailed fields; use empty arrays where no item applies:\n"
         f"{COMBINED_AI_REPAIR_SHAPE}\n\n"
         "Compact evidence package:\n"
         f"{json.dumps(package, ensure_ascii=False, indent=2)}"
@@ -477,12 +577,15 @@ def _parsed_to_result(
     evidence_row: dict[str, str],
     error_rows: list[dict[str, str]],
 ) -> CombinedAiReviewResult:
+    adjudications = _combined_adjudications_from_parsed(parsed)
     findings_after_adjudication, finding_export, suppressed_rows, reviewed_count = _apply_combined_adjudications(
         original_findings,
-        parsed.get("finding_adjudications", []) or [],
+        adjudications,
     )
-    policy_findings, policy_rows = _observations_to_outputs(parsed.get("policy_review_findings", []) or parsed.get("policy_findings", []), "AI policy judgement")
-    missed_findings, missed_rows = _observations_to_outputs(parsed.get("missed_review_findings", []) or parsed.get("missed_findings", []), "AI full review")
+    policy_observations = _combined_list_values(parsed, "policy_review_findings", "policy_findings", "policy_review")
+    missed_observations = _combined_list_values(parsed, "missed_review_findings", "missed_findings", "findings_to_add")
+    policy_findings, policy_rows = _observations_to_outputs(policy_observations, "AI policy judgement")
+    missed_findings, missed_rows = _observations_to_outputs(missed_observations, "AI full review")
     final_findings = findings_after_adjudication + policy_findings + missed_findings
     review_comment_rows = _review_comment_rows_from_parsed(parsed, policy_rows + missed_rows)
     return CombinedAiReviewResult(
@@ -491,7 +594,7 @@ def _parsed_to_result(
         full_export=missed_rows,
         finding_export=finding_export,
         summary=str(parsed.get("summary", "") or "").strip(),
-        executive_memo=str(parsed.get("executive_review_memo", "") or "").strip(),
+        executive_memo=str(parsed.get("executive_review_memo", "") or parsed.get("executive_memo", "") or "").strip(),
         status="completed",
         model=model,
         suppressed_count=len(suppressed_rows),
@@ -504,6 +607,30 @@ def _parsed_to_result(
         review_mode=review_mode,
     )
 
+
+
+def _combined_list_values(parsed: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key in keys:
+        value = parsed.get(key, [])
+        if isinstance(value, list):
+            rows.extend(item for item in value if isinstance(item, dict))
+    return rows
+
+
+def _combined_adjudications_from_parsed(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = _combined_list_values(parsed, "finding_adjudications")
+    alias_actions = (
+        ("findings_to_remove", "suppress"),
+        ("findings_to_downgrade", "downgrade"),
+        ("findings_to_rewrite", "rewrite"),
+    )
+    for key, decision in alias_actions:
+        for item in _combined_list_values(parsed, key):
+            row = dict(item)
+            row["decision"] = str(row.get("decision") or decision)
+            rows.append(row)
+    return rows
 
 
 def _observations_to_outputs(observations: list[dict[str, Any]], category: str) -> tuple[list[Finding], list[dict[str, str]]]:
@@ -706,12 +833,26 @@ def _clone_finding(finding: Finding) -> Finding:
 
 
 
-def _model_attempts(model: str) -> list[str]:
-    preferred = model or DEFAULT_AI_MODEL
-    fallback = os.getenv("OPENAI_FALLBACK_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
-    if fallback == preferred:
-        fallback = os.getenv("OPENAI_SECONDARY_FALLBACK_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
-    return [preferred, fallback]
+def _model_attempts(model: str, review_mode: str = "standard") -> list[str]:
+    preferred = (model or "").strip() or _model_for_review_mode(review_mode)
+    fallbacks = [
+        os.getenv("OPENAI_FALLBACK_MODEL", DEFAULT_AI_STANDARD_MODEL).strip() or DEFAULT_AI_STANDARD_MODEL,
+        os.getenv("OPENAI_SECONDARY_FALLBACK_MODEL", DEFAULT_AI_QUICK_MODEL).strip() or DEFAULT_AI_QUICK_MODEL,
+    ]
+    attempts: list[str] = []
+    for candidate in [preferred, *fallbacks]:
+        if candidate and candidate not in attempts:
+            attempts.append(candidate)
+    return attempts or [DEFAULT_AI_MODEL]
+
+
+def _model_for_review_mode(review_mode: str) -> str:
+    mode = _normalize_review_mode(review_mode)
+    if mode == "deep":
+        return DEFAULT_AI_DEEP_MODEL
+    if mode == "standard":
+        return DEFAULT_AI_STANDARD_MODEL
+    return DEFAULT_AI_QUICK_MODEL
 
 
 

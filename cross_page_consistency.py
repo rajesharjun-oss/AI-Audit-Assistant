@@ -54,6 +54,16 @@ COMMON_SPELLING_CORRECTIONS = {
     "climated": "climate",
     "witholding": "withholding",
     "finrance": "finance",
+    "attestion": "attestation",
+    "citeria": "criteria",
+    "wriiten": "written",
+    "commision": "commission",
+    "incured": "incurred",
+    "effet": "effect",
+    "addded": "added",
+    "complaince": "compliance",
+    "conitnued": "continued",
+    "microfinannce": "microfinance",
 }
 
 

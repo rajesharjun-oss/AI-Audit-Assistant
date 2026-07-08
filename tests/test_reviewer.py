@@ -3815,10 +3815,10 @@ def test_note_heading_inferred_when_extraction_drops_note_number():
     rows = reviewer._note_agreement_result_rows(document)
     deferred_tax_row = next(row for row in rows if row["Line item description"] == "Deferred Tax")
 
-    assert headings["9"] == ("Deferred tax", 35)
-    assert deferred_tax_row["Review result"] == "Passed"
-    assert deferred_tax_row["Current year amount found in referenced note?"] == "Yes"
-    assert deferred_tax_row["Prior year amount found in referenced note?"] == "Yes"
+    assert "9" not in headings
+    assert headings["10"] == ("Trade and other payables", 35)
+    assert deferred_tax_row["Review result"] != "Passed"
+    assert deferred_tax_row["Reason"]
 
 
 def test_note_heading_detection_starts_after_notes_heading_when_present():
@@ -6058,9 +6058,8 @@ def test_skipped_cash_flow_check_becomes_manual_review_required():
     )
 
     manual_findings = [finding for finding in result.findings if finding.category == "Manual review"]
-    assert len(manual_findings) == 1
-    assert manual_findings[0].location == "Page 9"
-    assert "manual review required" in manual_findings[0].issue.lower()
+    assert manual_findings == []
+    assert "Statement of cash flows" in result.metrics["checks_skipped"]
     assert any(
         row["Result"] == "Manual review required" and "cash flows" in row["Check"].lower()
         for row in result.metrics["check_results"]

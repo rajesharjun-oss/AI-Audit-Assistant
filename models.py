@@ -8,7 +8,13 @@ from typing import Any
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
 UNREADABLE_RE = re.compile("(#{3,}|\uFFFD|\u25A1)")
-DEFAULT_AI_MODEL = os.getenv("AI_AUDIT_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1"))
+DEFAULT_AI_QUICK_MODEL = os.getenv(
+    "OPENAI_QUICK_REVIEW_MODEL",
+    os.getenv("AI_AUDIT_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.4-mini")),
+)
+DEFAULT_AI_STANDARD_MODEL = os.getenv("OPENAI_STANDARD_REVIEW_MODEL", "gpt-5.4")
+DEFAULT_AI_DEEP_MODEL = os.getenv("OPENAI_DEEP_REVIEW_MODEL", "gpt-5.5")
+DEFAULT_AI_MODEL = DEFAULT_AI_QUICK_MODEL
 
 
 @dataclass
@@ -136,7 +142,7 @@ class ReviewOptions:
     use_ai_policy_review: bool = False
     use_ai_full_review: bool = False
     ai_model: str = DEFAULT_AI_MODEL
-    ai_review_mode: str = "Standard review"
+    ai_review_mode: str = "Quick review"
 
 
 @dataclass(frozen=True)

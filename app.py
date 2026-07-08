@@ -1106,7 +1106,7 @@ with st.container(border=True):
         value=300,
         help="Higher DPI can improve OCR accuracy but takes longer.",
     )
-    ai_review_mode = "Standard review"
+    ai_review_mode = "Quick review"
     with st.expander("Advanced settings", expanded=review_mode == "Advanced Review"):
         cautious_note_agreement = st.checkbox(
             "Run cautious note-reference validation anyway",
@@ -1127,14 +1127,8 @@ with st.container(border=True):
                 "Requires OPENAI_API_KEY on the server."
             ),
         )
-        ai_review_mode = st.selectbox(
-            "AI review mode",
-            ["Quick review", "Standard review", "Deep review"],
-            index=1,
-            help=(
-                "Quick uses the smallest compact evidence package. Standard reviews primary statements, Notes 1 and 2, and the draft register. "
-                "Deep includes broader context and may use more tokens."
-            ),
+        st.info(
+            "Automatic AI Quick Review is enabled by default. Use the Deep AI Review button after the deterministic result is ready when partner-level judgement is needed."
         )
         use_ai_full_review = st.checkbox(
             "Run full AI financial statement review",
@@ -1216,7 +1210,7 @@ review_options = ReviewOptions(
     run_cautious_note_agreement=cautious_note_agreement,
     use_ai_policy_review=use_ai_policy_review,
     use_ai_full_review=use_ai_full_review,
-    ai_model=DEFAULT_AI_MODEL,
+    ai_model="",
     ai_review_mode=ai_review_mode,
 )
 deterministic_review_options = ReviewOptions(
@@ -1226,7 +1220,7 @@ deterministic_review_options = ReviewOptions(
     run_cautious_note_agreement=cautious_note_agreement,
     use_ai_policy_review=False,
     use_ai_full_review=False,
-    ai_model=DEFAULT_AI_MODEL,
+    ai_model="",
     ai_review_mode=ai_review_mode,
 )
 uploaded_bytes = uploaded.getvalue()
@@ -1279,9 +1273,9 @@ else:
                 document = cache["document"]
                 result = rerun_ai_review_from_cached_result(document, temp_path, profile, review_options, cache["result"])
         else:
-            with st.spinner("Extracting PDF text, running OCR if needed, and performing deterministic review checks..."):
+            with st.spinner("Extracting PDF text, running OCR if needed, performing deterministic checks, and running automatic AI quick review when enabled..."):
                 document = extract_review_document(temp_path, deterministic_review_options)
-                result = review_document(document, temp_path, profile, deterministic_review_options)
+                result = review_document(document, temp_path, profile, review_options)
         st.session_state["review_cache"] = {
             "file_hash": file_hash,
             "settings_key": settings_key,
@@ -1297,21 +1291,35 @@ else:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
 
-ai_layer_not_started = str(result.metrics.get("ai_review_status", "Not started") or "Not started") == "Not started"
 ai_layer_enabled = bool(use_ai_policy_review or use_ai_full_review)
-if ai_layer_enabled and ai_layer_not_started and cache.get("document") is not None and cache.get("result") is not None:
-    ai_prompt_box = st.empty()
-    ai_button_box = st.empty()
-    ai_prompt_box.info("Deterministic review is ready. Run the AI layer separately to avoid blocking the base exception register during extraction.")
-    if ai_button_box.button("Run AI Review", type="primary", help="Use the cached extraction and deterministic findings; no PDF re-upload or OCR rerun is needed."):
+deep_ai_available = bool(ai_layer_enabled and cache.get("document") is not None and cache.get("result") is not None)
+if deep_ai_available:
+    current_ai_mode = str(result.metrics.get("ai_review_mode", "") or "").strip().lower()
+    deep_button_label = "Run Deep AI Review"
+    deep_button_help = (
+        "Reuse the cached extraction and deterministic findings, then run a broader partner-style AI review. "
+        "No PDF re-upload or OCR rerun is needed."
+    )
+    deep_ai_requested = st.button(deep_button_label, help=deep_button_help, disabled=current_ai_mode == "deep")
+    if deep_ai_requested:
         temp_path: Path | None = None
+        deep_options = ReviewOptions(
+            use_ocr=use_ocr,
+            ocr_max_pages=int(ocr_max_pages),
+            ocr_dpi=int(ocr_dpi),
+            run_cautious_note_agreement=cautious_note_agreement,
+            use_ai_policy_review=True,
+            use_ai_full_review=True,
+            ai_model="",
+            ai_review_mode="Deep review",
+        )
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
                 temp_file.write(uploaded_bytes)
                 temp_path = Path(temp_file.name)
-            with st.spinner("Running AI review using cached extraction and deterministic findings..."):
+            with st.spinner("Running Deep AI Review using cached extraction and deterministic findings..."):
                 document = cache["document"]
-                result = rerun_ai_review_from_cached_result(document, temp_path, profile, review_options, cache["result"])
+                result = rerun_ai_review_from_cached_result(document, temp_path, profile, deep_options, cache["result"])
             st.session_state["review_cache"] = {
                 "file_hash": file_hash,
                 "settings_key": settings_key,
@@ -1320,13 +1328,9 @@ if ai_layer_enabled and ai_layer_not_started and cache.get("document") is not No
                 "result": result,
             }
             cache = st.session_state["review_cache"]
-            ai_button_box.empty()
-            if str(result.metrics.get("ai_review_status", "")).lower() == "completed":
-                ai_prompt_box.success("AI review completed. The dashboard and downloads below now include AI-assisted results.")
-            else:
-                ai_prompt_box.warning("AI review finished without a completed status. Check AI review status and AI error log below.")
+            st.success("Deep AI Review completed. The dashboard and downloads below now include the deeper AI review output.")
         except Exception as exc:
-            ai_prompt_box.error(_friendly_review_failure_message(exc))
+            st.error(_friendly_review_failure_message(exc))
         finally:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)

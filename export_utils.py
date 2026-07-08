@@ -15,6 +15,8 @@ def clean_name_consistency_rows(rows: list[dict[str, str]]) -> list[dict[str, st
         pages2 = _parse_page_set(row.get("Page 2", ""))
         if _looks_like_one_page_name_artifact(name1, pages1, name2, pages2):
             continue
+        if _looks_like_plural_label_variant(name1, name2):
+            continue
         if name1 and name2:
             standard = name1 if len(pages1) >= len(pages2) else name2
             row = dict(row)
@@ -64,3 +66,19 @@ def _single_page_token_artifact(name1: str, pages1: set[int], name2: str, pages2
         return False
     shorter, longer = (left, right) if len(left) < len(right) else (right, left)
     return len(longer) - len(shorter) == 1 and longer.startswith(shorter)
+
+def _looks_like_plural_label_variant(name1: str, name2: str) -> bool:
+    tokens1 = _singularized_label_tokens(name1)
+    tokens2 = _singularized_label_tokens(name2)
+    if not tokens1 or not tokens2:
+        return False
+    return tokens1 == tokens2 and len(tokens1) <= 4
+
+
+def _singularized_label_tokens(value: str) -> tuple[str, ...]:
+    tokens = []
+    for token in re.findall(r"[A-Za-z]+", str(value or "").lower()):
+        if len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        tokens.append(token)
+    return tuple(tokens)
