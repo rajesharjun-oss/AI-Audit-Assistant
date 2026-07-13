@@ -874,7 +874,11 @@ def _should_try_fallback(exc: Exception) -> bool:
 
 
 def _should_retry_without_structured_outputs(exc: Exception) -> bool:
-    return _error_category(exc) == "unsupported_structured_output"
+    # Some OpenAI-compatible routers reject structured-output payloads with
+    # non-standard messages that classify as "other". When the failing
+    # attempt used structured outputs, retry once with plain JSON prompting
+    # before moving to model fallback.
+    return _error_category(exc) in {"unsupported_structured_output", "other"}
 
 
 
@@ -884,14 +888,18 @@ def _is_retryable_or_capacity_error(exc: Exception) -> bool:
 
 
 def _error_category(exc: Exception) -> str:
-    if isinstance(exc, AiProviderError):
-        return str(exc.diagnostics.get("error_category", "") or "other")
     text = str(exc or "").lower()
+    if isinstance(exc, AiProviderError):
+        diagnostics = getattr(exc, "diagnostics", {}) or {}
+        category = str(diagnostics.get("error_category", "") or "other")
+        if category and category != "other":
+            return category
+        text = f"{text} {diagnostics.get('error_message', '')}".lower()
     if "quota" in text or "billing" in text or "credit" in text:
         return "insufficient_quota"
-    if "json_schema" in text or "response_format" in text or "text.format" in text or "structured output" in text:
+    if any(marker in text for marker in ("json_schema", "response_format", "text.format", "structured output", "structured outputs", "schema validation")):
         return "unsupported_structured_output"
-    if "model" in text and ("not found" in text or "does not exist" in text or "not supported" in text or "no access" in text):
+    if "model" in text and ("not found" in text or "does not exist" in text or "not supported" in text or "unsupported" in text or "no access" in text):
         return "unsupported_model"
     if "token" in text or "context" in text or "too large" in text:
         return "payload_too_large"

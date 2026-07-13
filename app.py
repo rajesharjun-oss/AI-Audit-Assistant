@@ -45,6 +45,7 @@ def _ai_failure_debug_summary(ai_error_rows: object) -> str:
     category = str(last.get("Error category", "") or "").strip()
     status_code = str(last.get("Status code", "") or "").strip()
     structured = str(last.get("Structured outputs", "") or "").strip()
+    message = str(last.get("Error message", "") or "").strip().replace("\n", " ")[:220]
     pieces = []
     if category:
         pieces.append(f"category: {category}")
@@ -54,6 +55,8 @@ def _ai_failure_debug_summary(ai_error_rows: object) -> str:
         pieces.append(f"model: {model}")
     if structured:
         pieces.append(f"structured outputs: {structured}")
+    if message:
+        pieces.append(f"message: {message}")
     return " Last AI error (debug): " + "; ".join(pieces) + "." if pieces else ""
 
 def _metric_lines(value: object, empty: str) -> list[str]:

@@ -682,6 +682,50 @@ def test_optional_ai_full_review_adds_findings_and_export(monkeypatch):
     assert result.metrics["ai_evidence_packs"][0]["Evidence type"] == "Combined AI compact review package"
     assert "Combined AI review completed using gpt-5-mini" in result.metrics["checks_performed"]
 
+
+def test_combined_ai_retries_plain_json_when_router_rejects_structured_output(monkeypatch):
+    document = PdfDocument([
+        PdfPage(1, "Statement of financial position\nCash 100 90\nTotal assets 100 90", []),
+        PdfPage(2, "Notes to the financial statements\n1. Significant accounting policies", []),
+    ])
+    profile = CompanyProfile(company_name="Router Test Limited")
+    payloads = []
+
+    def fake_call(_api_key, payload):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            raise ai_combined_review.AiProviderError(
+                "router rejected structured output",
+                {
+                    "error_category": "other",
+                    "error_type": "HTTPError",
+                    "error_message": "Provider rejected text.format json_schema for this route",
+                    "model": payload.get("model", ""),
+                },
+            )
+        return {"output_text": '{"summary":"ok","executive_review_memo":"ok","policy_review_findings":[],"missed_review_findings":[],"finding_adjudications":[]}'}
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(ai_combined_review, "_call_openai", fake_call)
+
+    result = ai_combined_review.run_combined_ai_review(
+        document,
+        profile,
+        {"1": "Significant accounting policies"},
+        {},
+        [],
+        [],
+        model="gpt-5.5",
+        review_mode="Quick review",
+    )
+
+    assert result.status == "completed"
+    assert len(payloads) == 2
+    assert "text" in payloads[0]
+    assert "text" not in payloads[1]
+    assert result.error_rows[0]["Structured outputs"] == "Yes"
+
+
 def test_ai_review_pipeline_runs_combined_review_once(monkeypatch):
     document = PdfDocument([PdfPage(1, "Notes to the financial statements\n1. Significant accounting policies", [])])
     profile = CompanyProfile(company_name="Test Limited")
