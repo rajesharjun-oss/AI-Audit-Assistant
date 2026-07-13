@@ -6194,6 +6194,24 @@ def test_ai_openai_call_falls_back_to_chat_completions_for_empty_router_response
     assert ai_policy_review._parse_response_json(response) == {"ok": True}
 
 
+def test_ai_html_waf_response_is_reported_as_invalid_api_endpoint():
+    raw = '<!doctypehtml><meta charset="UTF-8"><meta name="aliyun_waf_aa" content="ff926c">'
+    diagnostics = ai_policy_review._base_ai_diagnostics({"model": "gpt-5.5", "max_output_tokens": 100, "input": []})
+
+    exc = ai_policy_review._invalid_provider_response_error(
+        raw,
+        "chat_completions",
+        "https://agentrouter.org/v1/chat/completions",
+        diagnostics,
+    )
+
+    assert exc.diagnostics["error_category"] == "invalid_api_endpoint"
+    assert ai_combined_review._error_category(exc) == "invalid_api_endpoint"
+    message = ai_policy_review._friendly_ai_error_message(exc)
+    assert "OPENAI_BASE_URL" in message
+    assert "dashboard URL" in message
+
+
 def test_ai_invalid_provider_response_has_actionable_message():
     exc = ai_policy_review.AiProviderError(
         "Provider returned an empty response.",

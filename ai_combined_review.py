@@ -13,6 +13,7 @@ from ai_policy_review import (
     _call_openai,
     _friendly_ai_error_message,
     _looks_like_dns_error,
+    _looks_like_html_or_waf_response,
     _normalize_confidence,
     _normalize_severity,
     _parse_response_json,
@@ -898,6 +899,8 @@ def _error_category(exc: Exception) -> str:
         text = f"{text} {diagnostics.get('error_message', '')}".lower()
     if _looks_like_dns_error(text):
         return "network_dns"
+    if _looks_like_html_or_waf_response(text):
+        return "invalid_api_endpoint"
     if "invalidproviderresponse" in text or "non-json response" in text or "empty response" in text:
         return "invalid_provider_response"
     if "quota" in text or "billing" in text or "credit" in text:

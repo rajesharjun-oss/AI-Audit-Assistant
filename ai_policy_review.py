@@ -579,17 +579,42 @@ def _prompt_content_to_text(value: Any) -> str:
 
 def _invalid_provider_response_error(raw_body: str, endpoint_style: str, endpoint: str, diagnostics: dict[str, Any]) -> AiProviderError:
     preview = str(raw_body or "")[:500]
-    message = "Provider returned an empty response." if not str(raw_body or "").strip() else "Provider returned a non-JSON response."
+    if not str(raw_body or "").strip():
+        message = "Provider returned an empty response."
+        category = "invalid_provider_response"
+    elif _looks_like_html_or_waf_response(raw_body):
+        message = "Provider returned an HTML page or WAF/security challenge instead of API JSON."
+        category = "invalid_api_endpoint"
+    else:
+        message = "Provider returned a non-JSON response."
+        category = "invalid_provider_response"
     error_diagnostics = dict(diagnostics)
     error_diagnostics.update(
         {
             "error_type": "InvalidProviderResponse",
-            "error_category": "invalid_provider_response",
+            "error_category": category,
             "error_message": f"{message} endpoint_style={endpoint_style}; endpoint={endpoint}; response_preview={preview}",
             "response_preview": preview,
         }
     )
     return AiProviderError(error_diagnostics["error_message"], error_diagnostics)
+
+
+def _looks_like_html_or_waf_response(raw_body: str) -> bool:
+    lower = str(raw_body or "").lower()
+    return any(
+        marker in lower
+        for marker in (
+            "<!doctype",
+            "<html",
+            "<meta",
+            "aliyun_waf_aa",
+            "waf",
+            "captcha",
+            "security challenge",
+            "access denied",
+        )
+    )
 
 
 def _can_try_next_endpoint_style(styles: list[str], style_index: int, exc: Exception) -> bool:
@@ -603,7 +628,7 @@ def _can_try_next_endpoint_style(styles: list[str], style_index: int, exc: Excep
         category = str(diagnostics.get("error_category", "") or "").lower()
         status_code = str(diagnostics.get("status_code", "") or "").strip()
         message = f"{message} {diagnostics.get('error_message', '')}".lower()
-    if category in {"invalid_provider_response", "unsupported_structured_output"}:
+    if category in {"invalid_provider_response", "invalid_api_endpoint", "unsupported_structured_output"}:
         return True
     if status_code in {"400", "404", "405", "501"} and any(marker in message for marker in ("responses", "endpoint", "not found", "unsupported", "not supported")):
         return True
@@ -964,6 +989,8 @@ def _classify_ai_error(status_code: int | None, message: str) -> str:
         if "insufficient_quota" in lower or "quota" in lower or "billing" in lower:
             return "insufficient_quota"
         return "rate_limit"
+    if "aliyun_waf_aa" in lower or "security challenge" in lower or "waf" in lower or "<!doctype" in lower or "<html" in lower:
+        return "invalid_api_endpoint"
     if "invalidproviderresponse" in lower or "non-json response" in lower or "empty response" in lower:
         return "invalid_provider_response"
     if status_code in {408, 504} or "timeout" in lower or "timed out" in lower:
@@ -1095,6 +1122,8 @@ def _friendly_ai_error_message(exc: Exception) -> str:
             return "AI review was not completed because the provider rejected the structured-output request format. The deterministic review and exports were still completed; see AI debug details."
         if category == "invalid_provider_response":
             return "AI review was not completed because the AI provider returned an empty or non-JSON response. Check OPENAI_BASE_URL and set OPENAI_API_STYLE=chat_completions if your router does not support the Responses API. The deterministic review and exports were still completed."
+        if category == "invalid_api_endpoint":
+            return "AI review was not completed because OPENAI_BASE_URL points to a website, WAF/security challenge, or non-API endpoint instead of an AI JSON API. Use the provider's actual API base URL, not the dashboard URL. The deterministic review and exports were still completed."
         if category == "network_dns":
             return "AI review was not completed because the AI provider host could not be resolved. Check OPENAI_BASE_URL, provider DNS, and deployment network egress. The deterministic review and exports were still completed."
         if category in {"rate_limit", "timeout", "temporary_service_error", "busy"}:
