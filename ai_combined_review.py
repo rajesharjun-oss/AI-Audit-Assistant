@@ -898,6 +898,8 @@ def _error_category(exc: Exception) -> str:
         text = f"{text} {diagnostics.get('error_message', '')}".lower()
     if _looks_like_dns_error(text):
         return "network_dns"
+    if "invalidproviderresponse" in text or "non-json response" in text or "empty response" in text:
+        return "invalid_provider_response"
     if "quota" in text or "billing" in text or "credit" in text:
         return "insufficient_quota"
     if any(marker in text for marker in ("json_schema", "response_format", "text.format", "structured output", "structured outputs", "schema validation")):
@@ -938,6 +940,9 @@ def _error_row_from_exception(
         "Retry count": str(diagnostics.get("retry_count", "")),
         "Retry wait time": json.dumps(diagnostics.get("retry_wait_seconds", [])),
         "Structured outputs": "Yes" if structured_output else "No",
+        "Endpoint style": str(diagnostics.get("endpoint_style", "")),
+        "Endpoint": str(diagnostics.get("endpoint", "")),
+        "Response preview": str(diagnostics.get("response_preview", ""))[:500],
         "Package character count": str(package.get("package_character_count", "")),
     }
 

@@ -396,8 +396,8 @@ def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     try:
-        endpoint = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
         last_error: Exception | None = None
+        endpoint_styles = _openai_endpoint_styles()
         for attempt in range(AI_MAX_ATTEMPTS):
             diagnostics["retry_count"] = attempt
             cooldown_remaining = _rate_limit_wait_seconds()
@@ -405,76 +405,209 @@ def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
                 diagnostics.setdefault("retry_wait_seconds", []).append(cooldown_remaining)
                 _sleep_before_ai_retry(cooldown_remaining)
 
-            req = request.Request(
-                endpoint,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            try:
-                with request.urlopen(req, timeout=AI_REQUEST_TIMEOUT_SECONDS) as response:
-                    diagnostics["status_code"] = getattr(response, "status", 200)
-                    return json.loads(response.read().decode("utf-8"))
-            except error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                retryable = exc.code == 429 or exc.code in {500, 502, 503, 504}
-                diagnostics.update(
-                    {
-                        "status_code": exc.code,
-                        "error_type": type(exc).__name__,
-                        "error_message": body[:1200],
-                        "error_category": _classify_ai_error(exc.code, body),
-                    }
+            for style_index, endpoint_style in enumerate(endpoint_styles):
+                endpoint = _openai_endpoint_for_style(endpoint_style)
+                request_payload = _payload_for_endpoint_style(payload, endpoint_style)
+                diagnostics.update({"endpoint_style": endpoint_style, "endpoint": endpoint})
+                req = request.Request(
+                    endpoint,
+                    data=json.dumps(request_payload).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
                 )
-                last_error = AiProviderError(f"OpenAI API error {exc.code}: {body[:240]}", dict(diagnostics))
-                if not retryable:
-                    raise last_error from exc
-                wait_seconds = _retry_after_seconds(exc.headers.get("Retry-After", ""))
-                if wait_seconds is None:
-                    wait_seconds = _retry_wait_seconds(attempt)
-                diagnostics.setdefault("retry_wait_seconds", []).append(wait_seconds)
-                if exc.code == 429:
-                    _set_rate_limit_block(wait_seconds)
-                if attempt + 1 < AI_MAX_ATTEMPTS:
-                    _sleep_before_ai_retry(wait_seconds)
-                    continue
-                diagnostics["retry_count"] = attempt + 1
-                raise AiProviderError(
-                    f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): OpenAI API error {exc.code}.",
-                    dict(diagnostics),
-                ) from exc
-            except Exception as exc:
-                diagnostics.update(
-                    {
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc)[:1200],
-                        "error_category": _classify_ai_error(None, str(exc)),
-                    }
-                )
-                last_error = exc
-                if _is_retryable_ai_error(exc) and attempt + 1 < AI_MAX_ATTEMPTS:
-                    wait_seconds = _retry_wait_seconds(attempt)
+                try:
+                    with request.urlopen(req, timeout=AI_REQUEST_TIMEOUT_SECONDS) as response:
+                        diagnostics["status_code"] = getattr(response, "status", 200)
+                        raw_body = response.read().decode("utf-8", errors="replace")
+                        diagnostics["response_preview"] = raw_body[:500]
+                        try:
+                            return json.loads(raw_body)
+                        except json.JSONDecodeError as exc:
+                            provider_error = _invalid_provider_response_error(raw_body, endpoint_style, endpoint, diagnostics)
+                            last_error = provider_error
+                            if _can_try_next_endpoint_style(endpoint_styles, style_index, provider_error):
+                                continue
+                            raise provider_error from exc
+                except error.HTTPError as exc:
+                    body = exc.read().decode("utf-8", errors="replace")
+                    retryable = exc.code == 429 or exc.code in {500, 502, 503, 504}
+                    diagnostics.update(
+                        {
+                            "status_code": exc.code,
+                            "error_type": type(exc).__name__,
+                            "error_message": body[:1200],
+                            "response_preview": body[:500],
+                            "error_category": _classify_ai_error(exc.code, body),
+                        }
+                    )
+                    last_error = AiProviderError(f"OpenAI API error {exc.code}: {body[:240]}", dict(diagnostics))
+                    if _can_try_next_endpoint_style(endpoint_styles, style_index, last_error):
+                        continue
+                    if not retryable:
+                        raise last_error from exc
+                    wait_seconds = _retry_after_seconds(exc.headers.get("Retry-After", ""))
+                    if wait_seconds is None:
+                        wait_seconds = _retry_wait_seconds(attempt)
                     diagnostics.setdefault("retry_wait_seconds", []).append(wait_seconds)
-                    _sleep_before_ai_retry(wait_seconds)
-                    continue
-                if _is_retryable_ai_error(exc):
+                    if exc.code == 429:
+                        _set_rate_limit_block(wait_seconds)
+                    if attempt + 1 < AI_MAX_ATTEMPTS:
+                        _sleep_before_ai_retry(wait_seconds)
+                        break
                     diagnostics["retry_count"] = attempt + 1
                     raise AiProviderError(
-                        f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {exc}",
+                        f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): OpenAI API error {exc.code}.",
                         dict(diagnostics),
                     ) from exc
-                raise AiProviderError(f"AI review could not be completed: {exc}", dict(diagnostics)) from exc
+                except AiProviderError as exc:
+                    last_error = exc
+                    if _is_retryable_ai_error(exc) and attempt + 1 < AI_MAX_ATTEMPTS:
+                        wait_seconds = _retry_wait_seconds(attempt)
+                        diagnostics.setdefault("retry_wait_seconds", []).append(wait_seconds)
+                        _sleep_before_ai_retry(wait_seconds)
+                        break
+                    if _is_retryable_ai_error(exc):
+                        diagnostics["retry_count"] = attempt + 1
+                        raise AiProviderError(
+                            f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {exc}",
+                            dict(getattr(exc, "diagnostics", diagnostics)),
+                        ) from exc
+                    raise exc
+                except Exception as exc:
+                    diagnostics.update(
+                        {
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc)[:1200],
+                            "error_category": _classify_ai_error(None, str(exc)),
+                        }
+                    )
+                    last_error = exc
+                    if _is_retryable_ai_error(exc) and attempt + 1 < AI_MAX_ATTEMPTS:
+                        wait_seconds = _retry_wait_seconds(attempt)
+                        diagnostics.setdefault("retry_wait_seconds", []).append(wait_seconds)
+                        _sleep_before_ai_retry(wait_seconds)
+                        break
+                    if _is_retryable_ai_error(exc):
+                        diagnostics["retry_count"] = attempt + 1
+                        raise AiProviderError(
+                            f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {exc}",
+                            dict(diagnostics),
+                        ) from exc
+                    raise AiProviderError(f"AI review could not be completed: {exc}", dict(diagnostics)) from exc
+            else:
+                continue
+            continue
         if last_error:
             raise AiProviderError(
                 f"AI review failed after {AI_MAX_ATTEMPTS} automatic retry attempt(s): {last_error}",
-                dict(diagnostics),
+                dict(getattr(last_error, "diagnostics", diagnostics)),
             ) from last_error
         raise AiProviderError("OpenAI API call failed without a specific error.", dict(diagnostics))
     finally:
         _AI_REQUEST_LOCK.release()
+
+
+def _openai_endpoint_styles() -> list[str]:
+    style = str(os.getenv("OPENAI_API_STYLE", "auto") or "auto").strip().lower().replace("-", "_")
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/").lower()
+    if style in {"chat", "chat_completion", "chat_completions"}:
+        return ["chat_completions"]
+    if style in {"response", "responses"}:
+        return ["responses"]
+    if base.endswith("/chat/completions"):
+        return ["chat_completions"]
+    if base.endswith("/responses"):
+        return ["responses"]
+    return ["responses", "chat_completions"]
+
+
+def _openai_endpoint_for_style(style: str) -> str:
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
+    lower = base.lower()
+    if lower.endswith("/responses") or lower.endswith("/chat/completions"):
+        return base
+    if style == "chat_completions":
+        return base + "/chat/completions"
+    return base + "/responses"
+
+
+def _payload_for_endpoint_style(payload: dict[str, Any], style: str) -> dict[str, Any]:
+    if style != "chat_completions":
+        return payload
+    chat_payload: dict[str, Any] = {"model": payload.get("model", "")}
+    token_limit = payload.get("max_output_tokens")
+    if token_limit:
+        token_field = str(os.getenv("OPENAI_CHAT_TOKEN_FIELD", "max_tokens") or "max_tokens").strip() or "max_tokens"
+        chat_payload[token_field] = token_limit
+    messages: list[dict[str, str]] = []
+    for item in payload.get("input", []) or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "user") or "user").strip() or "user"
+        if role not in {"system", "user", "assistant", "developer"}:
+            role = "user"
+        if role == "developer":
+            role = "system"
+        content = _prompt_content_to_text(item.get("content"))
+        if content:
+            messages.append({"role": role, "content": content})
+    if not messages:
+        messages.append({"role": "user", "content": _prompt_content_to_text(payload.get("input"))})
+    chat_payload["messages"] = messages
+    return chat_payload
+
+
+def _prompt_content_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(part for part in (_prompt_content_to_text(item) for item in value) if part)
+    if isinstance(value, dict):
+        for key in ("text", "content", "input_text", "output_text"):
+            if key in value:
+                text = _prompt_content_to_text(value.get(key))
+                if text:
+                    return text
+        return " ".join(part for part in (_prompt_content_to_text(v) for v in value.values()) if part)
+    return str(value)
+
+
+def _invalid_provider_response_error(raw_body: str, endpoint_style: str, endpoint: str, diagnostics: dict[str, Any]) -> AiProviderError:
+    preview = str(raw_body or "")[:500]
+    message = "Provider returned an empty response." if not str(raw_body or "").strip() else "Provider returned a non-JSON response."
+    error_diagnostics = dict(diagnostics)
+    error_diagnostics.update(
+        {
+            "error_type": "InvalidProviderResponse",
+            "error_category": "invalid_provider_response",
+            "error_message": f"{message} endpoint_style={endpoint_style}; endpoint={endpoint}; response_preview={preview}",
+            "response_preview": preview,
+        }
+    )
+    return AiProviderError(error_diagnostics["error_message"], error_diagnostics)
+
+
+def _can_try_next_endpoint_style(styles: list[str], style_index: int, exc: Exception) -> bool:
+    if style_index + 1 >= len(styles):
+        return False
+    category = ""
+    status_code = ""
+    message = str(exc or "").lower()
+    if isinstance(exc, AiProviderError):
+        diagnostics = getattr(exc, "diagnostics", {}) or {}
+        category = str(diagnostics.get("error_category", "") or "").lower()
+        status_code = str(diagnostics.get("status_code", "") or "").strip()
+        message = f"{message} {diagnostics.get('error_message', '')}".lower()
+    if category in {"invalid_provider_response", "unsupported_structured_output"}:
+        return True
+    if status_code in {"400", "404", "405", "501"} and any(marker in message for marker in ("responses", "endpoint", "not found", "unsupported", "not supported")):
+        return True
+    return False
 
 
 def _parse_response_json(response_json: dict[str, Any]) -> dict[str, Any]:
@@ -569,6 +702,13 @@ def _extract_response_text(response_json: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         _append_text_fragments(collected, item.get("content"))
+    for choice in response_json.get("choices", []) or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if isinstance(message, dict):
+            _append_text_fragments(collected, message.get("content"))
+        _append_text_fragments(collected, choice.get("text"))
     if not collected:
         for key in ("text", "content", "output"):
             _append_text_fragments(collected, response_json.get(key))
@@ -824,6 +964,8 @@ def _classify_ai_error(status_code: int | None, message: str) -> str:
         if "insufficient_quota" in lower or "quota" in lower or "billing" in lower:
             return "insufficient_quota"
         return "rate_limit"
+    if "invalidproviderresponse" in lower or "non-json response" in lower or "empty response" in lower:
+        return "invalid_provider_response"
     if status_code in {408, 504} or "timeout" in lower or "timed out" in lower:
         return "timeout"
     if status_code == 400 and any(marker in lower for marker in ("json_schema", "response_format", "text.format", "schema", "structured output", "structured outputs")):
@@ -951,6 +1093,8 @@ def _friendly_ai_error_message(exc: Exception) -> str:
             return "AI review was not completed because the configured AI model is not available to this API key. The deterministic review and exports were still completed; see AI debug details for the model name."
         if category == "unsupported_structured_output":
             return "AI review was not completed because the provider rejected the structured-output request format. The deterministic review and exports were still completed; see AI debug details."
+        if category == "invalid_provider_response":
+            return "AI review was not completed because the AI provider returned an empty or non-JSON response. Check OPENAI_BASE_URL and set OPENAI_API_STYLE=chat_completions if your router does not support the Responses API. The deterministic review and exports were still completed."
         if category == "network_dns":
             return "AI review was not completed because the AI provider host could not be resolved. Check OPENAI_BASE_URL, provider DNS, and deployment network egress. The deterministic review and exports were still completed."
         if category in {"rate_limit", "timeout", "temporary_service_error", "busy"}:

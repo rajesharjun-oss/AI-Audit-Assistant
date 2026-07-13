@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
@@ -6134,6 +6135,75 @@ def test_ai_openai_call_uses_bounded_timeout(monkeypatch):
 
     assert captured["timeout"] == ai_policy_review.AI_REQUEST_TIMEOUT_SECONDS
     assert captured["timeout"] < 60
+
+
+def test_ai_openai_call_falls_back_to_chat_completions_for_empty_router_response(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    def fake_urlopen(req, timeout):
+        body = json.loads(req.data.decode("utf-8"))
+        calls.append((req.full_url, body, timeout))
+        if req.full_url.endswith("/responses"):
+            return FakeResponse(b"")
+        chat_response = {"choices": [{"message": {"content": "{\"ok\": true}"}}]}
+        return FakeResponse(json.dumps(chat_response).encode("utf-8"))
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://router.example/v1")
+    monkeypatch.delenv("OPENAI_API_STYLE", raising=False)
+    monkeypatch.setattr(ai_policy_review, "_rate_limit_wait_seconds", lambda: 0)
+    monkeypatch.setattr(ai_policy_review.request, "urlopen", fake_urlopen)
+
+    response = ai_policy_review._call_openai(
+        "test-key",
+        {
+            "model": "gpt-4o-mini",
+            "max_output_tokens": 321,
+            "input": [
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": "Review this."},
+            ],
+        },
+    )
+
+    assert [call[0] for call in calls] == [
+        "https://router.example/v1/responses",
+        "https://router.example/v1/chat/completions",
+    ]
+    chat_payload = calls[1][1]
+    assert chat_payload["model"] == "gpt-4o-mini"
+    assert chat_payload["max_tokens"] == 321
+    assert chat_payload["messages"] == [
+        {"role": "system", "content": "Return JSON only."},
+        {"role": "user", "content": "Review this."},
+    ]
+    assert ai_policy_review._parse_response_json(response) == {"ok": True}
+
+
+def test_ai_invalid_provider_response_has_actionable_message():
+    exc = ai_policy_review.AiProviderError(
+        "Provider returned an empty response.",
+        {"error_category": "invalid_provider_response", "error_message": "Provider returned an empty response."},
+    )
+
+    message = ai_policy_review._friendly_ai_error_message(exc)
+
+    assert "empty or non-JSON response" in message
+    assert "OPENAI_API_STYLE=chat_completions" in message
 
 
 def test_ai_dns_resolution_error_is_classified_and_explained():
