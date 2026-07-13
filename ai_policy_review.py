@@ -818,6 +818,8 @@ def _estimate_payload_tokens(payload: dict[str, Any]) -> int:
 
 def _classify_ai_error(status_code: int | None, message: str) -> str:
     lower = str(message or "").lower()
+    if _looks_like_dns_error(lower):
+        return "network_dns"
     if status_code == 429 or "rate limit" in lower or "too many requests" in lower:
         if "insufficient_quota" in lower or "quota" in lower or "billing" in lower:
             return "insufficient_quota"
@@ -839,6 +841,24 @@ def _classify_ai_error(status_code: int | None, message: str) -> str:
     if "invalid" in lower and "api key" in lower:
         return "authentication"
     return "other"
+
+
+def _looks_like_dns_error(message: str) -> bool:
+    lower = str(message or "").lower()
+    return any(
+        marker in lower
+        for marker in (
+            "temporary failure in name resolution",
+            "name resolution",
+            "getaddrinfo",
+            "failed to resolve",
+            "no address associated",
+            "nodename nor servname",
+            "dns",
+            "[errno -3]",
+            "[errno 11001]",
+        )
+    )
 
 
 def _retry_wait_seconds(attempt: int) -> float:
@@ -907,6 +927,7 @@ def _is_retryable_ai_error(exc: Exception) -> bool:
     return (
         _is_rate_limit_error(exc)
         or isinstance(exc, TimeoutError)
+        or _looks_like_dns_error(text)
         or "temporarily unavailable" in text
         or "connection reset" in text
         or "remote end closed" in text
@@ -930,6 +951,8 @@ def _friendly_ai_error_message(exc: Exception) -> str:
             return "AI review was not completed because the configured AI model is not available to this API key. The deterministic review and exports were still completed; see AI debug details for the model name."
         if category == "unsupported_structured_output":
             return "AI review was not completed because the provider rejected the structured-output request format. The deterministic review and exports were still completed; see AI debug details."
+        if category == "network_dns":
+            return "AI review was not completed because the AI provider host could not be resolved. Check OPENAI_BASE_URL, provider DNS, and deployment network egress. The deterministic review and exports were still completed."
         if category in {"rate_limit", "timeout", "temporary_service_error", "busy"}:
             return "AI review was not completed after automatic retry attempts because the AI service remained busy or rate-limited. The deterministic review and exports were still completed. Use Retry AI Review to run only the AI layer again."
         return "AI review was not completed. The deterministic review and exports were still completed; see AI debug details for the provider error."

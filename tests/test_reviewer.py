@@ -6136,6 +6136,21 @@ def test_ai_openai_call_uses_bounded_timeout(monkeypatch):
     assert captured["timeout"] < 60
 
 
+def test_ai_dns_resolution_error_is_classified_and_explained():
+    message = "<urlopen error [Errno -3] Temporary failure in name resolution>"
+
+    assert ai_policy_review._classify_ai_error(None, message) == "network_dns"
+
+    exc = ai_policy_review.AiProviderError(
+        message,
+        {"error_category": "network_dns", "error_message": message},
+    )
+    friendly = ai_policy_review._friendly_ai_error_message(exc)
+    assert "AI provider host could not be resolved" in friendly
+    assert "OPENAI_BASE_URL" in friendly
+    assert ai_combined_review._error_category(exc) == "network_dns"
+
+
 def test_ai_openai_call_retries_rate_limit_with_retry_after(monkeypatch):
     from urllib import error as url_error
 

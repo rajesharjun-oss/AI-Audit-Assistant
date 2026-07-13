@@ -12,6 +12,7 @@ from ai_policy_review import (
     MalformedAiResponseError,
     _call_openai,
     _friendly_ai_error_message,
+    _looks_like_dns_error,
     _normalize_confidence,
     _normalize_severity,
     _parse_response_json,
@@ -883,7 +884,7 @@ def _should_retry_without_structured_outputs(exc: Exception) -> bool:
 
 
 def _is_retryable_or_capacity_error(exc: Exception) -> bool:
-    return _error_category(exc) in {"rate_limit", "timeout", "temporary_service_error", "payload_too_large", "busy", "insufficient_quota", "unsupported_model", "unsupported_structured_output"}
+    return _error_category(exc) in {"rate_limit", "timeout", "temporary_service_error", "network_dns", "payload_too_large", "busy", "insufficient_quota", "unsupported_model", "unsupported_structured_output"}
 
 
 
@@ -895,6 +896,8 @@ def _error_category(exc: Exception) -> str:
         if category and category != "other":
             return category
         text = f"{text} {diagnostics.get('error_message', '')}".lower()
+    if _looks_like_dns_error(text):
+        return "network_dns"
     if "quota" in text or "billing" in text or "credit" in text:
         return "insufficient_quota"
     if any(marker in text for marker in ("json_schema", "response_format", "text.format", "structured output", "structured outputs", "schema validation")):
