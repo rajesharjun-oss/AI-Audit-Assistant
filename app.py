@@ -1203,10 +1203,17 @@ st.markdown(
 )
 
 st.markdown('<div class="upload-shell">', unsafe_allow_html=True)
-uploaded = st.file_uploader("Upload prepared financial statement PDF", type=["pdf"])
+uploaded_widget = st.file_uploader(
+    "Upload prepared financial statement PDF",
+    type=["pdf"],
+    key="prepared_financial_statement_pdf",
+)
 st.markdown("</div>", unsafe_allow_html=True)
+uploaded = uploaded_widget if uploaded_widget is not None else st.session_state.get("prepared_financial_statement_pdf")
+if isinstance(uploaded, list):
+    uploaded = uploaded[0] if uploaded else None
 
-if not uploaded:
+if uploaded is None:
     st.info("Upload a PDF to start the review.")
     st.stop()
 
@@ -1248,6 +1255,9 @@ deterministic_review_options = ReviewOptions(
     ai_review_mode=ai_review_mode,
 )
 uploaded_bytes = uploaded.getvalue()
+if not uploaded_bytes:
+    st.warning("The selected PDF did not upload cleanly. Remove it and upload the PDF again.")
+    st.stop()
 file_hash = hashlib.sha256(uploaded_bytes).hexdigest()
 settings_key = repr(
     (
