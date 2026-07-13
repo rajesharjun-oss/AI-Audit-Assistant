@@ -412,10 +412,7 @@ def _call_openai(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
                 req = request.Request(
                     endpoint,
                     data=json.dumps(request_payload).encode("utf-8"),
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=_openai_request_headers(api_key),
                     method="POST",
                 )
                 try:
@@ -521,7 +518,25 @@ def _openai_endpoint_styles() -> list[str]:
         return ["chat_completions"]
     if base.endswith("/responses"):
         return ["responses"]
+    if "agentrouter.org" in base:
+        return ["chat_completions", "responses"]
     return ["responses", "chat_completions"]
+
+
+def _openai_request_headers(api_key: str) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": os.getenv("OPENAI_USER_AGENT", "AI-Audit-Assistant/1.0 OpenAI-Compatible-Client").strip() or "AI-Audit-Assistant/1.0 OpenAI-Compatible-Client",
+    }
+    referer = os.getenv("OPENAI_HTTP_REFERER", "").strip()
+    if referer:
+        headers["HTTP-Referer"] = referer
+    app_title = os.getenv("OPENAI_APP_TITLE", "").strip()
+    if app_title:
+        headers["X-Title"] = app_title
+    return headers
 
 
 def _openai_endpoint_for_style(style: str) -> str:

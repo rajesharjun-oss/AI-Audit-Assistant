@@ -6137,6 +6137,25 @@ def test_ai_openai_call_uses_bounded_timeout(monkeypatch):
     assert captured["timeout"] < 60
 
 
+def test_agentrouter_defaults_to_chat_completions_and_api_headers(monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://agentrouter.org/v1")
+    monkeypatch.delenv("OPENAI_API_STYLE", raising=False)
+    monkeypatch.setenv("OPENAI_USER_AGENT", "AuditAssistantTest/1.0")
+    monkeypatch.setenv("OPENAI_HTTP_REFERER", "https://example.test")
+    monkeypatch.setenv("OPENAI_APP_TITLE", "AI Audit Assistant")
+
+    assert ai_policy_review._openai_endpoint_styles()[0] == "chat_completions"
+    assert ai_policy_review._openai_endpoint_for_style("chat_completions") == "https://agentrouter.org/v1/chat/completions"
+
+    headers = ai_policy_review._openai_request_headers("test-key")
+    assert headers["Authorization"] == "Bearer test-key"
+    assert headers["Accept"] == "application/json"
+    assert headers["Content-Type"] == "application/json"
+    assert headers["User-Agent"] == "AuditAssistantTest/1.0"
+    assert headers["HTTP-Referer"] == "https://example.test"
+    assert headers["X-Title"] == "AI Audit Assistant"
+
+
 def test_ai_openai_call_falls_back_to_chat_completions_for_empty_router_response(monkeypatch):
     calls = []
 
