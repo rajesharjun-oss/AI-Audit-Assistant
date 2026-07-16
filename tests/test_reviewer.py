@@ -2670,6 +2670,116 @@ def test_note_reference_compatibility_does_not_flag_matching_generic_heading():
     assert not any("possible wrong note reference" in finding.issue.lower() for finding in findings)
 
 
+def test_note_reference_compatibility_flags_deposit_for_shares_mismatch():
+    filler = "Statement narrative text for extraction confidence. " * 80
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nDeposit for shares 25 500 450\n" + filler, []),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "25 Investment property",
+                        "Fair value property 1,000 900",
+                        "26 Deposit for shares",
+                        "Share deposit 500 450",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    wrong_ref = [finding for finding in findings if "note heading mismatch" in finding.issue.lower()]
+    assert wrong_ref
+    assert "Deposit For Shares references Note 25" in wrong_ref[0].issue
+    assert "Note 26" in wrong_ref[0].issue
+    assert wrong_ref[0].metadata["suggested_note"] == "26"
+
+
+def test_note_reference_compatibility_accepts_deposit_for_shares_heading():
+    filler = "Statement narrative text for extraction confidence. " * 80
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nDeposit for shares 26 500 450\n" + filler, []),
+            PdfPage(
+                2,
+                "Notes to the financial statements\n26 Deposit for shares\nShare deposit 500 450",
+                [],
+            ),
+        ]
+    )
+
+    findings = check_notes_agreement(document)
+
+    assert not any("note heading mismatch" in finding.issue.lower() for finding in findings)
+    assert not any("possible wrong note reference" in finding.issue.lower() for finding in findings)
+
+
+def test_note_agreement_results_include_compatibility_diagnostics(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nDeposit for shares 25 500 450\n" + ("Primary context. " * 80), []),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "25 Investment property",
+                        "Investment property 1,000 900",
+                        "26 Deposit for shares",
+                        "Share deposit 500 450",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Deposit For Shares")
+
+    assert row["Referenced note heading"] == "Investment property"
+    assert row["Note compatibility rule"] == "deposit for shares"
+    assert row["Referenced heading compatible?"] == "No"
+    assert row["Suggested note heading"] == "Deposit for shares"
+    assert row["Suggested note compatible?"] == "Yes"
+    assert "not compatible" in row["Compatibility reason"]
+
+
+def test_note_compatibility_v2_does_not_suggest_amount_only_note(monkeypatch):
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of financial position\nDeposit for shares 25 500 450\n" + ("Primary context. " * 80), []),
+            PdfPage(
+                2,
+                "\n".join(
+                    [
+                        "Notes to the financial statements",
+                        "25 Deposit for shares",
+                        "Share deposit schedule awaiting final amount 100 90",
+                        "26 Investment property",
+                        "Property movement 500 450",
+                    ]
+                ),
+                [],
+            ),
+        ]
+    )
+    monkeypatch.setattr(reviewer, "extract_pdf", lambda _path: document)
+
+    result = review_pdf("unused.pdf", options=ReviewOptions(run_cautious_note_agreement=True))
+    row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Deposit For Shares")
+
+    assert row["Referenced heading compatible?"] == "Yes"
+    assert row["Alternative note found"] == ""
+    assert not any(finding.metadata and finding.metadata.get("suggested_note") == "26" for finding in result.findings)
+
+
 def test_wrong_note_reference_check_respects_low_confidence_gate():
     document = PdfDocument(
         [

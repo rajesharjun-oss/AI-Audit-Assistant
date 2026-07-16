@@ -145,17 +145,41 @@ NOTE_COMPATIBILITY_RULES: dict[str, dict[str, tuple[str, ...]]] = {
         "line": ("share capital", "ordinary shares", "issued capital"),
         "heading": ("share capital", "ordinary shares", "issued capital"),
     },
+    "deposit for shares": {
+        "line": ("deposit for shares", "share deposit", "shares deposit", "deposit on shares", "deposit towards shares"),
+        "heading": ("deposit for shares", "share deposit", "shares deposit", "deposit on shares", "deposit towards shares"),
+    },
+    "dividends": {
+        "line": ("dividend", "dividends", "distribution to owners", "distribution to shareholders"),
+        "heading": ("dividend", "dividends", "distribution to owners", "distribution to shareholders"),
+    },
+    "leases": {
+        "line": ("lease liability", "lease liabilities", "right of use asset", "right-of-use asset", "rou asset", "lease expense"),
+        "heading": ("lease liability", "lease liabilities", "right of use asset", "right-of-use asset", "rou asset", "lease expense", "leases"),
+    },
     "borrowings": {
-        "line": ("borrowings", "loans", "financial liabilities", "lease liabilities", "bank overdraft"),
-        "heading": ("borrowings", "loans", "financial liabilities", "lease liabilities", "bank overdraft"),
+        "line": ("borrowings", "loans", "financial liabilities", "bank overdraft", "overdraft"),
+        "heading": ("borrowings", "loans", "financial liabilities", "bank overdraft", "overdraft"),
     },
     "trade payables": {
         "line": ("trade payables", "other payables", "trade other payables", "payables", "accruals", "contract liabilities"),
         "heading": ("trade payables", "other payables", "trade other payables", "payables", "accruals", "contract liabilities"),
     },
+    "provisions": {
+        "line": ("provision", "provisions", "legal provision", "warranty provision", "decommissioning"),
+        "heading": ("provision", "provisions", "legal provision", "warranty provision", "decommissioning"),
+    },
+    "deferred income": {
+        "line": ("deferred income", "contract liabilities", "contract liability", "advance from customers", "customer advances"),
+        "heading": ("deferred income", "contract liabilities", "contract liability", "advance from customers", "customer advances"),
+    },
+    "deferred tax": {
+        "line": ("deferred tax", "deferred tax asset", "deferred tax liability"),
+        "heading": ("deferred tax", "deferred tax asset", "deferred tax liability"),
+    },
     "tax": {
-        "line": ("tax", "taxation", "current tax", "deferred tax", "income tax"),
-        "heading": ("tax", "taxation", "current tax", "deferred tax", "income tax"),
+        "line": ("tax", "taxation", "current tax", "income tax", "tax payable", "tax receivable"),
+        "heading": ("tax", "taxation", "current tax", "income tax", "tax payable", "tax receivable"),
     },
     "revenue": {
         "line": ("revenue", "operating income", "turnover", "sales", "income property", "rental income"),
@@ -165,9 +189,29 @@ NOTE_COMPATIBILITY_RULES: dict[str, dict[str, tuple[str, ...]]] = {
         "line": ("direct costs", "cost sales", "cost revenue"),
         "heading": ("direct costs", "cost sales", "cost revenue"),
     },
+    "employee benefits": {
+        "line": ("employee benefit", "employee benefits", "staff costs", "personnel costs", "salaries", "wages", "payroll", "pension"),
+        "heading": ("employee benefit", "employee benefits", "staff costs", "personnel costs", "salaries", "wages", "payroll", "pension"),
+    },
+    "impairment": {
+        "line": ("impairment", "expected credit loss", "ecl", "credit loss", "loss allowance"),
+        "heading": ("impairment", "expected credit loss", "ecl", "credit loss", "loss allowance"),
+    },
+    "fair value gains": {
+        "line": ("fair value gain", "fair value loss", "other operating gains", "operating gains", "gain on investment"),
+        "heading": ("fair value gain", "fair value loss", "other operating gains", "operating gains", "gain on investment"),
+    },
+    "other operating income": {
+        "line": ("other operating income", "other income", "miscellaneous income"),
+        "heading": ("other operating income", "other income", "miscellaneous income"),
+    },
     "administrative expenses": {
         "line": ("administrative expenses", "admin expenses", "operating expenses"),
         "heading": ("administrative expenses", "admin expenses", "operating expenses"),
+    },
+    "selling and distribution expenses": {
+        "line": ("selling expenses", "distribution expenses", "marketing expenses", "selling and distribution"),
+        "heading": ("selling expenses", "distribution expenses", "marketing expenses", "selling and distribution"),
     },
     "finance cost": {
         "line": ("finance cost", "finance costs", "interest expense"),
@@ -1956,9 +2000,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     statement_lines = _statement_note_lines(document)
     if not statement_lines:
-        labelled_rows = _apply_reviewer_page_labels_to_note_rows(document, rows)
-        setattr(document, "_note_agreement_result_rows_cache", labelled_rows)
-        return labelled_rows
+        return _finalize_note_agreement_result_rows(document, rows)
     if document.ocr_used:
         headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
         page_ranges = _note_section_page_ranges(document)
@@ -2032,7 +2074,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                     "heading match" if review_prompt else "heading match debug" if alternative_ref else "",
                 )
             )
-        return rows
+        return _finalize_note_agreement_result_rows(document, rows)
     note_sections = _note_sections(document)
     headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
     page_ranges = _note_section_page_ranges(document)
@@ -2180,9 +2222,7 @@ def _note_agreement_result_rows(document: PdfDocument) -> list[dict[str, str]]:
                 f"heading match / {matching_method or 'normalized amount'}" if alternative_ref else (matching_method or "not found"),
             )
         )
-    labelled_rows = _apply_reviewer_page_labels_to_note_rows(document, rows)
-    setattr(document, "_note_agreement_result_rows_cache", labelled_rows)
-    return labelled_rows
+    return _finalize_note_agreement_result_rows(document, rows)
 
 
 def _filtered_note_agreement_rows(document: PdfDocument, findings: list[Finding] | None = None) -> list[dict[str, str]]:
@@ -2331,6 +2371,87 @@ def _format_page_set(pages: set[int]) -> str:
     ranges.append(str(start) if start == previous else f"{start}-{previous}")
     label = "Page" if len(ordered) == 1 else "Pages"
     return f"{label} {', '.join(ranges)}"
+
+
+def _finalize_note_agreement_result_rows(document: PdfDocument, rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    enriched_rows = _enrich_note_agreement_rows(document, rows)
+    labelled_rows = _apply_reviewer_page_labels_to_note_rows(document, enriched_rows)
+    setattr(document, "_note_agreement_result_rows_cache", labelled_rows)
+    return labelled_rows
+
+
+def _enrich_note_agreement_rows(document: PdfDocument, rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    if not rows:
+        return rows
+    headings = {ref: title for ref, (title, _page_number) in _note_headings_by_page(document).items()}
+    note_sections = _note_sections(document) if headings else {}
+    for row in rows:
+        line_item = str(row.get("Line item") or row.get("Line item description") or "").strip()
+        referenced_ref = str(row.get("Referenced note") or row.get("Note number") or "").strip().upper()
+        suggested_ref = str(row.get("Alternative note found") or row.get("Suggested note") or "").strip().upper()
+        referenced_heading = _get_note_heading_with_fallback(referenced_ref, headings) if referenced_ref else ""
+        suggested_heading = _get_note_heading_with_fallback(suggested_ref, headings) if suggested_ref else ""
+        referenced_section = _get_note_section_with_fallback(referenced_ref, note_sections, document) if referenced_ref else ""
+        suggested_section = _get_note_section_with_fallback(suggested_ref, note_sections, document) if suggested_ref else ""
+        rule_name = _note_compatibility_rule(line_item)
+        referenced_status = _note_heading_compatibility_status(line_item, referenced_ref, referenced_heading, referenced_section)
+        suggested_status = _note_heading_compatibility_status(line_item, suggested_ref, suggested_heading, suggested_section)
+        row["Referenced note heading"] = referenced_heading
+        row["Note compatibility rule"] = rule_name
+        row["Referenced heading compatible?"] = referenced_status
+        row["Suggested note heading"] = suggested_heading
+        row["Suggested note compatible?"] = suggested_status
+        row["Compatibility reason"] = _note_compatibility_reason(
+            line_item,
+            referenced_ref,
+            referenced_heading,
+            referenced_status,
+            suggested_ref,
+            suggested_heading,
+            suggested_status,
+            rule_name,
+        )
+    return rows
+
+
+def _note_heading_compatibility_status(line_item: str, ref: str, heading: str, section: str = "") -> str:
+    if not ref:
+        return "N/A"
+    if not heading:
+        return "Not detected"
+    if not _note_compatibility_rule(line_item):
+        return "Not tested"
+    return "Yes" if _note_heading_semantically_compatible(line_item, heading, section) else "No"
+
+
+def _note_compatibility_reason(
+    line_item: str,
+    referenced_ref: str,
+    referenced_heading: str,
+    referenced_status: str,
+    suggested_ref: str,
+    suggested_heading: str,
+    suggested_status: str,
+    rule_name: str,
+) -> str:
+    if not referenced_ref:
+        return "No note reference was detected on the face statement row."
+    if referenced_status == "Not detected":
+        base = "Referenced note heading was not detected."
+    elif referenced_status == "Not tested":
+        base = "No specific note-heading compatibility rule matched; amount and wording checks were used."
+    elif referenced_status == "Yes":
+        base = f"Referenced note heading is compatible with the {rule_name} line item."
+    else:
+        base = f"Referenced note heading is not compatible with the {rule_name} line item."
+    if suggested_ref:
+        suggested_label = suggested_heading or "heading not detected"
+        if suggested_status == "Yes":
+            return f"{base} Suggested Note {suggested_ref} ('{suggested_label}') is compatible."
+        if suggested_status == "No":
+            return f"{base} Suggested Note {suggested_ref} ('{suggested_label}') is not compatible; treat as weak/debug only."
+        return f"{base} Suggested Note {suggested_ref} ('{suggested_label}') was not compatibility-tested."
+    return base
 
 
 def _note_agreement_result_row(
