@@ -194,6 +194,15 @@ def build_excel_export(result) -> bytes:
         pd.DataFrame(date_rows).to_excel(writer, sheet_name="Date consistency", index=False)
         pd.DataFrame(grammar_rows).to_excel(writer, sheet_name="Grammar review", index=False)
 
+        canonical_check_rows = result.metrics.get("canonical_recalculation_checks", []) or [{"Check": "None", "Status": "Not tested", "Recommendation": "No canonical recalculation checks were available."}]
+        canonical_audit_rows = result.metrics.get("canonical_extraction_audit", []) or [{"Page": "None", "Reason": "No canonical statement facts were parsed."}]
+        deterministic_section_rows = result.metrics.get("deterministic_section_map", []) or [{"Page": "None", "Section": "No section map available"}]
+        deterministic_table_rows = result.metrics.get("deterministic_table_classification", []) or [{"Page": "None", "Table type": "No table classification available"}]
+        pd.DataFrame(canonical_check_rows).to_excel(writer, sheet_name="Canonical recalculation checks", index=False)
+        pd.DataFrame(canonical_audit_rows).to_excel(writer, sheet_name="Canonical extraction audit", index=False)
+        pd.DataFrame(deterministic_section_rows).to_excel(writer, sheet_name="Deterministic section map", index=False)
+        pd.DataFrame(deterministic_table_rows).to_excel(writer, sheet_name="Table classification", index=False)
+
         pd.DataFrame(check_results).to_excel(writer, sheet_name="Checks results", index=False)
         pd.DataFrame(checks_performed).to_excel(writer, sheet_name="Checks performed", index=False)
         pd.DataFrame(checks_skipped).to_excel(writer, sheet_name="Checks skipped", index=False)
@@ -234,6 +243,10 @@ def build_excel_export(result) -> bytes:
         format_excel_table_sheet(writer.book["Name consistency"], "NameConsistency")
         format_excel_table_sheet(writer.book["Date consistency"], "DateConsistency")
         format_excel_table_sheet(writer.book["Grammar review"], "GrammarReview")
+        format_excel_table_sheet(writer.book["Canonical recalculation checks"], "CanonicalRecalculationChecks")
+        format_excel_table_sheet(writer.book["Canonical extraction audit"], "CanonicalExtractionAudit")
+        format_excel_table_sheet(writer.book["Deterministic section map"], "DeterministicSectionMap")
+        format_excel_table_sheet(writer.book["Table classification"], "TableClassification")
         format_excel_table_sheet(writer.book["Checks results"], "ChecksResults")
         format_excel_table_sheet(writer.book["Skipped checks summary"], "SkippedChecksSummary")
         format_excel_table_sheet(writer.book["Skipped table details"], "SkippedTableDetails")

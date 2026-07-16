@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from canonical_extraction import extract_statement_facts, facts_for, note_heading_map
+from canonical_extraction import document_section_map, extract_statement_facts, facts_for, note_heading_map, table_classification_rows
 from models import PdfDocument, PdfPage
 
 
@@ -45,3 +45,27 @@ def test_note_heading_map_ignores_numbered_front_matter_before_notes_section():
     assert headings["3"] == "Investment property"
     assert "7" not in headings
     assert "11" not in headings
+
+
+def test_document_section_map_and_table_classification_are_generic():
+    doc = PdfDocument([
+        PdfPage(1, "Contents\nStatement of financial position 5\nNotes to the financial statements 12", []),
+        PdfPage(2, "Directors' report\n7 Directors' interests in shares", []),
+        PdfPage(
+            5,
+            "Example Limited\nStatement of financial position\n2025 2024\nNon-current assets 60 50\nCurrent assets 40 40\nTotal assets 100 90",
+            [["", "2025", "2024"], ["Non-current assets", "60", "50"], ["Current assets", "40", "40"], ["Total assets", "100", "90"]],
+        ),
+        PdfPage(12, "Notes to the Financial Statements\n1. Significant accounting policies\n3 Property, plant and equipment", []),
+        PdfPage(30, "Five-year financial summary\nRevenue 1 2 3 4 5", [["Revenue", "1", "2", "3", "4", "5"]]),
+    ])
+    section_rows = document_section_map(doc)
+    assert section_rows[0]["Section"] == "Contents"
+    assert section_rows[1]["Section"] == "Front matter / reports"
+    assert section_rows[2]["Section"] == "Primary statement"
+    assert section_rows[3]["Section"] == "Notes to the financial statements"
+    assert section_rows[4]["Section"] == "Supplementary schedule"
+
+    table_rows = table_classification_rows(doc)
+    assert any(row["Table type"] == "Primary statement table" for row in table_rows)
+    assert any(row["Table type"] == "Supplementary schedule" for row in table_rows)

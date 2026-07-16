@@ -14,6 +14,7 @@ from policy_reviewer import review_notes_1_and_2
 from ai_review_pipeline import AiReviewContext, run_ai_review_pipeline
 from extraction import extract_pdf, extract_pdf_with_ocr
 from canonical_checks import run_canonical_checks
+from canonical_extraction import document_section_map, table_classification_rows
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?")
@@ -1127,6 +1128,8 @@ def _build_result(
         "check_results": check_result_rows,
         "canonical_recalculation_checks": canonical_check_rows,
         "canonical_extraction_audit": canonical_audit_rows,
+        "deterministic_section_map": document_section_map(document),
+        "deterministic_table_classification": table_classification_rows(document),
         "cross_page_export": cross_page_export or {},
         "policy_export": policy_export or [],
         "ai_review_status": ai_overall_status,

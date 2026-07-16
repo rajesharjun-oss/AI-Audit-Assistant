@@ -11,19 +11,36 @@ TOLERANCE = Decimal("1")
 NOTE_HEADING_KEYWORDS: dict[str, tuple[str, ...]] = {
     "cash and cash equivalents": ("cash", "bank", "cash equivalent"),
     "bank overdraft": ("cash", "bank", "overdraft"),
-    "property, plant and equipment": ("property", "plant", "equipment", "ppe"),
+    "property, plant and equipment": ("property", "plant", "equipment", "ppe", "fixed asset"),
+    "intangible assets": ("intangible", "software", "amortisation", "amortization"),
+    "investment property": ("investment property", "investment properties", "property"),
+    "inventories": ("inventor", "stock"),
+    "trade and other receivables": ("receivable", "debtor", "trade and other receivables"),
+    "other financial assets": ("financial asset", "investment", "treasury", "securities"),
     "current assets": ("asset",),
     "non-current assets": ("asset",),
     "total assets": ("asset",),
+    "current liabilities": ("liabilit", "payable", "borrow", "loan"),
+    "non-current liabilities": ("liabilit", "borrow", "loan"),
+    "total liabilities": ("liabilit", "borrow", "loan", "payable"),
+    "trade and other payables": ("payable", "creditor", "trade and other payables"),
     "current tax payable": ("current tax", "tax payable", "tax"),
-    "share capital": ("share capital", "ordinary share"),
-    "deposit for shares": ("deposit for shares",),
-    "retained earnings": ("retained", "earning", "loss"),
-    "revenue": ("revenue", "interest income", "income"),
-    "project costs": ("project cost", "cost", "interest expense"),
-    "finance costs": ("finance cost", "interest expense"),
-    "taxation": ("tax", "taxation"),
-    "profit after tax": ("profit", "loss"),
+    "share capital": ("share capital", "ordinary share", "issued capital"),
+    "deposit for shares": ("deposit for shares", "share deposit", "deposit"),
+    "retained earnings": ("retained", "earning", "loss", "reserve"),
+    "opening equity": ("equity", "reserve", "accumulated fund", "retained"),
+    "closing equity": ("equity", "reserve", "accumulated fund", "retained"),
+    "dividends": ("dividend",),
+    "issue of shares": ("share", "capital"),
+    "revenue": ("revenue", "rental income", "operating income", "turnover", "income from property", "other operating income", "interest income"),
+    "project costs": ("project cost", "cost", "direct cost", "cost of sales", "interest expense"),
+    "gross profit": ("gross profit", "net interest", "margin"),
+    "operating profit": ("operating profit", "operating loss"),
+    "finance costs": ("finance cost", "interest expense", "borrowing cost"),
+    "profit before tax": ("profit before tax", "profit before taxation", "loss before tax", "loss before taxation"),
+    "taxation": ("tax", "taxation", "income tax"),
+    "profit after tax": ("profit", "loss", "result for the year"),
+    "total comprehensive income": ("comprehensive", "profit", "loss"),
 }
 
 
@@ -32,6 +49,7 @@ def run_canonical_checks(document: PdfDocument, facts: list[StatementFact] | Non
     results: list[ReconciliationCheckResult] = []
     results.extend(check_statement_of_financial_position(facts))
     results.extend(check_profit_or_loss(facts))
+    results.extend(check_changes_in_equity(facts))
     results.extend(check_cash_flow(facts))
     results.extend(check_note_references(document, facts))
     findings = [_finding_from_result(result) for result in results if result.status == "Fail"]
@@ -76,6 +94,42 @@ def check_profit_or_loss(facts: list[StatementFact]) -> list[ReconciliationCheck
     return [result for result in results if result.status != "Not tested"]
 
 
+def check_changes_in_equity(facts: list[StatementFact]) -> list[ReconciliationCheckResult]:
+    equity_facts = [fact for fact in facts if "changes in equity" in fact.statement.lower() or "accumulated fund" in fact.statement.lower()]
+    if not equity_facts:
+        return []
+    pl_facts = [fact for fact in facts if "profit or loss" in fact.statement.lower() or "comprehensive income" in fact.statement.lower()]
+    pairs = sorted({(fact.entity, fact.year) for fact in equity_facts})
+    results: list[ReconciliationCheckResult] = []
+    for entity, year in pairs:
+        opening = _one(equity_facts, "opening equity", entity, year)
+        closing = _one(equity_facts, "closing equity", entity, year) or _one(equity_facts, "total equity", entity, year)
+        result_for_year = _one(equity_facts, "profit after tax", entity, year) or _one(pl_facts, "profit after tax", entity, year)
+        oci = _one(equity_facts, "other comprehensive income", entity, year) or _one(equity_facts, "total comprehensive income", entity, year)
+        dividends = _one(equity_facts, "dividends", entity, year)
+        share_issue = _one(equity_facts, "issue of shares", entity, year)
+        movements = [fact for fact in (result_for_year, oci, dividends, share_issue) if fact is not None]
+        if not opening or not closing or not movements:
+            continue
+        expected = opening.amount + sum((fact.amount for fact in movements), Decimal("0"))
+        labels = ["opening equity", *(fact.canonical_line_item for fact in movements)]
+        results.append(
+            _calculated_result(
+                "Changes in equity closing balance cast",
+                "Statement of changes in equity",
+                entity,
+                year,
+                closing,
+                expected,
+                " + ".join(labels),
+                [opening, *movements, closing],
+                "Equity movement",
+                "Medium",
+            )
+        )
+    return results
+
+
 def check_cash_flow(facts: list[StatementFact]) -> list[ReconciliationCheckResult]:
     cf_facts = [fact for fact in facts if "cash flow" in fact.statement.lower()]
     sfp_facts = [fact for fact in facts if "financial position" in fact.statement.lower()]
@@ -103,11 +157,13 @@ def check_cash_flow(facts: list[StatementFact]) -> list[ReconciliationCheckResul
 
 def check_note_references(document: PdfDocument, facts: list[StatementFact]) -> list[ReconciliationCheckResult]:
     headings = note_heading_map(document)
-    primary = [fact for fact in facts if any(marker in fact.statement.lower() for marker in ("financial position", "profit or loss", "cash flow"))]
+    primary = [fact for fact in facts if any(marker in fact.statement.lower() for marker in ("financial position", "profit or loss", "comprehensive income", "cash flow"))]
     results: list[ReconciliationCheckResult] = []
     seen: set[tuple[int, str, str, str]] = set()
     for fact in primary:
         if not fact.note_ref:
+            continue
+        if _cash_flow_subtotal_without_note_detail(fact):
             continue
         key = (fact.source_page, fact.statement, fact.line_item, fact.note_ref)
         if key in seen:
@@ -162,3 +218,17 @@ def _heading_compatible(canonical_line_item: str, heading: str) -> bool:
         return True
     heading_norm = heading.lower().replace("-", " ")
     return any(keyword.lower() in heading_norm for keyword in keywords)
+
+
+def _cash_flow_subtotal_without_note_detail(fact: StatementFact) -> bool:
+    if "cash flow" not in fact.statement.lower():
+        return False
+    label = fact.canonical_line_item or fact.line_item.lower()
+    return label in {
+        "net cash from operating activities",
+        "net cash from investing activities",
+        "net cash from financing activities",
+        "net movement in cash",
+        "cash at beginning",
+        "effect of exchange rate movement",
+    }

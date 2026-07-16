@@ -6579,3 +6579,5 @@ Total equity and liabilities 100 90
         for row in result.metrics.get("check_results", [])
     )
     assert result.metrics.get("canonical_extraction_audit")
+    assert result.metrics.get("deterministic_section_map")
+    assert result.metrics.get("deterministic_table_classification")

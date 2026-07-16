@@ -21,6 +21,11 @@ LINE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("cash at beginning", ("cash at beginning", "cash at the beginning of the year", "cash and cash equivalents at the beginning of the year")),
     ("bank overdraft", ("bank overdraft", "overdraft")),
     ("property, plant and equipment", ("property plant and equipment", "property, plant and equipment", "ppe")),
+    ("intangible assets", ("intangible assets", "intangible asset", "software", "computer software")),
+    ("investment property", ("investment property", "investment properties")),
+    ("inventories", ("inventories", "inventory", "stock")),
+    ("trade and other receivables", ("trade and other receivables", "trade receivables", "other receivables", "receivables")),
+    ("other financial assets", ("other financial assets", "financial assets", "investment securities")),
     ("current assets", ("current assets", "total current assets")),
     ("non-current assets", ("non current assets", "non-current assets", "total non current assets", "total non-current assets")),
     ("total assets", ("total assets",)),
@@ -32,6 +37,11 @@ LINE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("share capital", ("share capital", "issued share capital")),
     ("deposit for shares", ("deposit for shares",)),
     ("retained earnings", ("retained earnings", "retained losses", "retained income", "accumulated losses")),
+    ("opening equity", ("balance at 1 january", "balance at beginning", "opening balance", "at 1 january", "as at 1 january")),
+    ("closing equity", ("balance at 31 december", "balance at end", "closing balance", "at 31 december", "as at 31 december")),
+    ("dividends", ("dividend", "dividends", "dividend paid", "dividends paid")),
+    ("issue of shares", ("issue of shares", "shares issued", "share issue", "proceeds from issue of shares")),
+    ("other comprehensive income", ("other comprehensive income", "other comprehensive loss")),
     ("revenue", ("revenue", "interest income", "income", "turnover", "gross earnings")),
     ("project costs", ("project costs", "project cost", "cost of sales", "interest expense", "direct costs")),
     ("gross profit", ("gross profit", "net interest loss", "net interest income")),
@@ -58,6 +68,7 @@ SECTION_LINES = {
 
 YEAR_RE = re.compile(r"\b20\d{2}\b")
 NOTE_REF_RE = re.compile(r"\b(?:note\(?s?\)?|notes?)\s*(\d+[A-Za-z]?)\b", re.I)
+NUMBER_RE = re.compile(r"\(?-?\d{1,3}(?:,\d{3})+|\(?-?\d+(?:\.\d+)?\)?")
 AMOUNT_START_RE = re.compile(r"\(?-?\d{1,3}(?:,\d{3})+|\(?-?\d+(?:\.\d+)?\)?|(?<![A-Za-z])[-–—](?![A-Za-z])")
 
 
@@ -110,6 +121,125 @@ def extraction_audit_rows(document: PdfDocument, facts: list[StatementFact] | No
         if statement:
             rows.append({"Page": page.number, "Statement / note": statement, "Reason": "Statement page detected, but no canonical facts parsed."})
     return rows
+
+
+def document_section_map(document: PdfDocument) -> list[dict[str, object]]:
+    """Classify every page into a reusable financial-statement section map."""
+    notes_start = _notes_section_start_page(document)
+    primary_pages = {page.number for page in document.pages if classify_statement_page(page)}
+    rows: list[dict[str, object]] = []
+    notes_ended = False
+    for page in document.pages:
+        statement = classify_statement_page(page)
+        normalized = _normalise_words(page.text)
+        snippet = re.sub(r"\s+", " ", page.text or "").strip()[:260]
+        section = "Unknown / narrative"
+        confidence = "Low"
+        reason = "No strong section heading detected."
+        if any(marker in normalized for marker in ("contents", "table contents")) and page.number <= 5:
+            section = "Contents"
+            confidence = "High"
+            reason = "Contents heading appears in front matter."
+        elif statement:
+            section = "Primary statement" if statement not in {"Value added statement", "Five-year financial summary"} else "Supplementary schedule"
+            confidence = "High"
+            reason = f"Detected {statement} heading."
+        elif notes_start and page.number >= notes_start and not notes_ended:
+            section = "Notes to the financial statements"
+            confidence = "Medium"
+            reason = f"Page is at or after detected notes start page {notes_start}."
+            if any(_line_ends_notes_section(line) for line in page.text.splitlines()):
+                notes_ended = True
+        elif page.number < (notes_start or 10**9) and any(marker in normalized for marker in ("directors report", "corporate information", "independent auditor", "audit report")):
+            section = "Front matter / reports"
+            confidence = "High"
+            reason = "Directors, corporate information, or auditor report wording detected before notes."
+        elif any(marker in normalized for marker in ("value added statement", "five year financial summary", "5 year financial summary")):
+            section = "Supplementary schedule"
+            confidence = "High"
+            reason = "Value-added or five-year summary wording detected."
+        elif page.number in primary_pages:
+            section = "Primary statement"
+            confidence = "Medium"
+            reason = "Page previously classified as a primary statement."
+        rows.append(
+            {
+                "Page": page.number,
+                "Section": section,
+                "Statement": statement,
+                "Confidence": confidence,
+                "Reason": reason,
+                "Text snippet": snippet,
+            }
+        )
+    return rows
+
+
+def table_classification_rows(document: PdfDocument) -> list[dict[str, object]]:
+    """Classify extracted table candidates before arithmetic checks are applied."""
+    notes_start = _notes_section_start_page(document)
+    rows: list[dict[str, object]] = []
+    for page in document.pages:
+        statement = classify_statement_page(page)
+        for index, table in enumerate(page.tables, start=1):
+            row_count = len(table or [])
+            col_count = max((len(row) for row in table), default=0)
+            flattened = " ".join(str(cell or "") for row in table for cell in row)
+            combined_norm = _normalise_words(f"{page.text[:1000]} {flattened}")
+            amount_cells = extract_amount_cells(flattened, reject_years=True, reject_small_note_refs=True, context=flattened)
+            merged_numeric_cells = sum(
+                1
+                for row in table
+                for cell in row[1:]
+                if len(NUMBER_RE.findall(str(cell or ""))) > 1
+            )
+            table_type = "Low-confidence / non-standard table"
+            confidence = "Low"
+            action = "Skip arithmetic"
+            reason = "Table does not have enough reliable amount cells for deterministic arithmetic."
+            if statement and statement not in {"Value added statement", "Five-year financial summary"} and amount_cells:
+                table_type = "Primary statement table"
+                confidence = "High" if merged_numeric_cells == 0 and row_count >= 4 else "Medium"
+                action = "Use for statement-specific checks only"
+                reason = f"Page classified as {statement}; table has {len(amount_cells)} amount cell(s)."
+            elif any(marker in combined_norm for marker in ("value added statement", "five year financial summary", "5 year financial summary")):
+                table_type = "Supplementary schedule"
+                confidence = "Medium"
+                action = "Exclude from normal casting"
+                reason = "Value-added or five-year summary tables have different presentation rules."
+            elif any(marker in combined_norm for marker in ("credit risk", "liquidity risk", "maturity", "ageing", "expected credit loss", "ecl")):
+                table_type = "Risk / maturity disclosure table"
+                confidence = "Medium"
+                action = "Exclude from normal casting unless a specific disclosure check applies"
+                reason = "Risk disclosure tables contain buckets and maturity bands, not simple subtotals."
+            elif notes_start and page.number >= notes_start and amount_cells:
+                table_type = "Note amount table"
+                confidence = "Medium" if merged_numeric_cells == 0 else "Low"
+                action = "Use cautiously for note agreement"
+                reason = f"Table appears inside notes section from page {notes_start}."
+            elif amount_cells:
+                table_type = "Narrative amount table"
+                confidence = "Low"
+                action = "Manual review"
+                reason = "Amounts detected outside primary statements/notes; avoid automatic casting."
+            rows.append(
+                {
+                    "Page": page.number,
+                    "Table index": index,
+                    "Table type": table_type,
+                    "Statement": statement,
+                    "Confidence": confidence,
+                    "Recommended action": action,
+                    "Reason": reason,
+                    "Rows": row_count,
+                    "Columns": col_count,
+                    "Amount cells": len(amount_cells),
+                    "Merged numeric cells": merged_numeric_cells,
+                }
+            )
+    if rows:
+        return rows
+    return [{"Page": "None", "Table type": "No extracted table candidates", "Recommended action": "Use line-based extraction", "Reason": "No PDF table grids were available."}]
 
 
 def note_heading_map(document: PdfDocument) -> dict[str, str]:
@@ -298,7 +428,7 @@ def _split_note_ref(line: str, expected_amounts: int = 0) -> tuple[str, str, str
     match = re.match(r"^([A-Za-z][A-Za-z&/'() .,-]{2,}?)\s+(\d{1,2}[A-Za-z]?)\s+(.+)$", line)
     if match:
         label, ref, tail = match.groups()
-        if _valid_note_ref(ref) and AMOUNT_START_RE.search(tail[:12]):
+        if _valid_note_ref(ref) and AMOUNT_START_RE.match(tail.strip()):
             tail_cells = extract_amount_cells(tail, reject_years=True, reject_small_note_refs=False, context=line)
             if tail_cells and (not expected_amounts or len(tail_cells) >= expected_amounts):
                 return ref.upper(), label.strip(), tail.strip()
@@ -310,10 +440,19 @@ def clean_line_label(text: str) -> str:
     value = re.sub(r"\b(?:note\(?s?\)?|notes?|n'?000|ngn'?000|draft)\b", " ", value, flags=re.I)
     value = re.sub(r"\b20\d{2}\b", " ", value)
     value = re.sub(r"\s+", " ", value).strip(" -:.;")
-    amount_match = AMOUNT_START_RE.search(value)
+    amount_match = _first_amount_start_for_label(value)
     if amount_match:
         value = value[: amount_match.start()].strip(" -:.;")
     return value
+
+
+def _first_amount_start_for_label(value: str) -> re.Match[str] | None:
+    for match in AMOUNT_START_RE.finditer(value):
+        following = value[match.end() :].lstrip().lower()
+        if following.startswith(("january", "december")):
+            continue
+        return match
+    return None
 
 
 def canonical_line_item(label: str) -> str:
