@@ -1,0 +1,59 @@
+{
+  "name": "generic_contents_mismatch",
+  "profile": {
+    "company_name": "Generic Mismatch Limited",
+    "industry": "Services",
+    "reporting_currency": "NGN"
+  },
+  "options": {
+    "use_ai_policy_review": false,
+    "use_ai_full_review": false
+  },
+  "pages": [
+    {
+      "number": 1,
+      "text": "Contents\nStatement of Financial Position ................ 3\nStatement of Profit or Loss and Other Comprehensive Income ................ 5\n1"
+    },
+    {
+      "number": 3,
+      "text": "Generic Mismatch Limited\nStatement of Financial Position\n2025 2024\nN'000 N'000\nNon-current assets 60 50\nCurrent assets 40 40\nTotal assets 100 90\nTotal equity 30 30\nTotal liabilities 70 60\nTotal equity and liabilities 100 90\n3"
+    },
+    {
+      "number": 4,
+      "text": "Generic Mismatch Limited\nStatement of Profit or Loss and Other Comprehensive Income\n2025 2024\nN'000 N'000\nRevenue 200 180\nProject costs (100) (90)\nGross profit 100 90\nProfit before tax 80 70\nTaxation (10) (10)\nProfit after tax 70 60\n4"
+    },
+    {
+      "number": 5,
+      "text": "Generic Mismatch Limited\nNotes to the Financial Statements\n1. Significant accounting policies\nThis synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. This synthetic note text pads the fixture so extraction confidence is representative of a normal text-based financial statement. \n5"
+    }
+  ],
+  "assertions": {
+    "required_sheets": [
+      "Summary",
+      "Contents agreement",
+      "Findings summary",
+      "Exception register"
+    ],
+    "max_summary": {
+      "High findings": 0
+    },
+    "required_text": [
+      "Contents mismatch detected",
+      "Contents lists 'Statement of income and expenditure' on page 5, but extracted statement page is 4"
+    ],
+    "required_sheet_text": [
+      {
+        "sheet": "Contents agreement",
+        "contains": "Mismatch"
+      },
+      {
+        "sheet": "Exception register",
+        "contains": "Contents mismatch detected"
+      }
+    ],
+    "forbidden_text": [
+      "Note 2025",
+      "Directors' interests in shares"
+    ]
+  }
+}

@@ -6581,3 +6581,21 @@ Total equity and liabilities 100 90
     assert result.metrics.get("canonical_extraction_audit")
     assert result.metrics.get("deterministic_section_map")
     assert result.metrics.get("deterministic_table_classification")
+
+
+def test_contents_agreement_rows_use_printed_page_numbers_and_flag_mismatch():
+    document = PdfDocument([
+        PdfPage(1, "Contents\nStatement of Financial Position .... 3\nStatement of Profit or Loss .... 5\n1", []),
+        PdfPage(3, "Statement of Financial Position\n2025 2024\nTotal assets 100 90\nTotal equity and liabilities 100 90\n3", []),
+        PdfPage(4, "Statement of Profit or Loss\n2025 2024\nRevenue 100 90\nProfit before tax 10 9\nTaxation (1) (1)\nProfit after tax 9 8\n4", []),
+    ])
+
+    rows = reviewer._contents_statement_page_agreement_rows(document)
+
+    sfp = next(row for row in rows if row["Statement"] == "Statement of financial position")
+    pl = next(row for row in rows if row["Statement"] == "Statement of income and expenditure")
+    assert sfp["Status"] == "Passed"
+    assert sfp["Detected statement page"] == 3
+    assert pl["Status"] == "Mismatch"
+    assert pl["Contents page reference"] == 5
+    assert pl["Detected statement page"] == 4

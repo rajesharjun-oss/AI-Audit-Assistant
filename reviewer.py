@@ -1128,6 +1128,7 @@ def _build_result(
         "check_results": check_result_rows,
         "canonical_recalculation_checks": canonical_check_rows,
         "canonical_extraction_audit": canonical_audit_rows,
+        "contents_agreement": _contents_statement_page_agreement_rows(document),
         "deterministic_section_map": document_section_map(document),
         "deterministic_table_classification": table_classification_rows(document),
         "cross_page_export": cross_page_export or {},
@@ -5686,6 +5687,19 @@ def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
     cached = getattr(document, "_contents_statement_page_refs_cache", None)
     if isinstance(cached, dict):
         return cached
+    refs = {
+        statement: int(detail["contents_page_reference"])
+        for statement, detail in _contents_statement_page_ref_details(document).items()
+        if str(detail.get("contents_page_reference", "")).isdigit()
+    }
+    setattr(document, "_contents_statement_page_refs_cache", refs)
+    return refs
+
+
+def _contents_statement_page_ref_details(document: PdfDocument) -> dict[str, dict[str, object]]:
+    cached = getattr(document, "_contents_statement_page_ref_details_cache", None)
+    if isinstance(cached, dict):
+        return cached
     aliases = {
         "Statement of income and expenditure": (
             "statement of profit or loss and other comprehensive income",
@@ -5707,13 +5721,13 @@ def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
             "statement of cash flow",
         ),
     }
-    refs: dict[str, int] = {}
+    refs: dict[str, dict[str, object]] = {}
     front_matter_pages = document.pages[: min(len(document.pages), 15)]
     for page in front_matter_pages:
         if not _looks_like_contents_page(page.text):
             continue
         raw_lines = [re.sub(r"\s+", " ", line.strip()) for line in page.text.splitlines() if line.strip()]
-        # include a compact OCR-only reconstructed line set to recover broken lines.
+        # Include a compact OCR-only reconstructed line set to recover broken lines.
         raw_lines.extend(_flatten_wrapped_statements(page.text).splitlines()[:40])
         for raw_line in raw_lines[:140]:
             line = re.sub(r"\s+", " ", raw_line.strip())
@@ -5721,9 +5735,7 @@ def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
                 continue
             clean_line = re.sub(r"\.{2,}\s*", " ", line)
             page_ref = _extract_content_line_page_reference(clean_line, len(document.pages))
-            if page_ref is None:
-                continue
-            if page_ref < 1:
+            if page_ref is None or page_ref < 1:
                 continue
             normalised = _normalise_match_words(line)
             for canonical, candidates in aliases.items():
@@ -5734,11 +5746,17 @@ def _contents_statement_page_refs(document: PdfDocument) -> dict[str, int]:
                     if not normalized_candidate:
                         continue
                     if candidate.lower() in line.lower() or _fuzzy_contains(line, candidate, 0.82) or _fuzzy_contains(normalised, normalized_candidate, 0.82):
-                        refs[canonical] = page_ref
+                        refs[canonical] = {
+                            "statement": canonical,
+                            "contents_page_reference": page_ref,
+                            "contents_source_pdf_page": page.number,
+                            "contents_source_page": _reviewer_page_number(document, page.number),
+                            "contents_line": line,
+                        }
                         break
                 if canonical in refs:
                     break
-    setattr(document, "_contents_statement_page_refs_cache", refs)
+    setattr(document, "_contents_statement_page_ref_details_cache", refs)
     return refs
 
 def _physical_page_for_printed(document: PdfDocument, printed_page: int) -> int | None:
@@ -5753,47 +5771,85 @@ def _physical_page_for_printed(document: PdfDocument, printed_page: int) -> int 
     return None
 
 
+def _contents_statement_page_agreement_rows(document: PdfDocument) -> list[dict[str, object]]:
+    details = _contents_statement_page_ref_details(document)
+    if not details:
+        return []
+    classified = _classified_primary_statement_pages(document)
+    rows: list[dict[str, object]] = []
+    for canonical_name in sorted(details):
+        detail = details[canonical_name]
+        expected_page = int(detail.get("contents_page_reference") or 0)
+        detected = classified.get(canonical_name)
+        mapped = _physical_page_for_printed(document, expected_page) if expected_page else None
+        mapped_printed = _reviewer_page_number(document, mapped) if mapped else ""
+        detected_pdf_page = detected.number if detected else ""
+        detected_printed = _reviewer_page_number(document, detected.number) if detected else ""
+        status = "Skipped"
+        confidence = "Low"
+        reason = "Statement page was not confidently classified."
+        page_delta = ""
+        if detected and expected_page:
+            page_delta_value = int(detected_printed) - expected_page
+            page_delta = page_delta_value
+            if int(detected_printed) == expected_page or (mapped is not None and detected.number == mapped):
+                status = "Passed"
+                confidence = "High"
+                reason = "Detected statement page agrees to the contents page reference using printed-page mapping."
+            else:
+                status = "Mismatch"
+                confidence = "Low" if document.ocr_used else ("Medium" if document.table_extraction_confidence >= 80 else "Low")
+                mapping_note = "" if mapped is not None else " The contents reference could not be mapped to a physical PDF page, so the detected printed page was used."
+                reason = f"Contents lists page {expected_page}, but the statement was detected on page {detected_printed}.{mapping_note}"
+        rows.append(
+            {
+                "Statement": canonical_name,
+                "Contents page reference": expected_page or "",
+                "Detected statement page": detected_printed,
+                "Detected PDF page": detected_pdf_page,
+                "Mapped PDF page for contents reference": mapped or "",
+                "Mapped printed page": mapped_printed,
+                "Contents source page": detail.get("contents_source_page", ""),
+                "Contents source PDF page": detail.get("contents_source_pdf_page", ""),
+                "Contents line": detail.get("contents_line", ""),
+                "Status": status,
+                "Confidence": confidence,
+                "Page delta": page_delta,
+                "Reason": reason,
+            }
+        )
+    return rows
+
+
 def _contents_statement_page_agreement_note(
     document: PdfDocument,
 ) -> tuple[list[str], list[str], list[Finding]]:
     performed: list[str] = []
     skipped: list[str] = []
     findings: list[Finding] = []
-    references = _contents_statement_page_refs(document)
-    if not references:
+    rows = _contents_statement_page_agreement_rows(document)
+    if not rows:
         skipped.append("Contents agreement: skipped because statement references in contents were not detected.")
         return performed, skipped, findings
 
-    classified = _classified_primary_statement_pages(document)
     performed.append("Contents-page agreement was reviewed for detected primary statements.")
-
-    for canonical_name in sorted(references):
-        expected_page = references.get(canonical_name)
-        if expected_page is None:
-            continue
-        detected = classified.get(canonical_name)
-        if not detected:
-            skipped.append(
-                f"Contents agreement: '{canonical_name}' appears in contents (page {expected_page}) but its statement page was not detected."
-            )
-            continue
-
-        detected_printed = _reviewer_page_number(document, detected.number)
-        mapped = _physical_page_for_printed(document, expected_page)
-        if mapped is None:
-            skipped.append(
-                f"Contents agreement: could not map contents reference page {expected_page} for '{canonical_name}' to a document page."
-            )
-            continue
-
-        mapped_printed = _reviewer_page_number(document, mapped)
-        page_delta = detected_printed - expected_page
-        if detected_printed == expected_page or detected_printed == mapped_printed:
+    for row in rows:
+        canonical_name = str(row.get("Statement", ""))
+        expected_page = row.get("Contents page reference", "")
+        detected_printed = row.get("Detected statement page", "")
+        status = str(row.get("Status", ""))
+        reason = str(row.get("Reason", ""))
+        if status == "Passed":
             performed.append(
                 f"Contents agreement: '{canonical_name}' detected on page {detected_printed} and matches contents page {expected_page}."
             )
-        else:
-            confidence = "Low" if document.ocr_used else ("Medium" if document.table_extraction_confidence >= 80 else "Low")
+        elif status == "Skipped":
+            skipped.append(
+                f"Contents agreement: '{canonical_name}' appears in contents (page {expected_page}) but could not be fully validated. {reason}"
+            )
+        elif status == "Mismatch":
+            confidence = str(row.get("Confidence", "Low")) or "Low"
+            page_delta = row.get("Page delta", "")
             findings.append(
                 Finding(
                     "Document structure",
@@ -5801,20 +5857,18 @@ def _contents_statement_page_agreement_note(
                     f"Page {detected_printed} | Contents alignment",
                     "Contents mismatch detected.",
                     f"Contents lists '{canonical_name}' on page {expected_page}, but extracted statement page is {detected_printed}. Page offset from contents to extracted page is {page_delta:+d}.",
-                    "Verify page numbering interpretation and confirm if this is a cover page offset, rotated-page offset, or an index reference.",
+                    "Verify the contents page against the printed page number at the bottom of the statement page and update the contents reference if needed.",
                     {
                         "check_type": "Contents agreement",
                         "canonical_statement": canonical_name,
                         "contents_page": str(expected_page),
                         "detected_page": str(detected_printed),
-                        "mapped_page": str(mapped_printed),
+                        "mapped_page": str(row.get("Mapped printed page", "")),
                         "page_delta": str(page_delta),
+                        "page_reference": f"Page {detected_printed}",
                     },
                 )
             )
-
-    if not performed:
-        performed.append("Contents-page agreement could not be fully validated because statement pages were not confidently classified.")
 
     return performed, skipped, findings
 def _looks_like_contents_or_front_matter_page(text: str) -> bool:
