@@ -73,3 +73,42 @@ Total equity and liabilities 100 90
     ])
     findings, checks, audit = run_canonical_checks(doc)
     assert not any(check.check_name == "Face statement note reference compatibility" and check.status == "Fail" for check in checks)
+
+
+
+def test_note_heading_map_rejects_collapsed_policy_subsections_before_real_notes():
+    from canonical_extraction import note_heading_map
+
+    doc = PdfDocument([
+        PdfPage(1, "Statement of financial position\nCash 7 100 90", []),
+        PdfPage(2, "Statement of profit or loss\nRevenue 13 200 180", []),
+        PdfPage(3, "Statement of cash flows\nCash at end 7 100 90", []),
+        PdfPage(
+            4,
+            "Notes to the Financial Statements\n"
+            "Material accounting policies\n"
+            "1.1 Basis of preparation\n"
+            "13 Property, plant and equipment\n"
+            "15 Financial instruments (continued)\n",
+            [],
+        ),
+        PdfPage(5, "2 New Standards and Interpretations\n3 Property, plant and equipment", []),
+        PdfPage(6, "13 Revenue\nRevenue from contracts with customers 200 180", []),
+    ])
+
+    headings = note_heading_map(doc)
+    assert headings["1"] == "Material accounting policies"
+    assert headings["13"] == "Revenue"
+    assert headings["3"] == "Property, plant and equipment"
+
+
+def test_note_reference_compatibility_accepts_investment_income_heading():
+    doc = PdfDocument([
+        PdfPage(1, "Statement of profit or loss\n2025 2024\nInvestment income 18 37,617 586", []),
+        PdfPage(2, "Notes to the Financial Statements\n1. Significant accounting policies\n18 Investment income", []),
+    ])
+    findings, checks, audit = run_canonical_checks(doc)
+    assert not any(
+        check.check_name == "Face statement note reference compatibility" and check.status == "Fail"
+        for check in checks
+    )

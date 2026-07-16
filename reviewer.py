@@ -134,8 +134,8 @@ NOTE_COMPATIBILITY_RULES: dict[str, dict[str, tuple[str, ...]]] = {
         "heading": ("trade receivables", "other receivables", "trade other receivables", "receivables", "contract assets"),
     },
     "other financial assets": {
-        "line": ("other financial assets", "financial assets", "amortised cost", "amortized cost", "loans advances"),
-        "heading": ("other financial assets", "financial assets", "amortised cost", "amortized cost", "loans advances"),
+        "line": ("other financial assets", "financial asset", "financial assets", "amortised cost", "amortized cost", "loans advances"),
+        "heading": ("other financial assets", "financial asset", "financial assets", "amortised cost", "amortized cost", "loans advances"),
     },
     "cash": {
         "line": ("cash", "bank", "cash equivalents"),
@@ -1617,6 +1617,9 @@ def _notes_start_page(document: PdfDocument) -> int | None:
     for i, page in enumerate(pages):
         if page.number < search_start_page:
             continue
+        if _page_has_numbered_notes_section_start(page.text) or _page_has_accounting_policy_notes_start(page.text):
+            setattr(document, "_notes_start_page_cache", page.number)
+            return page.number
         text_lower = page.text.lower()
         if "notes to the financial" in text_lower:
             if "accounting policies" in text_lower or "material accounting" in text_lower:
@@ -1640,10 +1643,58 @@ def _notes_start_page(document: PdfDocument) -> int | None:
     return None
 
 
+def _page_has_numbered_notes_section_start(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines()[:80] if line.strip()]
+    if not lines:
+        return False
+    head = "\n".join(lines)
+    normalized_head = _normalise_match_words(head)
+    has_notes_heading = (
+        any(_notes_heading_line_score(line) >= 0.82 for line in lines)
+        or "notes financial statements" in normalized_head
+        or "notes financial statement" in normalized_head
+        or "notes accounts" in normalized_head
+    )
+    if not has_notes_heading:
+        return False
+    numbered_note_patterns = (
+        r"(?im)^\s*(?:note\s+)?1\s*(?:[.)]|:)?\s+(?:reporting entity|significant accounting polic|material accounting polic|basis of preparation)\b",
+        r"(?im)^\s*1\.1\s+(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b",
+        r"(?im)^\s*1\s*(?:[.)]|:)?\s+.{0,80}\n\s*1\.1\s+(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b",
+    )
+    if any(re.search(pattern, head, flags=re.I) for pattern in numbered_note_patterns):
+        return True
+    return bool(
+        "accounting polic" in normalized_head
+        and re.search(r"(?im)^\s*1\.1\s+(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b", head)
+    )
+
+
+def _page_has_accounting_policy_notes_start(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines()[:80] if line.strip()]
+    if not lines:
+        return False
+    head = "\n".join(lines)
+    normalized_head = _normalise_match_words(head)
+    if "contents" in normalized_head and normalized_head.count("statement") >= 2:
+        return False
+    has_policy_title = any(
+        _normalise_match_words(line) in {"accounting policies", "material accounting policies", "significant accounting policies"}
+        for line in lines[:12]
+    ) or "material accounting policies" in normalized_head or "significant accounting policies" in normalized_head
+    has_numbered_policy = bool(
+        re.search(r"(?im)^\s*(?:note\s+)?1\s*(?:[.)]|:)?\s*(?:reporting entity|significant accounting polic|material accounting polic|basis of prep\w*)\b", head)
+        or re.search(r"(?im)^\s*1\.1\s+(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b", head)
+    )
+    return has_policy_title and has_numbered_policy
+
+
 def _looks_like_front_matter_page(text: str) -> bool:
     lines = [line.strip() for line in text.splitlines()[:40] if line.strip()]
     head = "\n".join(lines).lower()
     if not head:
+        return False
+    if _page_has_numbered_notes_section_start(text) or _page_has_accounting_policy_notes_start(text):
         return False
     if lines and _normalise_match_words(lines[0]).startswith("notes"):
         return False
@@ -1658,7 +1709,6 @@ def _looks_like_front_matter_page(text: str) -> bool:
         "contents",
     )
     return any(term in head for term in front_terms)
-
 
 def _notes_heading_in_text(text: str) -> bool:
     lower_text = text.lower()
@@ -1843,7 +1893,7 @@ def _raw_page_notes_heading_candidates(text: str, include_weak: bool = False) ->
         (r"notes?\s+to\s+(?:the\s+)?financial\s+statements?", "Notes heading", 0.96),
         (r"notes?\s+forming\s+part\s+of\s+(?:the\s+)?financial\s+statements?", "Notes heading", 0.96),
         (r"notes?\s+to\s+(?:the\s+)?accounts?", "Notes heading", 0.92),
-        (r"(?:^|\n)\s*1[\).:\s-]+(?:significant\s+)?accounting\s+polic(?:y|ies)", "Accounting policies heading", 0.84),
+        (r"(?:^|\n)\s*1\s*[\).:\s-]*\s*(?:material\s+|significant\s+)?accounting\s+polic(?:y|ies)", "Accounting policies heading", 0.84),
         (r"significant\s+accounting\s+polic(?:y|ies)", "Accounting policies heading", 0.78),
     )
     for pattern, candidate_type, base_score in pattern_specs:
@@ -1965,13 +2015,14 @@ def _notes_candidate_search_start_page(document: PdfDocument) -> int:
 
 
 def _candidate_followed_by_numbered_policy(lines: list[str], index: int) -> bool:
-    nearby = "\n".join(lines[index : index + 8])
+    nearby = "\n".join(lines[index : index + 10])
     return bool(
         re.search(
-            r"(?:^|\n)\s*(?:note\s+)?1[\).:\s-]+(?:significant\s+)?accounting polic",
+            r"(?:^|\n)\s*(?:note\s+)?1\s*[\).:\s-]*\s*(?:material\s+|significant\s+)?accounting polic",
             nearby,
             flags=re.I,
         )
+        or re.search(r"(?:^|\n)\s*1\.1\s+(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b", nearby, flags=re.I)
         or re.search(r"(?:^|\n)\s*1[\).:\s-]+.{0,60}\n\s*2[\).:\s-]+", nearby, flags=re.I)
     )
 
@@ -2375,9 +2426,25 @@ def _format_page_set(pages: set[int]) -> str:
 
 def _finalize_note_agreement_result_rows(document: PdfDocument, rows: list[dict[str, str]]) -> list[dict[str, str]]:
     enriched_rows = _enrich_note_agreement_rows(document, rows)
-    labelled_rows = _apply_reviewer_page_labels_to_note_rows(document, enriched_rows)
+    labelled_rows = _label_non_elevated_note_agreement_rows(enriched_rows)
+    labelled_rows = _apply_reviewer_page_labels_to_note_rows(document, labelled_rows)
     setattr(document, "_note_agreement_result_rows_cache", labelled_rows)
     return labelled_rows
+
+
+def _label_non_elevated_note_agreement_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    for row in rows:
+        result = str(row.get("Result") or row.get("Review result") or "").strip()
+        confidence = str(row.get("Match confidence") or "").strip().lower()
+        if result == "Review prompt" and confidence == "low":
+            row["Review result"] = "Not elevated / internal note"
+            row["Result"] = "Not elevated / internal note"
+            reason = str(row.get("Reason") or "").strip()
+            if reason and not reason.lower().startswith("not elevated"):
+                row["Reason"] = f"Not elevated - {reason}"
+            elif not reason:
+                row["Reason"] = "Not elevated - low-confidence note agreement result retained for reviewer context only."
+    return rows
 
 
 def _enrich_note_agreement_rows(document: PdfDocument, rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -6784,11 +6851,18 @@ def _check_cash_flow_supporting_amounts(
             source_amounts, source_line = _line_amounts_for_aliases_preserving_zero(source_page.text, source_aliases)
             if source_amounts:
                 sources.append((f"Page {source_page.number}", source_amounts, source_line, "primary statement"))
-        note_amounts, note_ref, note_line = _note_line_amounts_for_aliases(note_sections, source_aliases)
-        if note_amounts:
-            sources.append((f"Note {note_ref}", note_amounts, note_line, "note"))
+        cf_note_ref, _cf_ref_start, _cf_ref_end = _detect_statement_row_note_token(cf_line)
+        if cf_note_ref:
+            note_section = _get_note_section_with_fallback(cf_note_ref, note_sections, document)
+            note_amounts, note_line = _line_amounts_for_aliases_preserving_zero(note_section, source_aliases) if note_section else ([], "")
+            if note_amounts:
+                sources.append((f"Note {cf_note_ref}", note_amounts, note_line, "note"))
+        elif source_page is None:
+            note_amounts, note_ref, note_line = _note_line_amounts_for_aliases(note_sections, source_aliases)
+            if note_amounts:
+                sources.append((f"Note {note_ref}", note_amounts, note_line, "note"))
         for source_ref, source_amounts, source_line, source_type in sources:
-            mismatches = _amount_vector_mismatches(cf_amounts, source_amounts, tolerance=Decimal("0"), compare_abs=True)
+            mismatches = _amount_vector_mismatches(cf_amounts, source_amounts, tolerance=tolerance, compare_abs=True)
             for column, left, right, diff in mismatches:
                 if abs(diff) == 0:
                     continue
@@ -6855,7 +6929,7 @@ def _check_supporting_disclosure_note_reference_amounts(
             for amount in amounts[:2]:
                 if abs(amount) < Decimal("1000"):
                     continue
-                if _amount_list_contains(section_amounts, amount, tolerance=Decimal("0")):
+                if _amount_list_contains(section_amounts, amount, tolerance=tolerance):
                     continue
                 nearest = _nearest_amount(amount, section_amounts)
                 if nearest is None:
@@ -6863,6 +6937,8 @@ def _check_supporting_disclosure_note_reference_amounts(
                     max_diff = max(max_diff, abs(amount))
                 else:
                     diff = amount - nearest
+                    if abs(diff) <= tolerance:
+                        continue
                     issues.append(
                         f"Page {page.number}: {label} references Note {ref}; disclosure shows {amount:,}, nearest amount in Note {ref} is {nearest:,} (difference {diff:,}). Line: {line}"
                     )
@@ -6928,7 +7004,7 @@ def _check_supplementary_summary_consistency(
             summary_value = summary_amounts[0]
             source_value = source_amounts[0]
             diff = summary_value - source_value
-            if abs(diff) == 0:
+            if abs(diff) <= tolerance:
                 continue
             max_diff = max(max_diff, abs(diff))
             issues.append(
@@ -7015,6 +7091,10 @@ def _label_matches_any_amount_alias(label: str, alias_norms: list[str]) -> bool:
             continue
         if alias == "current liabilities" and "non current" in label:
             continue
+        if alias in {"taxation", "tax expense", "income tax expense"} and "before taxation" in label:
+            continue
+        if alias in {"taxation", "tax expense", "income tax expense"} and label.startswith(("profit ", "loss ")):
+            continue
         if label == alias or label.startswith(alias) or alias in label:
             return True
     return False
@@ -7047,7 +7127,7 @@ def _parse_supporting_note_reference_amount_line(line: str) -> tuple[str, str, l
     label_words = re.findall(r"[A-Za-z]{3,}", label)
     if len(label_words) > 4:
         return None
-    if not normalized_label or normalized_label.startswith("total") or normalized_label in {"current liabilities", "non current liabilities", "non-current liabilities", "less than"}:
+    if not normalized_label or normalized_label.startswith("total") or normalized_label in {"as at", "at", "opening balance", "closing balance", "current liabilities", "non current liabilities", "non-current liabilities", "less than"}:
         return None
     amounts = [_parse_decimal(token) for token in _amount_tokens_from_statement_line(tail)]
     parsed = [amount for amount in amounts if amount is not None and abs(amount) < Decimal("100000000")]
@@ -9840,12 +9920,14 @@ def _note_reference_review_prompt(
         issue = f"Referenced note not found: {item.line_item.title()} references Note {item.ref}, but that note was not detected."
         confidence = "Low"
         
-    if "cash flow" not in item.statement_name.lower() or suggested_ref:
+    if "cash flow" not in item.statement_name.lower() or suggested_ref or explicit_issue:
         evidence = (
             f"Line: {item.line[:160]}. Amounts checked: {', '.join(f'{amount:,}' for amount in item.amounts)}. "
             f"Reason: {reason}"
             + (" Review prompt only because note extraction confidence is below threshold." if cautious_review_prompt else "")
         )
+    else:
+        evidence = f"Note reference '{item.ref}' for {item.line_item.title()} was not found. Reason: {reason}"
     return Finding(
         category if "category" in locals() else "Notes agreement",
         confidence,

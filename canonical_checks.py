@@ -16,7 +16,7 @@ NOTE_HEADING_KEYWORDS: dict[str, tuple[str, ...]] = {
     "investment property": ("investment property", "investment properties", "property"),
     "inventories": ("inventor", "stock"),
     "trade and other receivables": ("receivable", "debtor", "trade and other receivables"),
-    "other financial assets": ("financial asset", "investment", "treasury", "securities"),
+    "other financial assets": ("financial asset", "finacial asset", "investment", "treasury", "securities"),
     "current assets": ("asset",),
     "non-current assets": ("asset",),
     "total assets": ("asset",),
@@ -32,7 +32,10 @@ NOTE_HEADING_KEYWORDS: dict[str, tuple[str, ...]] = {
     "closing equity": ("equity", "reserve", "accumulated fund", "retained"),
     "dividends": ("dividend",),
     "issue of shares": ("share", "capital"),
-    "revenue": ("revenue", "rental income", "operating income", "turnover", "income from property", "other operating income", "interest income"),
+    "investment income": ("investment income", "finance income", "interest income"),
+    "other income": ("other income", "other operating income", "miscellaneous income"),
+    "other operating losses": ("other operating losses", "other operating gains", "other non-operating losses", "other non-operating gains", "fair value", "foreign exchange", "disposal"),
+    "revenue": ("revenue", "rental income", "operating income", "turnover", "income from property", "other operating income", "other income", "interest income"),
     "project costs": ("project cost", "cost", "direct cost", "cost of sales", "interest expense"),
     "gross profit": ("gross profit", "net interest", "margin"),
     "operating profit": ("operating profit", "operating loss"),
@@ -217,7 +220,7 @@ def _heading_compatible(canonical_line_item: str, heading: str) -> bool:
     if not keywords:
         return True
     heading_norm = heading.lower().replace("-", " ")
-    return any(keyword.lower() in heading_norm for keyword in keywords)
+    return any(keyword.lower().replace("-", " ") in heading_norm for keyword in keywords)
 
 
 def _cash_flow_subtotal_without_note_detail(fact: StatementFact) -> bool:

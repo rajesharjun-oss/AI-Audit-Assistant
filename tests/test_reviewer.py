@@ -2969,8 +2969,8 @@ def test_cautious_face_to_note_amount_agreement_keeps_low_amount_not_located_out
     assert not amount_prompts
     assert any(
         row["Line item"] == "Other Revenue"
-        and row["Result"] == "Review prompt"
-        and row["Reason"] == "Amount not located in referenced note."
+        and row["Result"] == "Not elevated / internal note"
+        and row["Reason"] == "Not elevated - Amount not located in referenced note."
         for row in rows
     )
 
@@ -3025,7 +3025,7 @@ def test_cautious_face_to_note_amount_agreement_does_not_suggest_amount_only_alt
     row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Operating Revenue")
 
     assert row["Alternative note found"] == ""
-    assert row["Result"] == "Review prompt"
+    assert row["Result"] == "Not elevated / internal note"
     assert not any("Operating Revenue amount appears in Note 8" in finding.issue for finding in result.findings)
 
 
@@ -3127,7 +3127,7 @@ def test_ocr_revenue_heading_prompt_runs_for_direct_revenue_heading(monkeypatch)
     row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Other Revenue")
 
     assert row["Alternative note found"] == "9"
-    assert row["Result"] == "Review prompt"
+    assert row["Result"] == "Not elevated / internal note"
     assert result.metrics["note_reference_findings"] == 0
 
 
@@ -3389,7 +3389,7 @@ def test_note_agreement_results_include_passed_and_review_prompt_rows(monkeypatc
     rows = result.metrics["note_agreement_results"]
 
     assert any(row["Line item"] == "Cash" and row["Result"] == "Passed" for row in rows)
-    assert any(row["Line item"] == "Trade Payables" and row["Result"] == "Review prompt" for row in rows)
+    assert any(row["Line item"] == "Trade Payables" and row["Result"] == "Not elevated / internal note" for row in rows)
     assert any(row["Prior year amount found in referenced note?"] == "No" for row in rows)
 
 
@@ -4325,7 +4325,7 @@ def test_ocr_notes_start_infers_note_1_from_material_accounting_policies():
                 "Notes to the Financial Statements\n"
                 "Material accounting policies\n"
                 "The material accounting policies applied in preparing these financial statements are set out below.\n"
-                "1.1 Basis of preparation\n"
+                "1.1 Basis of prepatation\n"
                 "2 New Standards and Interpretations",
                 [],
             ),
@@ -4537,7 +4537,7 @@ def test_ocr_heading_based_note_reference_validation_runs_as_review_prompt(monke
     assert result.metrics["note_validation_mode"] == "review_prompt"
     row = next(row for row in result.metrics["note_agreement_results"] if row["Line item"] == "Other Revenue")
     assert row["Alternative note found"] == "9"
-    assert row["Result"] == "Review prompt"
+    assert row["Result"] == "Not elevated / internal note"
     assert not any("possible wrong note reference" in finding.issue.lower() for finding in result.findings)
 
 
@@ -6485,7 +6485,7 @@ def test_greystone_style_drafting_issues_are_flagged_with_page_context():
     assert all(f.location == "Page 1" for f in findings if f.category == "Formatting")
 
 
-def test_cash_flow_source_amount_tieout_flags_one_unit_differences_without_sign_noise():
+def test_cash_flow_source_amount_tieout_flags_material_differences_without_sign_noise():
     document = PdfDocument(
         [
             PdfPage(
@@ -6523,7 +6523,7 @@ def test_cash_flow_source_amount_tieout_flags_one_unit_differences_without_sign_
                         "16. Other operating expenses",
                         "Depreciation - 124,979",
                         "17. Finance costs",
-                        "Interest expenses 324,994 438,700",
+                        "Interest expenses 324,990 438,700",
                     ]
                 ),
                 [],
@@ -6536,7 +6536,7 @@ def test_cash_flow_source_amount_tieout_flags_one_unit_differences_without_sign_
     assert performed
     assert findings
     evidence = findings[0].evidence
-    assert "difference 1" in evidence
+    assert "difference 5" in evidence
     assert "difference 649,989" not in evidence
     assert "Interest received on loan" not in evidence
 
@@ -6566,7 +6566,7 @@ def test_supporting_disclosure_note_reference_tieout_ignores_standards_dates():
                         "The standard is effective for annual reporting periods beginning on or after 1 January 2027.",
                         "Credit risk",
                         "Other receivables 5 1,474,662 - 1,474,662",
-                        "Borrowings 8 3,224,254 - 3,224,254",
+                        "Borrowings 8 3,224,250 - 3,224,250",
                     ]
                 ),
                 [],
@@ -6622,11 +6622,11 @@ def test_supplementary_summary_consistency_flags_current_year_mismatches():
                     [
                         "Five Year Financial Summary",
                         "2025 2024 2023",
-                        "Other operating expenses (50,026) (160,667) (262,281)",
-                        "Operating profit/(loss) 80,263 5,358,295 (4,496,406)",
-                        "Finance costs (324,995) (438,700) (306,083)",
-                        "Retained income (2,624,235) (2,378,761) (7,270,515)",
-                        "Total liabilities 4,311,563 3,942,462 9,179,029",
+                        "Other operating expenses (50,024) (160,667) (262,281)",
+                        "Operating profit/(loss) 80,265 5,358,295 (4,496,406)",
+                        "Finance costs (324,997) (438,700) (306,083)",
+                        "Retained income (2,624,232) (2,378,761) (7,270,515)",
+                        "Total liabilities 4,311,560 3,942,462 9,179,029",
                     ]
                 ),
                 [],
@@ -6709,3 +6709,257 @@ def test_contents_agreement_rows_use_printed_page_numbers_and_flag_mismatch():
     assert pl["Status"] == "Mismatch"
     assert pl["Contents page reference"] == 5
     assert pl["Detected statement page"] == 4
+
+
+
+def test_cash_flow_explicit_note_mismatch_prompt_has_evidence():
+    item = reviewer.StatementNoteLine(
+        ref="12",
+        line_item="Depreciation",
+        line="Depreciation 12 100 90",
+        amounts=(Decimal("100"), Decimal("90")),
+        page_number=9,
+        statement_name="Statement of cash flows",
+        explicit_ref=True,
+    )
+
+    finding = reviewer._note_reference_review_prompt(
+        item,
+        "",
+        "Low",
+        "Referenced note heading is not compatible with the depreciation line item.",
+        cautious_review_prompt=True,
+        explicit_issue="Note heading mismatch: Depreciation references Note 12, whose heading is not compatible with the line item.",
+    )
+
+    assert finding.evidence
+    assert "Depreciation 12 100 90" in finding.evidence
+    assert finding.location == "Page 9 | Statement of cash flows"
+
+
+def test_notes_start_accepts_numbered_notes_section_despite_repeated_report_header():
+    document = PdfDocument(
+        [
+            PdfPage(5, "Directors' report\n6. Directors' interests in shares\nNone of the Directors held shares during the year.", []),
+            PdfPage(14, "Statement of changes in equity\nBalance at 1 January 1,000\nProfit for the year 100\nBalance at 31 December 1,100", []),
+            PdfPage(15, "Statement of Cash Flows\nCash and cash equivalents at the end of the year 100", []),
+            PdfPage(
+                16,
+                "Octerra Capital Limited\n"
+                "Financial Statements for the year ended 31 December 2025\n"
+                "Together with the Directors' and Independent Auditor's Reports\n"
+                "Notes to the Financial Statements\n"
+                "1 Reporting entity\n"
+                "The Company is incorporated in Nigeria.\n"
+                "1.1 Material accounting policies\n"
+                "The material accounting policies are set out below.\n"
+                "6 Property, plant and equipment\n"
+                "Cost 245,460",
+                [],
+            ),
+        ]
+    )
+
+    assert reviewer._notes_start_page(document) == 16
+    assert not reviewer._looks_like_front_matter_page(document.pages[-1].text)
+    findings = reviewer._check_note_contradictions(document)
+    assert not any("none of the directors" in finding.evidence.lower() for finding in findings)
+
+
+def test_canonical_cash_flow_uses_closing_cash_not_foreign_exchange_cash_line():
+    import canonical_checks
+    from canonical_extraction import extract_statement_facts
+
+    document = PdfDocument(
+        [
+            PdfPage(
+                11,
+                "Statement of Financial Position\n"
+                "2025 2024\n"
+                "Cash and cash equivalent 3 88,741 154,449\n"
+                "Total assets 88,741 154,449\n"
+                "Total equity and liabilities 88,741 154,449",
+                [],
+            ),
+            PdfPage(
+                14,
+                "Statement of Cash Flows\n"
+                "2025 2024\n"
+                "Net cash generated from operating activities 100,000 145,379\n"
+                "Net cash used in investing activities (163,173) -\n"
+                "Net cash movement (63,173) 145,379\n"
+                "Cash and cash equivalents at the beginning of the year 154,449 9,070\n"
+                "Loss on foreign exchange on cash and cash equivalents (2,535) -\n"
+                "Cash and cash equivalents at the end of the year 3 88,741 154,449",
+                [],
+            ),
+        ]
+    )
+
+    facts = extract_statement_facts(document)
+    closing_rows = [fact for fact in facts if fact.canonical_line_item == "cash and cash equivalents" and "cash flow" in fact.statement.lower()]
+    assert closing_rows
+    assert all("at the end" in fact.source_line.lower() for fact in closing_rows)
+    assert not any("foreign exchange" in fact.source_line.lower() for fact in closing_rows)
+
+    findings, results, _audit_rows = canonical_checks.run_canonical_checks(document, facts)
+    assert not any("closing cash" in finding.issue.lower() for finding in findings)
+    assert any(result.check_name == "Cash flow closing cash agrees to SFP cash" and result.status == "Pass" for result in results)
+
+
+def test_canonical_extraction_does_not_treat_five_year_summary_as_primary_sfp():
+    import canonical_checks
+    from canonical_extraction import classify_statement_page, extract_statement_facts
+
+    document = PdfDocument(
+        [
+            PdfPage(
+                43,
+                "Five-year financial summary\n"
+                "Statement of financial position\n"
+                "2025 2024 2023 2022 2021\n"
+                "Non-current assets 1,500,059 1,160,216 388,934 109,867 -\n"
+                "Current assets 1,231,610 211,242 18,000 25,693 39,327\n"
+                "Total assets 2,731,669 1,371,458 406,934 135,560 39,327\n"
+                "Total equity and liabilities 2,731,669 1,371,458 406,934 135,560 39,327",
+                [],
+            )
+        ]
+    )
+
+    assert classify_statement_page(document.pages[0]) == "Five-year financial summary"
+    facts = extract_statement_facts(document)
+    findings, results, _audit_rows = canonical_checks.run_canonical_checks(document, facts)
+    assert not findings
+    assert not any(result.statement == "Statement of financial position" for result in results)
+
+
+def test_canonical_note_heading_map_ignores_contents_and_detects_notes_after_primary_statements():
+    from canonical_extraction import _notes_section_start_page, note_heading_map
+
+    document = PdfDocument(
+        [
+            PdfPage(2, "Contents\nStatement of financial position .... 11\nStatement of profit or loss .... 12\nNotes to the financial statements .... 15", []),
+            PdfPage(11, "Statement of Financial Position\nCash and cash equivalents 3 100 90", []),
+            PdfPage(12, "Statement of profit or loss\nRevenue 12 200 180", []),
+            PdfPage(14, "Statement of Cash Flows\nCash and cash equivalents at the end of the year 3 100 90", []),
+            PdfPage(
+                15,
+                "Example Limited\nFinancial Statements for the year ended 31 December 2025\n"
+                "Together with the Directors' and Independent Auditor's Reports\n"
+                "Notes to the Financial Statements\n"
+                "1 Reporting entity\nThe Company is incorporated in Nigeria.\n"
+                "1.1 Material accounting policies\nThe policies are set out below.\n"
+                "3. Cash and cash equivalents\nCash at bank 100 90\n"
+                "12. Revenue\nRevenue 200 180",
+                [],
+            ),
+        ]
+    )
+
+    assert _notes_section_start_page(document) == 15
+    headings = note_heading_map(document)
+    assert headings["1"] == "Reporting entity"
+    assert headings["3"] == "Cash and cash equivalents"
+    assert headings["12"] == "Revenue"
+
+
+def test_canonical_statement_classification_uses_headings_not_narrative_mentions():
+    from canonical_extraction import classify_statement_page
+
+    auditor_page = PdfPage(
+        9,
+        "Independent Auditor's Report\n"
+        "Opinion\n"
+        "We have audited the financial statements, which comprise the statement of financial position, "
+        "statement of profit or loss, statement of changes in equity and statement of cash flows.\n",
+        [],
+    )
+    notes_page = PdfPage(
+        31,
+        "Example Limited\nNotes to the Financial Statements\n"
+        "3. Cash and cash equivalents\nCash and cash equivalents consist of:\n",
+        [],
+    )
+    sfp_page = PdfPage(
+        12,
+        "Example Limited\nStatement of Financial Position as at 31 December 2025\n2025 2024\nTotal assets 100 90",
+        [],
+    )
+
+    assert classify_statement_page(auditor_page) == ""
+    assert classify_statement_page(notes_page) == ""
+    assert classify_statement_page(sfp_page) == "Statement of financial position"
+
+
+def test_low_confidence_note_agreement_rows_are_labelled_not_elevated():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Statement of profit or loss\nRevenue 1 100 90", []),
+            PdfPage(2, "Notes to the Financial Statements\n1 Revenue\nRevenue narrative without matching amount", []),
+        ]
+    )
+
+    rows = reviewer._note_agreement_result_rows(document)
+    revenue = next(row for row in rows if row.get("Line item") == "Revenue")
+    assert revenue["Result"] == "Not elevated / internal note"
+    assert revenue["Review result"] == "Not elevated / internal note"
+    assert revenue["Reason"].startswith("Not elevated -")
+
+
+
+def test_notes_start_accepts_material_accounting_policy_page_with_numbered_subsections():
+    document = PdfDocument(
+        [
+            PdfPage(14, "Statement of Financial Position\nTotal assets 100\nTotal equity and liabilities 100", []),
+            PdfPage(15, "Statement of Profit or Loss\nRevenue 100", []),
+            PdfPage(16, "Statement of Cash Flows\nCash at end 100", []),
+            PdfPage(
+                18,
+                "Example Limited\n"
+                "Financial Statements for the year ended 31 December 2025\n"
+                "Together with the Directors' and Independent Auditor's Reports\n"
+                "Notes to the financial statements\n"
+                "Material accounting policies\n"
+                "The principal accounting policies applied in the preparation of these financial statements are set out below.\n"
+                "1.1 Basis of prepatation\n"
+                "The financial statements have been prepared in accordance with IFRS.\n"
+                "1.2 Significant judgements and sources of estimation uncertainty\n"
+                "Management applies estimates and assumptions.",
+                [],
+            ),
+        ]
+    )
+
+    assert reviewer._notes_start_page(document) == 18
+    candidates = reviewer._notes_heading_candidates(document, include_weak=True)
+    first = next(row for row in candidates if row["page"] == 18)
+    assert first["accepted"] == "Yes"
+
+
+
+def test_notes_start_accepts_plain_accounting_policies_with_numbered_note_one_after_statements():
+    document = PdfDocument(
+        [
+            PdfPage(17, "Statement of Financial Position\nTotal assets 100\nTotal equity and liabilities 100", []),
+            PdfPage(18, "Statement of Profit or Loss\nRevenue 100", []),
+            PdfPage(20, "Statement of Cash Flows\nCash at end 100", []),
+            PdfPage(
+                21,
+                "Example Limited\n"
+                "Financial Statements for the year ended 31 December 2025\n"
+                "Together with the Directors' and Independent Auditor's Reports\n"
+                "Accounting Policies\n"
+                "1.Material accounting policies\n"
+                "Management has considered material accounting policy disclosures.\n"
+                "1.1 Basis of preparation\n"
+                "The financial statements have been prepared in accordance with IFRS.",
+                [],
+            ),
+            PdfPage(30, "Notes to the Financial Statements\n3.Property, plant and equipment", []),
+        ]
+    )
+
+    assert reviewer._notes_start_page(document) == 21
+    candidates = reviewer._notes_heading_candidate_rows(document)
+    assert any(row["Page"] == "21" and row["Accepted"] == "Yes" for row in candidates)

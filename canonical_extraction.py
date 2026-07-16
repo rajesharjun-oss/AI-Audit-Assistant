@@ -17,9 +17,10 @@ STATEMENT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 LINE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("cash and cash equivalents", ("cash and cash equivalent", "cash and cash equivalents", "total cash at end of the year", "cash at end")),
     ("cash at beginning", ("cash at beginning", "cash at the beginning of the year", "cash and cash equivalents at the beginning of the year")),
+    ("cash and cash equivalents", ("cash and cash equivalent", "cash and cash equivalents", "total cash at end of the year", "cash at end")),
     ("bank overdraft", ("bank overdraft", "overdraft")),
+    ("other operating losses", ("losses gains on disposal", "losses on disposal", "loss on disposal", "gains on disposal", "gain on disposal", "losses on foreign exchange", "gains on foreign exchange", "other operating losses", "other non-operating losses", "other non-operating gains")),
     ("property, plant and equipment", ("property plant and equipment", "property, plant and equipment", "ppe")),
     ("intangible assets", ("intangible assets", "intangible asset", "software", "computer software")),
     ("investment property", ("investment property", "investment properties")),
@@ -42,6 +43,8 @@ LINE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("dividends", ("dividend", "dividends", "dividend paid", "dividends paid")),
     ("issue of shares", ("issue of shares", "shares issued", "share issue", "proceeds from issue of shares")),
     ("other comprehensive income", ("other comprehensive income", "other comprehensive loss")),
+    ("investment income", ("investment income", "finance income")),
+    ("other income", ("other income", "other operating income", "miscellaneous income")),
     ("revenue", ("revenue", "interest income", "income", "turnover", "gross earnings")),
     ("project costs", ("project costs", "project cost", "cost of sales", "interest expense", "direct costs")),
     ("gross profit", ("gross profit", "net interest loss", "net interest income")),
@@ -55,7 +58,7 @@ LINE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("net cash from investing activities", ("net cash from investing activities", "net cash used in investing activities", "net cash generated from investing activities", "net cash flows used in investing activities")),
     ("net cash from financing activities", ("net cash from financing activities", "net cash used in financing activities", "net cash generated from financing activities", "net cash flows used in financing activities")),
     ("net movement in cash", ("net movement in cash and cash equivalents", "total cash movement for the year", "net cash movement", "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents")),
-    ("effect of exchange rate movement", ("effect of exchange rate movement on cash balances", "exchange rate movement", "effect of foreign exchange")),
+    ("effect of exchange rate movement", ("effect of exchange rate movement on cash balances", "exchange rate movement", "effect of foreign exchange", "loss on foreign exchange on cash and cash equivalents", "profit on foreign exchange on cash and cash equivalents", "foreign exchange on cash and cash equivalents", "exchange differences on cash and cash equivalents")),
     ("purchase of property, plant and equipment", ("purchase of property plant and equipment", "purchase of property, plant and equipment")),
 )
 
@@ -250,6 +253,10 @@ def note_heading_map(document: PdfDocument) -> dict[str, str]:
     for page in document.pages:
         if page.number < start_page:
             continue
+        if page.number == start_page and "1" not in headings:
+            implicit_note_1 = _implicit_note_1_heading(page.text)
+            if implicit_note_1:
+                headings["1"] = implicit_note_1
         for raw_line in page.text.splitlines():
             line = re.sub(r"\s+", " ", raw_line).strip()
             if not line:
@@ -258,12 +265,16 @@ def note_heading_map(document: PdfDocument) -> dict[str, str]:
                 return headings
             if _line_is_repeated_notes_header(line):
                 continue
+            if re.match(r"^\s*\d{1,2}\.\d{1,2}\b", line):
+                continue
             match = re.match(r"^(?:note\s+)?(\d{1,2}[A-Za-z]?)(?:[.)]\s*|\s+)(.{3,100})$", line, flags=re.I)
             if not match:
                 continue
             ref, title = match.groups()
-            title = re.sub(r"\s+", " ", title).strip(" -:.")
+            title = _clean_note_heading_title(title)
             if not _valid_note_ref(ref) or not _title_looks_like_note_heading(title):
+                continue
+            if _looks_like_collapsed_policy_subsection(ref, title, headings, page.number, start_page):
                 continue
             if ref.upper() not in headings:
                 headings[ref.upper()] = title[:100]
@@ -271,8 +282,14 @@ def note_heading_map(document: PdfDocument) -> dict[str, str]:
 
 
 def _notes_section_start_page(document: PdfDocument) -> int | None:
-    primary_pages = [page.number for page in document.pages if classify_statement_page(page)]
-    first_allowed = min(primary_pages) if primary_pages else 1
+    primary_statement_names = {
+        "Statement of financial position",
+        "Statement of profit or loss and other comprehensive income",
+        "Statement of changes in equity",
+        "Statement of cash flows",
+    }
+    primary_pages = [page.number for page in document.pages if classify_statement_page(page) in primary_statement_names]
+    first_allowed = (max(primary_pages) + 1) if primary_pages else 1
     best_fallback: int | None = None
     for page in document.pages:
         if page.number < first_allowed:
@@ -284,14 +301,73 @@ def _notes_section_start_page(document: PdfDocument) -> int | None:
             or "notes accounts" in normalized
             or "notes forming part financial statements" in normalized
         )
-        has_policy_heading = bool(re.search(r"(?im)^\s*1\s*[.)]?\s*significant accounting policies\b", page.text))
+        has_policy_heading = bool(
+            re.search(r"(?im)^\s*(?:note\s+)?1\s*(?:[.)]|:)?\s*(?:reporting entity|significant accounting polic|material accounting polic|basis of prep\w*)\b", page.text)
+            or re.search(r"(?im)^\s*1\.1\s+(?:basis of prep\w*|material accounting polic|significant accounting polic)\b", page.text)
+        )
         if has_notes_heading and has_policy_heading:
             return page.number
         if has_notes_heading and best_fallback is None:
             best_fallback = page.number
-        elif has_policy_heading and best_fallback is None and primary_pages and page.number > max(primary_pages):
+        elif has_policy_heading and best_fallback is None and page.number >= first_allowed:
             best_fallback = page.number
     return best_fallback
+
+
+def _implicit_note_1_heading(text: str) -> str:
+    if re.search(r"(?im)^\s*1\s*(?:[.)]|:)?\s*reporting entity\b", text):
+        return "Reporting entity"
+    if re.search(r"(?im)^\s*1\s*(?:[.)]|:)?\s*material accounting polic", text):
+        return "Material accounting policies"
+    if re.search(r"(?im)^\s*1\s*(?:[.)]|:)?\s*significant accounting polic", text):
+        return "Significant accounting policies"
+    normalized = _normalise_words(text)
+    if "material accounting policies" in normalized:
+        return "Material accounting policies"
+    if "significant accounting policies" in normalized:
+        return "Significant accounting policies"
+    return ""
+
+
+def _clean_note_heading_title(title: str) -> str:
+    cleaned = re.sub(r"\s+", " ", title).strip(" -:.")
+    cleaned = re.sub(r"\s*\((?:continued|cont\.?)\)\s*$", "", cleaned, flags=re.I).strip(" -:.")
+    return cleaned
+
+
+def _looks_like_collapsed_policy_subsection(ref: str, title: str, headings: dict[str, str], page_number: int, start_page: int) -> bool:
+    numeric = "".join(ch for ch in ref if ch.isdigit())
+    if not numeric or "2" in headings:
+        return False
+    seen_real_later_note = any(
+        existing_ref.isdigit() and 2 <= int(existing_ref) <= 9
+        for existing_ref in headings
+    )
+    if seen_real_later_note:
+        return False
+    if page_number - start_page > 10:
+        return False
+    if not numeric.startswith("1") or len(numeric) != 2:
+        return False
+    title_norm = _normalise_words(title)
+    policy_topics = (
+        "property plant equipment",
+        "intangible assets",
+        "financial instruments",
+        "financial assets",
+        "financial liabilities",
+        "revenue",
+        "leases",
+        "inventories",
+        "tax",
+        "impairment",
+        "foreign currency",
+        "employee benefits",
+        "cash cash equivalents",
+        "trade other receivables",
+        "trade other payables",
+    )
+    return any(topic in title_norm for topic in policy_topics)
 
 
 def _line_is_repeated_notes_header(line: str) -> bool:
@@ -327,6 +403,7 @@ def _title_looks_like_note_heading(title: str) -> bool:
     narrative_starts = (
         "this represents",
         "this relates",
+        "for details",
         "the company",
         "the group",
         "these comprise",
@@ -341,15 +418,56 @@ def _title_looks_like_note_heading(title: str) -> bool:
 
 
 def classify_statement_page(page: PdfPage) -> str:
-    header = "\n".join(page.text.splitlines()[:35]).lower()
+    lines = [line.strip() for line in page.text.splitlines()[:35] if line.strip()]
+    header = "\n".join(lines).lower()
+    if page.number <= 5 and ("contents" in header or "table of contents" in header) and (
+        "...." in header or header.count("statement of") >= 2
+    ):
+        return ""
+    notes_header_values = {
+        "notes financial statements",
+        "notes financial statement",
+        "notes accounts",
+        "notes forming part financial statements",
+    }
+    if any(_normalise_words(line) in notes_header_values for line in lines[:8]):
+        return ""
+    supplementary_patterns = {
+        "Value added statement": ("value added statement", "statement of value added"),
+        "Five-year financial summary": ("five year financial summary", "five-year financial summary", "5 year financial summary"),
+    }
+    for statement, aliases in supplementary_patterns.items():
+        if any(_line_matches_statement_heading(line, aliases) for line in lines):
+            return statement
     for statement, aliases in STATEMENT_PATTERNS:
-        if any(alias in header for alias in aliases):
+        if statement in supplementary_patterns:
+            continue
+        if any(_line_matches_statement_heading(line, aliases) for line in lines):
             return statement
     return ""
 
 
+def _line_matches_statement_heading(line: str, aliases: tuple[str, ...]) -> bool:
+    normalized = _normalise_words(line)
+    if not normalized:
+        return False
+    if normalized.startswith(("we have audited", "which comprise", "comprise", "including", "notes")):
+        return False
+    allowed_heading_prefixes = {"consolidated", "separate", "company", "group", "parent"}
+    for alias in aliases:
+        alias_norm = _normalise_words(alias)
+        if normalized == alias_norm or normalized.startswith(f"{alias_norm} "):
+            return True
+        index = normalized.find(alias_norm)
+        if index > 0:
+            prefix = normalized[:index].strip()
+            if prefix and all(word in allowed_heading_prefixes for word in prefix.split()):
+                return True
+    return False
 def detect_statement_columns(text: str, statement: str = "") -> list[StatementColumn]:
     header_lines = [line for line in text.splitlines()[:30] if len(YEAR_RE.findall(line)) >= 2]
+    if "changes in equity" in statement.lower() and not header_lines:
+        return []
     context_header = " ".join(text.splitlines()[:18])
     header = " ".join(header_lines or text.splitlines()[:18])
     header_context = f"{context_header} {header}"
@@ -492,6 +610,12 @@ def _labels_match(label_norm: str, alias_norm: str) -> bool:
     if alias_norm in {"equity", "total equity"} and "liabilities" in label_norm:
         return False
     if alias_norm in {"current assets", "current liabilities"} and "non current" in label_norm:
+        return False
+    if "cash equivalent" in alias_norm and any(term in label_norm for term in ("beginning", "opening", "start")):
+        return False
+    if "cash equivalent" in alias_norm and any(term in label_norm for term in ("foreign exchange", "exchange difference", "exchange differences", "exchange rate movement")):
+        return False
+    if "cash at beginning" in alias_norm and any(term in label_norm for term in (" end", "closing")):
         return False
     if label_norm == alias_norm or label_norm.startswith(alias_norm) or alias_norm in label_norm:
         return True
