@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ai_combined_review import run_combined_ai_review
 from ai_finding_review import run_ai_finding_review
-from models import CompanyProfile, Finding, PdfDocument
+from models import DEFAULT_AI_MODEL, CompanyProfile, Finding, PdfDocument
 
 AI_PIPELINE_LOCK_TIMEOUT_SECONDS = max(
     1.0,
@@ -69,9 +69,9 @@ def run_ai_review_pipeline(review_context: AiReviewContext) -> AiReviewPipelineR
     """Run the optional AI layer through one queued combined review pipeline."""
     result = AiReviewPipelineResult(
         findings=list(review_context.findings),
-        policy_model=review_context.model,
-        full_model=review_context.model,
-        finding_model=review_context.model,
+        policy_model=review_context.model or DEFAULT_AI_MODEL,
+        full_model=review_context.model or DEFAULT_AI_MODEL,
+        finding_model=review_context.model or DEFAULT_AI_MODEL,
         review_mode=_display_review_mode(review_context.review_mode),
     )
     if not review_context.use_policy_review and not review_context.use_full_review:
@@ -97,9 +97,9 @@ def run_ai_review_pipeline(review_context: AiReviewContext) -> AiReviewPipelineR
         if combined.status == "completed":
             return result
 
-        # Combined review failed; still try the smaller finding-cleanup path so
-        # policy/full failure does not block false-positive cleanup.
-        if combined.status not in {"unavailable"}:
+        # Combined review failed. Run the smaller cleanup path only for parser/format failures;
+        # capacity/configuration failures should not trigger a second AI call.
+        if _should_run_finding_cleanup_after_combined_failure(combined):
             _run_finding_cleanup_step(review_context, result, pdf_path=None)
         return result
     finally:
@@ -112,17 +112,17 @@ def _merge_combined_result(result: AiReviewPipelineResult, combined, review_cont
     result.policy_export = combined.policy_export
     result.policy_summary = combined.summary
     result.policy_status = _stage_status_from_combined(combined.status, review_context.use_policy_review)
-    result.policy_model = combined.model or review_context.model
+    result.policy_model = combined.model or review_context.model or DEFAULT_AI_MODEL
     result.policy_message = combined.message
     result.full_export = combined.full_export
     result.full_summary = combined.executive_memo or combined.summary
     result.full_status = _stage_status_from_combined(combined.status, review_context.use_full_review)
-    result.full_model = combined.model or review_context.model
+    result.full_model = combined.model or review_context.model or DEFAULT_AI_MODEL
     result.full_message = combined.message
     result.finding_export = combined.finding_export
     result.finding_summary = combined.summary
     result.finding_status = "completed" if combined.status == "completed" else combined.status
-    result.finding_model = combined.model or review_context.model
+    result.finding_model = combined.model or review_context.model or DEFAULT_AI_MODEL
     result.finding_message = combined.message
     result.finding_suppressed = combined.suppressed_count
     result.finding_suppressed_rows = combined.suppressed_rows
@@ -149,12 +149,49 @@ def _stage_status_from_combined(status: str, enabled: bool) -> str:
     return "completed" if status == "completed" else status
 
 
+
+def _should_run_finding_cleanup_after_combined_failure(combined) -> bool:
+    if getattr(combined, "status", "") in {"completed", "unavailable"}:
+        return False
+    category = _combined_failure_category(combined)
+    capacity_or_configuration_failures = {
+        "timeout",
+        "rate_limit",
+        "busy",
+        "insufficient_quota",
+        "unsupported_model",
+        "payload_too_large",
+        "network_dns",
+        "invalid_api_endpoint",
+    }
+    return category not in capacity_or_configuration_failures
+
+
+def _combined_failure_category(combined) -> str:
+    rows = list(getattr(combined, "error_rows", None) or [])
+    for row in reversed(rows):
+        if not isinstance(row, dict):
+            continue
+        category = str(row.get("Error category", "") or row.get("error_category", "") or "").strip().lower()
+        if category:
+            return category
+    return ""
+
+
+def _finding_cleanup_model(review_context: AiReviewContext, result: AiReviewPipelineResult) -> str:
+    for candidate in (result.finding_model, result.full_model, result.policy_model, review_context.model, DEFAULT_AI_MODEL):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return DEFAULT_AI_MODEL
+
+
 def _run_finding_cleanup_step(review_context: AiReviewContext, result: AiReviewPipelineResult, pdf_path: str | Path | None | object = Ellipsis) -> None:
     finding_review = run_ai_finding_review(
         review_context.document,
         review_context.profile,
         result.findings,
-        model=review_context.model,
+        model=_finding_cleanup_model(review_context, result),
         pdf_path=review_context.pdf_path if pdf_path is Ellipsis else pdf_path,
     )
     result.findings = finding_review.findings

@@ -765,7 +765,7 @@ def test_ai_review_pipeline_runs_combined_review_once(monkeypatch):
     assert result.finding_status == "completed"
     assert result.findings == [base_finding]
 
-def test_combined_ai_failure_still_allows_finding_cleanup(monkeypatch):
+def test_combined_ai_capacity_failure_does_not_run_finding_cleanup(monkeypatch):
     filler = "Additional extracted review context.\n" * 80
     document = PdfDocument(
         [
@@ -823,10 +823,10 @@ def test_combined_ai_failure_still_allows_finding_cleanup(monkeypatch):
 
     result = review_pdf("unused.pdf", options=ReviewOptions(use_ai_policy_review=True, use_ai_full_review=True))
 
-    assert calls == ["combined", "cleanup"]
+    assert calls == ["combined"]
     assert result.metrics["ai_policy_review_status"] == "deferred"
     assert result.metrics["ai_full_review_status"] == "deferred"
-    assert result.metrics["ai_finding_review_status"] == "completed"
+    assert result.metrics["ai_finding_review_status"] == "deferred"
     assert result.metrics["ai_review_status"] == "Failed after retries / Not completed"
     assert result.metrics["ai_error_log"][0]["Error category"] == "rate_limit"
     assert any("automatic retry attempts" in line for line in result.metrics["checks_skipped"].split("\n"))
@@ -898,6 +898,22 @@ def test_combined_ai_failure_logs_real_error_without_counting_as_finding(monkeyp
     assert result.metrics["ai_error_log"][0]["Error message"] == "context length exceeded"
     assert not any("AI review failed" in finding.issue for finding in result.findings)
 
+
+
+def test_finding_cleanup_model_falls_back_when_context_model_is_blank():
+    context = ai_review_pipeline.AiReviewContext(
+        document=PdfDocument([]),
+        profile=CompanyProfile(),
+        note_sections={},
+        policy_map={},
+        findings=[],
+        model="",
+        use_policy_review=True,
+        use_full_review=True,
+    )
+    result = ai_review_pipeline.AiReviewPipelineResult(findings=[], finding_model="gpt-4o-mini")
+
+    assert ai_review_pipeline._finding_cleanup_model(context, result) == "gpt-4o-mini"
 
 def test_retry_ai_review_uses_cached_deterministic_result_without_rerunning_checks(monkeypatch):
     document = PdfDocument([
@@ -6377,7 +6393,7 @@ def test_ai_model_attempts_are_limited_for_automatic_quick_review(monkeypatch):
     attempts = ai_combined_review._model_attempts("", "Quick review")
 
     assert len(attempts) == 2
-    assert attempts[1] == "gpt-4.1-mini"
+    assert attempts[1] == "gpt-4o-mini"
 
 
 def test_ai_model_attempts_allow_wider_deep_review(monkeypatch):

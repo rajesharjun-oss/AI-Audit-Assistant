@@ -846,7 +846,7 @@ def _clone_finding(finding: Finding) -> Finding:
 def _model_attempts(model: str, review_mode: str = "standard") -> list[str]:
     mode = _normalize_review_mode(review_mode)
     preferred = (model or "").strip() or _model_for_review_mode(mode)
-    safe_fallback = os.getenv("OPENAI_SAFE_FALLBACK_MODEL", "gpt-4.1-mini").strip()
+    safe_fallback = os.getenv("OPENAI_SAFE_FALLBACK_MODEL", "gpt-4o-mini").strip()
     secondary_fallback = os.getenv("OPENAI_SECONDARY_FALLBACK_MODEL", "gpt-4o-mini").strip()
     configured_fallback = os.getenv("OPENAI_FALLBACK_MODEL", "").strip()
     if mode == "deep":
