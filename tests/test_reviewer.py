@@ -707,6 +707,7 @@ def test_combined_ai_retries_plain_json_when_router_rejects_structured_output(mo
         return {"output_text": '{"summary":"ok","executive_review_memo":"ok","policy_review_findings":[],"missed_review_findings":[],"finding_adjudications":[]}'}
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_QUICK_STRUCTURED_OUTPUTS", "1")
     monkeypatch.setattr(ai_combined_review, "_call_openai", fake_call)
 
     result = ai_combined_review.run_combined_ai_review(
@@ -6383,6 +6384,25 @@ def test_ai_dns_resolution_error_is_classified_and_explained():
     assert "OPENAI_BASE_URL" in friendly
     assert ai_combined_review._error_category(exc) == "network_dns"
 
+
+def test_quick_ai_review_uses_plain_json_by_default(monkeypatch):
+    monkeypatch.delenv("OPENAI_STRUCTURED_OUTPUTS", raising=False)
+    monkeypatch.delenv("OPENAI_QUICK_STRUCTURED_OUTPUTS", raising=False)
+
+    assert ai_combined_review._structured_output_variants("Quick review") == [False]
+    assert ai_combined_review._structured_output_variants("Standard review") == [True, False]
+
+
+def test_quick_ai_payload_uses_smaller_output_budget(monkeypatch):
+    monkeypatch.delenv("OPENAI_QUICK_REVIEW_OUTPUT_TOKENS", raising=False)
+    payload = ai_combined_review._build_payload(
+        "gpt-4o-mini",
+        {"review_mode": "quick", "profile": {}, "findings": []},
+        structured_output=False,
+    )
+
+    assert payload["max_output_tokens"] == 1600
+    assert "text" not in payload
 
 def test_ai_model_attempts_are_limited_for_automatic_quick_review(monkeypatch):
     monkeypatch.delenv("OPENAI_FALLBACK_MODEL", raising=False)

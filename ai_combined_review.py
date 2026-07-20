@@ -21,7 +21,7 @@ from ai_policy_review import (
 )
 from models import DEFAULT_AI_DEEP_MODEL, DEFAULT_AI_MODEL, DEFAULT_AI_QUICK_MODEL, DEFAULT_AI_STANDARD_MODEL, CompanyProfile, Finding, PdfDocument
 
-COMBINED_AI_OUTPUT_TOKENS = max(1200, min(int(os.getenv("OPENAI_COMBINED_REVIEW_OUTPUT_TOKENS", "3500")), 6000))
+COMBINED_AI_OUTPUT_TOKENS = max(1200, min(int(os.getenv("OPENAI_COMBINED_REVIEW_OUTPUT_TOKENS", "2600")), 6000))
 COMBINED_AI_REPAIR_SHAPE = (
     '{"summary":"short conclusion","executive_review_memo":"short memo",'
     '"overall_signoff_conclusion":"ready|not ready|manual review required with reason",'
@@ -144,7 +144,7 @@ def run_combined_ai_review(
             checks_skipped,
             attempt_mode,
         )
-        structured_variants = [True, False] if _structured_outputs_enabled() else [False]
+        structured_variants = _structured_output_variants(attempt_mode)
         for structured_output in structured_variants:
             attempt_counter += 1
             payload = _build_payload(attempt_model, package, structured_output=structured_output)
@@ -187,7 +187,7 @@ def run_combined_ai_review(
 def _build_payload(model: str, package: dict[str, Any], structured_output: bool | None = None) -> dict[str, Any]:
     payload = {
         "model": model,
-        "max_output_tokens": COMBINED_AI_OUTPUT_TOKENS,
+        "max_output_tokens": _output_tokens_for_package(package),
         "input": [
             {
                 "role": "system",
@@ -212,6 +212,35 @@ def _build_payload(model: str, package: dict[str, Any], structured_output: bool 
 
 def _structured_outputs_enabled() -> bool:
     return str(os.getenv("OPENAI_STRUCTURED_OUTPUTS", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _structured_output_variants(review_mode: str) -> list[bool]:
+    if not _structured_outputs_enabled():
+        return [False]
+    mode = _normalize_review_mode(review_mode)
+    if mode == "quick" and not _quick_structured_outputs_enabled():
+        return [False]
+    return [True, False]
+
+
+def _quick_structured_outputs_enabled() -> bool:
+    return str(os.getenv("OPENAI_QUICK_STRUCTURED_OUTPUTS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _output_tokens_for_package(package: dict[str, Any]) -> int:
+    mode = _normalize_review_mode(str(package.get("review_mode", "standard") or "standard"))
+    defaults = {"quick": 1600, "standard": COMBINED_AI_OUTPUT_TOKENS, "deep": 4200}
+    env_names = {
+        "quick": "OPENAI_QUICK_REVIEW_OUTPUT_TOKENS",
+        "standard": "OPENAI_STANDARD_REVIEW_OUTPUT_TOKENS",
+        "deep": "OPENAI_DEEP_REVIEW_OUTPUT_TOKENS",
+    }
+    raw = os.getenv(env_names.get(mode, ""), "").strip()
+    try:
+        value = int(raw) if raw else defaults.get(mode, COMBINED_AI_OUTPUT_TOKENS)
+    except ValueError:
+        value = defaults.get(mode, COMBINED_AI_OUTPUT_TOKENS)
+    return max(800, min(value, 6000))
 
 
 def _combined_ai_structured_output_format() -> dict[str, Any]:
