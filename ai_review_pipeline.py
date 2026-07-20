@@ -11,7 +11,7 @@ from models import CompanyProfile, Finding, PdfDocument
 
 AI_PIPELINE_LOCK_TIMEOUT_SECONDS = max(
     1.0,
-    min(float(os.getenv("OPENAI_AI_PIPELINE_LOCK_TIMEOUT_SECONDS", "300")), 600.0),
+    min(float(os.getenv("OPENAI_AI_PIPELINE_LOCK_TIMEOUT_SECONDS", "30")), 120.0),
 )
 _AI_PIPELINE_LOCK = threading.Lock()
 FAILED_AI_STATUSES = {"deferred", "error", "unavailable"}

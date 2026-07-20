@@ -31,6 +31,12 @@ $env:OPENAI_STRUCTURED_OUTPUTS="1"
 $env:OPENAI_QUICK_REVIEW_MODEL="gpt-5-mini"
 $env:OPENAI_STANDARD_REVIEW_MODEL="gpt-5.1"
 $env:OPENAI_DEEP_REVIEW_MODEL="gpt-5.1"
+$env:OPENAI_MAX_ATTEMPTS="2"
+$env:OPENAI_RETRY_BACKOFF_SECONDS="4,8"
+$env:OPENAI_REQUEST_TIMEOUT_SECONDS="12"
+$env:OPENAI_REQUEST_LOCK_TIMEOUT_SECONDS="30"
+$env:OPENAI_AI_PIPELINE_LOCK_TIMEOUT_SECONDS="30"
+$env:OPENAI_MODEL_FALLBACK_LIMIT="2"
 ```
 
 Deployment environment variables:
@@ -43,9 +49,17 @@ OPENAI_STRUCTURED_OUTPUTS=1
 OPENAI_QUICK_REVIEW_MODEL=gpt-5-mini
 OPENAI_STANDARD_REVIEW_MODEL=gpt-5.1
 OPENAI_DEEP_REVIEW_MODEL=gpt-5.1
+OPENAI_MAX_ATTEMPTS=2
+OPENAI_RETRY_BACKOFF_SECONDS=4,8
+OPENAI_REQUEST_TIMEOUT_SECONDS=12
+OPENAI_REQUEST_LOCK_TIMEOUT_SECONDS=30
+OPENAI_AI_PIPELINE_LOCK_TIMEOUT_SECONDS=30
+OPENAI_MODEL_FALLBACK_LIMIT=2
 ```
 
 If you change providers later, keep the provider base URL in `OPENAI_BASE_URL`; for OpenAI direct usage it must be `https://api.openai.com/v1`, not a dashboard URL and not a router URL.
+
+The automatic Quick AI review is intentionally bounded by the timeout and fallback settings above so deterministic exports are not delayed for several minutes. Increase these values only for deliberate Deep/partner-style testing.
 
 ## Run from the command line
 

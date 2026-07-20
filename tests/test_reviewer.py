@@ -6368,6 +6368,29 @@ def test_ai_dns_resolution_error_is_classified_and_explained():
     assert ai_combined_review._error_category(exc) == "network_dns"
 
 
+def test_ai_model_attempts_are_limited_for_automatic_quick_review(monkeypatch):
+    monkeypatch.delenv("OPENAI_FALLBACK_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_SAFE_FALLBACK_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_SECONDARY_FALLBACK_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL_FALLBACK_LIMIT", raising=False)
+
+    attempts = ai_combined_review._model_attempts("", "Quick review")
+
+    assert len(attempts) == 2
+    assert attempts[1] == "gpt-4.1-mini"
+
+
+def test_ai_model_attempts_allow_wider_deep_review(monkeypatch):
+    monkeypatch.delenv("OPENAI_FALLBACK_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_SAFE_FALLBACK_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_SECONDARY_FALLBACK_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL_FALLBACK_LIMIT", raising=False)
+
+    attempts = ai_combined_review._model_attempts("", "Deep review")
+
+    assert len(attempts) == 3
+    assert attempts[0] == ai_combined_review.DEFAULT_AI_DEEP_MODEL
+
 def test_ai_openai_call_retries_rate_limit_with_retry_after(monkeypatch):
     from urllib import error as url_error
 

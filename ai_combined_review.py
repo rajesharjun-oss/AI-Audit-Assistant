@@ -844,20 +844,55 @@ def _clone_finding(finding: Finding) -> Finding:
 
 
 def _model_attempts(model: str, review_mode: str = "standard") -> list[str]:
-    preferred = (model or "").strip() or _model_for_review_mode(review_mode)
-    fallback_candidates = [
-        os.getenv("OPENAI_FALLBACK_MODEL", "").strip(),
-        DEFAULT_AI_STANDARD_MODEL,
-        os.getenv("OPENAI_SAFE_FALLBACK_MODEL", "gpt-4.1-mini").strip(),
-        os.getenv("OPENAI_SECONDARY_FALLBACK_MODEL", "gpt-4o-mini").strip(),
-        DEFAULT_AI_QUICK_MODEL,
-    ]
+    mode = _normalize_review_mode(review_mode)
+    preferred = (model or "").strip() or _model_for_review_mode(mode)
+    safe_fallback = os.getenv("OPENAI_SAFE_FALLBACK_MODEL", "gpt-4.1-mini").strip()
+    secondary_fallback = os.getenv("OPENAI_SECONDARY_FALLBACK_MODEL", "gpt-4o-mini").strip()
+    configured_fallback = os.getenv("OPENAI_FALLBACK_MODEL", "").strip()
+    if mode == "deep":
+        fallback_candidates = [
+            configured_fallback,
+            DEFAULT_AI_STANDARD_MODEL,
+            safe_fallback,
+            secondary_fallback,
+            DEFAULT_AI_QUICK_MODEL,
+        ]
+    elif mode == "standard":
+        fallback_candidates = [
+            configured_fallback,
+            safe_fallback,
+            secondary_fallback,
+            DEFAULT_AI_QUICK_MODEL,
+        ]
+    else:
+        fallback_candidates = [
+            configured_fallback,
+            safe_fallback,
+            secondary_fallback,
+            DEFAULT_AI_STANDARD_MODEL,
+        ]
     attempts: list[str] = []
+    limit = _model_attempt_limit(mode)
     for candidate in [preferred, *fallback_candidates]:
         candidate = str(candidate or "").strip()
         if candidate and candidate not in attempts:
             attempts.append(candidate)
+        if len(attempts) >= limit:
+            break
     return attempts or [DEFAULT_AI_MODEL]
+
+
+def _model_attempt_limit(review_mode: str) -> int:
+    env_value = os.getenv("OPENAI_MODEL_FALLBACK_LIMIT", "").strip()
+    if env_value:
+        try:
+            return max(1, min(int(env_value), 5))
+        except ValueError:
+            pass
+    mode = _normalize_review_mode(review_mode)
+    if mode == "deep":
+        return 3
+    return 2
 
 
 def _model_for_review_mode(review_mode: str) -> str:

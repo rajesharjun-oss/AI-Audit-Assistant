@@ -21,7 +21,7 @@ NOTES_HEADING_PATTERNS = (
 )
 
 def _parse_retry_backoff_seconds() -> tuple[int, ...]:
-    raw = os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", "5,10,20,40,60")
+    raw = os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", "4,8")
     values: list[int] = []
     for part in raw.split(","):
         text = part.strip()
@@ -33,14 +33,14 @@ def _parse_retry_backoff_seconds() -> tuple[int, ...]:
             continue
         if value > 0:
             values.append(max(1, min(value, 120)))
-    return tuple(values or [5, 10, 20, 40])
+    return tuple(values or [4, 8])
 
 
 AI_RETRY_BACKOFF_SECONDS = _parse_retry_backoff_seconds()
 AI_RATE_LIMIT_COOLDOWN_SECONDS = max(5, min(int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "20")), 120))
-AI_REQUEST_TIMEOUT_SECONDS = max(5, min(int(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "15")), 45))
-AI_MAX_ATTEMPTS = max(1, min(int(os.getenv("OPENAI_MAX_ATTEMPTS", str(min(5, len(AI_RETRY_BACKOFF_SECONDS) + 1)))), 5))
-AI_REQUEST_LOCK_TIMEOUT_SECONDS = max(1.0, min(float(os.getenv("OPENAI_REQUEST_LOCK_TIMEOUT_SECONDS", "180")), 300.0))
+AI_REQUEST_TIMEOUT_SECONDS = max(5, min(int(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "12")), 45))
+AI_MAX_ATTEMPTS = max(1, min(int(os.getenv("OPENAI_MAX_ATTEMPTS", "2")), 5))
+AI_REQUEST_LOCK_TIMEOUT_SECONDS = max(1.0, min(float(os.getenv("OPENAI_REQUEST_LOCK_TIMEOUT_SECONDS", "30")), 300.0))
 _AI_RATE_LIMIT_UNTIL: float = 0.0
 _AI_RATE_LIMIT_LOCK = threading.Lock()
 _AI_REQUEST_LOCK = threading.Lock()
