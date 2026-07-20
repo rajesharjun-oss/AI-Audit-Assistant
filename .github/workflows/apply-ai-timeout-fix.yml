@@ -58,9 +58,25 @@ jobs:
           python -m pip install -r requirements.txt pytest
 
       - name: Run timeout regression tests
+        id: tests
+        continue-on-error: true
         run: |
-          pytest -q tests/test_ai_timeout_regressions.py
-          pytest -q tests/test_reviewer.py -k "ai_openai_call_uses_bounded_timeout or quick_ai_payload_uses_smaller_output_budget or ai_model_attempts_are_limited_for_automatic_quick_review or ai_invalid_provider_response_has_actionable_message or ai_dns_resolution_error_is_classified_and_explained"
+          set -o pipefail
+          {
+            pytest -q tests/test_ai_timeout_regressions.py
+            pytest -q tests/test_reviewer.py -k "ai_openai_call_uses_bounded_timeout or quick_ai_payload_uses_smaller_output_budget or ai_model_attempts_are_limited_for_automatic_quick_review or ai_invalid_provider_response_has_actionable_message or ai_dns_resolution_error_is_classified_and_explained"
+          } 2>&1 | tee test.log
+
+      - name: Upload test diagnostics
+        if: steps.tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-timeout-test-log
+          path: test.log
+
+      - name: Stop after test failure
+        if: steps.tests.outcome == 'failure'
+        run: exit 1
 
       - name: Commit tested patch when needed
         run: |
