@@ -355,6 +355,8 @@ def _build_prompt(package: dict[str, Any]) -> str:
         "5. Populate review_comment_rows using the audit-style categories and High/Medium/Low priorities from the JSON schema.\n\n"
         "Rules:\n"
         "- Use only the supplied compact evidence package; do not invent missing pages or note content.\n"
+        "- Do not use broad adverse conclusions such as 'material discrepancies', 'critical errors', 'below acceptable standards', 'overall financial integrity', or 'not ready' unless the JSON includes specific High or Medium rows with page/note evidence supporting that conclusion.\n"
+        "- If no policy, disclosure, grammar, note-reference, cash-flow, or false-positive-cleanup issue is supported by supplied evidence, say that no AI exception was added for that section.\n"
         "- Do not suppress arithmetic findings unless supplied amount evidence supports suppression.\n"
         "- For amount findings, include page number, statement/note name, reported amount, expected amount, difference, and evidence in the rationale/recommendation fields where available.\n"
         "- For cross-reference issues, show both the incorrect reference and the correct reference where evidence supports it.\n"
@@ -627,13 +629,31 @@ def _parsed_to_result(
     missed_findings, missed_rows = _observations_to_outputs(missed_observations, "AI full review")
     final_findings = findings_after_adjudication + policy_findings + missed_findings
     review_comment_rows = _review_comment_rows_from_parsed(parsed, policy_rows + missed_rows)
+    summary_fields = _summary_fields_from_parsed(
+        parsed,
+        policy_rows=policy_rows,
+        missed_rows=missed_rows,
+        finding_rows=finding_export,
+        review_comment_rows=review_comment_rows,
+        review_mode=review_mode,
+    )
+    combined_summary = _guard_ai_summary(
+        str(parsed.get("summary", "") or "").strip(),
+        policy_rows + missed_rows + review_comment_rows,
+        summary_fields["Combined AI review summary"],
+    )
+    executive_memo = _guard_ai_summary(
+        str(parsed.get("executive_review_memo", "") or parsed.get("executive_memo", "") or "").strip(),
+        policy_rows + missed_rows + review_comment_rows,
+        summary_fields["Combined AI review summary"],
+    )
     return CombinedAiReviewResult(
         findings=final_findings,
         policy_export=policy_rows,
         full_export=missed_rows,
         finding_export=finding_export,
-        summary=str(parsed.get("summary", "") or "").strip(),
-        executive_memo=str(parsed.get("executive_review_memo", "") or parsed.get("executive_memo", "") or "").strip(),
+        summary=combined_summary,
+        executive_memo=executive_memo,
         status="completed",
         model=model,
         suppressed_count=len(suppressed_rows),
@@ -642,7 +662,7 @@ def _parsed_to_result(
         evidence_rows=[evidence_row],
         error_rows=error_rows,
         review_comment_rows=review_comment_rows,
-        summary_fields=_summary_fields_from_parsed(parsed),
+        summary_fields=summary_fields,
         review_mode=review_mode,
     )
 
@@ -717,19 +737,175 @@ def _observations_to_outputs(observations: list[dict[str, Any]], category: str) 
 
 
 
-def _summary_fields_from_parsed(parsed: dict[str, Any]) -> dict[str, str]:
+def _summary_fields_from_parsed(
+    parsed: dict[str, Any],
+    policy_rows: list[dict[str, str]] | None = None,
+    missed_rows: list[dict[str, str]] | None = None,
+    finding_rows: list[dict[str, str]] | None = None,
+    review_comment_rows: list[dict[str, str]] | None = None,
+    review_mode: str = "standard",
+) -> dict[str, str]:
     action_points = parsed.get("immediate_action_points", [])
     if isinstance(action_points, list):
         action_text = "\n".join(str(item).strip() for item in action_points if str(item).strip())
     else:
         action_text = str(action_points or "").strip()
+    policy_rows = list(policy_rows or [])
+    missed_rows = list(missed_rows or [])
+    finding_rows = list(finding_rows or [])
+    review_comment_rows = list(review_comment_rows or [])
+    mode_label = _normalize_review_mode(review_mode).replace("_", " ").title()
+    policy_summary = _section_summary(
+        "AI policy judgement",
+        policy_rows,
+        f"No AI policy exceptions were added in {mode_label} mode from the supplied evidence.",
+    )
+    full_summary = _section_summary(
+        "AI full review",
+        missed_rows or review_comment_rows,
+        f"No additional AI full-review exceptions were added in {mode_label} mode from the supplied evidence.",
+    )
+    finding_summary = _finding_review_summary(finding_rows, mode_label)
+    combined_summary = _combined_section_summary(policy_rows, missed_rows, finding_rows, review_comment_rows, mode_label)
     return {
+        "AI policy judgement summary": policy_summary,
+        "AI full review summary": full_summary,
+        "AI finding review summary": finding_summary,
+        "Combined AI review summary": combined_summary,
         "Overall sign-off conclusion": str(parsed.get("overall_signoff_conclusion", "") or "").strip(),
         "Recommended immediate action points": action_text,
         "Cash flow correctness note": str(parsed.get("cash_flow_conclusion", "") or "").strip(),
         "Regulatory-reference note": str(parsed.get("regulatory_reference_conclusion", "") or "").strip(),
         "Casting and cross-casting note": str(parsed.get("casting_cross_casting_conclusion", "") or "").strip(),
     }
+
+
+_BROAD_ADVERSE_SUMMARY_TERMS = (
+    "below acceptable",
+    "critical",
+    "high-impact",
+    "material discrepancies",
+    "material discrepancy",
+    "material errors",
+    "material error",
+    "overall financial integrity",
+    "significant issues",
+    "significant issue",
+    "considerable revisions",
+    "immediate attention",
+    "immediate rectification",
+    "not ready",
+    "unacceptable",
+)
+
+
+def _section_summary(section_name: str, rows: list[dict[str, str]], default: str) -> str:
+    supported_rows = [row for row in rows if _row_has_page_or_note(row) and _row_status_is_reviewable(row)]
+    if not supported_rows:
+        return default
+    counts = _severity_counts(supported_rows)
+    pages = _page_note_summary(supported_rows)
+    count_text = ", ".join(f"{count} {severity}" for severity, count in counts.items() if count)
+    count_text = count_text or f"{len(supported_rows)} review item(s)"
+    location_text = f" {pages}." if pages else ""
+    return f"{section_name} added {count_text} evidence-backed review item(s).{location_text}"
+
+
+def _finding_review_summary(rows: list[dict[str, str]], mode_label: str) -> str:
+    if not rows:
+        return f"AI finding review completed in {mode_label} mode; no deterministic findings required suppression, downgrade, or rewrite."
+    decisions: dict[str, int] = {}
+    for row in rows:
+        decision = str(row.get("Decision", "") or "").strip().title() or "Reviewed"
+        decisions[decision] = decisions.get(decision, 0) + 1
+    decision_text = ", ".join(f"{count} {decision.lower()}" for decision, count in sorted(decisions.items()))
+    return f"AI finding review completed in {mode_label} mode; {decision_text} deterministic finding(s)."
+
+
+def _combined_section_summary(
+    policy_rows: list[dict[str, str]],
+    missed_rows: list[dict[str, str]],
+    finding_rows: list[dict[str, str]],
+    review_comment_rows: list[dict[str, str]],
+    mode_label: str,
+) -> str:
+    supported_rows = [
+        row for row in (policy_rows + missed_rows + review_comment_rows)
+        if _row_has_page_or_note(row) and _row_status_is_reviewable(row)
+    ]
+    if supported_rows:
+        counts = _severity_counts(supported_rows)
+        count_text = ", ".join(f"{count} {severity}" for severity, count in counts.items() if count)
+        location_text = _page_note_summary(supported_rows)
+        return f"Combined AI review completed in {mode_label} mode and added {count_text or len(supported_rows)} evidence-backed review item(s). {location_text}".strip()
+    if finding_rows:
+        return _finding_review_summary(finding_rows, mode_label)
+    return f"Combined AI review completed in {mode_label} mode; no evidence-backed AI exceptions were added."
+
+
+def _guard_ai_summary(summary: str, supporting_rows: list[dict[str, str]], default: str) -> str:
+    clean = re.sub(r"\s+", " ", str(summary or "")).strip()
+    if not clean:
+        return default
+    lower = clean.lower()
+    broad = any(term in lower for term in _BROAD_ADVERSE_SUMMARY_TERMS)
+    has_support = any(_row_has_page_or_note(row) and _row_is_high_or_medium(row) for row in supporting_rows)
+    names_source = any(marker in lower for marker in ("page ", "note ", "statement of", "section "))
+    if broad and (not has_support or not names_source):
+        return default
+    return clean
+
+
+def _row_has_page_or_note(row: dict[str, str]) -> bool:
+    page = str(
+        row.get("Page reference")
+        or row.get("Page number")
+        or row.get("page_reference")
+        or row.get("page_number")
+        or ""
+    ).strip()
+    note = str(row.get("Note reference") or row.get("note_reference") or "").strip()
+    return bool(page or note)
+
+
+def _row_status_is_reviewable(row: dict[str, str]) -> bool:
+    status = str(row.get("Status") or row.get("status") or "").strip().lower()
+    return status not in {"", "ok", "passed", "pass", "skipped", "not elevated", "internal note"}
+
+
+def _row_is_high_or_medium(row: dict[str, str]) -> bool:
+    severity = _normalize_severity(row.get("Severity") or row.get("Priority") or row.get("priority") or "")
+    return severity in {"High", "Medium"}
+
+
+def _severity_counts(rows: list[dict[str, str]]) -> dict[str, int]:
+    counts = {"High": 0, "Medium": 0, "Low": 0}
+    for row in rows:
+        severity = _normalize_severity(row.get("Severity") or row.get("Priority") or row.get("priority") or "")
+        counts[severity] = counts.get(severity, 0) + 1
+    return counts
+
+
+def _page_note_summary(rows: list[dict[str, str]], limit: int = 6) -> str:
+    locations: list[str] = []
+    for row in rows:
+        page = str(
+            row.get("Page reference")
+            or row.get("Page number")
+            or row.get("page_reference")
+            or row.get("page_number")
+            or ""
+        ).strip()
+        note = str(row.get("Note reference") or row.get("note_reference") or "").strip()
+        location = " | ".join(part for part in (page, note) if part)
+        if location and location not in locations:
+            locations.append(location)
+    if not locations:
+        return ""
+    shown = ", ".join(locations[:limit])
+    if len(locations) > limit:
+        shown += f", plus {len(locations) - limit} more"
+    return f"Locations: {shown}"
 
 
 def _review_comment_rows_from_parsed(parsed: dict[str, Any], fallback_rows: list[dict[str, str]]) -> list[dict[str, str]]:

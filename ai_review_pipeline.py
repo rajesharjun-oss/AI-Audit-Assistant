@@ -110,17 +110,27 @@ def run_ai_review_pipeline(review_context: AiReviewContext) -> AiReviewPipelineR
 def _merge_combined_result(result: AiReviewPipelineResult, combined, review_context: AiReviewContext) -> None:
     result.findings = combined.findings
     result.policy_export = combined.policy_export
-    result.policy_summary = combined.summary
+    summary_fields = dict(getattr(combined, "summary_fields", {}) or {})
+    mode_label = _display_review_mode(getattr(combined, "review_mode", "") or review_context.review_mode).title()
+    result.policy_summary = summary_fields.get("AI policy judgement summary") or _stage_summary_from_rows(
+        "AI policy judgement",
+        result.policy_export,
+        f"No AI policy exceptions were added in {mode_label} mode from the supplied evidence.",
+    )
     result.policy_status = _stage_status_from_combined(combined.status, review_context.use_policy_review)
     result.policy_model = combined.model or review_context.model or DEFAULT_AI_MODEL
     result.policy_message = combined.message
     result.full_export = combined.full_export
-    result.full_summary = combined.executive_memo or combined.summary
+    result.full_summary = summary_fields.get("AI full review summary") or _stage_summary_from_rows(
+        "AI full review",
+        result.full_export or list(getattr(combined, "review_comment_rows", []) or []),
+        f"No additional AI full-review exceptions were added in {mode_label} mode from the supplied evidence.",
+    )
     result.full_status = _stage_status_from_combined(combined.status, review_context.use_full_review)
     result.full_model = combined.model or review_context.model or DEFAULT_AI_MODEL
     result.full_message = combined.message
     result.finding_export = combined.finding_export
-    result.finding_summary = combined.summary
+    result.finding_summary = summary_fields.get("AI finding review summary") or _finding_summary_from_rows(result.finding_export, mode_label)
     result.finding_status = "completed" if combined.status == "completed" else combined.status
     result.finding_model = combined.model or review_context.model or DEFAULT_AI_MODEL
     result.finding_message = combined.message
@@ -130,10 +140,10 @@ def _merge_combined_result(result: AiReviewPipelineResult, combined, review_cont
     result.evidence_pack_rows.extend(combined.evidence_rows)
     result.error_rows.extend(combined.error_rows)
     result.review_comment_rows = list(getattr(combined, "review_comment_rows", []) or [])
-    result.summary_fields = dict(getattr(combined, "summary_fields", {}) or {})
+    result.summary_fields = summary_fields
     result.review_mode = combined.review_mode
-    result.combined_summary = combined.summary
-    result.combined_memo = combined.executive_memo
+    result.combined_summary = summary_fields.get("Combined AI review summary") or combined.summary
+    result.combined_memo = combined.executive_memo if combined.executive_memo != combined.summary else result.combined_summary
     if combined.status == "completed":
         result.checks_performed.append(
             f"Combined AI review completed using {combined.model} in {combined.review_mode.title()} mode; "
@@ -141,6 +151,61 @@ def _merge_combined_result(result: AiReviewPipelineResult, combined, review_cont
         )
     elif combined.message:
         result.checks_skipped.append(combined.message)
+
+
+def _stage_summary_from_rows(section_name: str, rows: list[dict[str, str]], default: str) -> str:
+    supported_rows = [row for row in list(rows or []) if _row_has_page_or_note(row) and _row_status_is_reviewable(row)]
+    if not supported_rows:
+        return default
+    counts = {"High": 0, "Medium": 0, "Low": 0}
+    for row in supported_rows:
+        severity = _normalize_row_severity(row)
+        counts[severity] = counts.get(severity, 0) + 1
+    count_text = ", ".join(f"{count} {severity}" for severity, count in counts.items() if count)
+    locations = _row_locations(supported_rows)
+    location_text = f" Locations: {locations}." if locations else ""
+    return f"{section_name} added {count_text or len(supported_rows)} evidence-backed review item(s).{location_text}"
+
+
+def _finding_summary_from_rows(rows: list[dict[str, str]], mode_label: str) -> str:
+    if not rows:
+        return f"AI finding review completed in {mode_label} mode; no deterministic findings required suppression, downgrade, or rewrite."
+    decisions: dict[str, int] = {}
+    for row in rows:
+        decision = str(row.get("Decision", "") or "Reviewed").strip().title()
+        decisions[decision] = decisions.get(decision, 0) + 1
+    decision_text = ", ".join(f"{count} {decision.lower()}" for decision, count in sorted(decisions.items()))
+    return f"AI finding review completed in {mode_label} mode; {decision_text} deterministic finding(s)."
+
+
+def _row_has_page_or_note(row: dict[str, str]) -> bool:
+    page = str(row.get("Page reference") or row.get("Page number") or row.get("page_reference") or row.get("page_number") or "").strip()
+    note = str(row.get("Note reference") or row.get("note_reference") or "").strip()
+    return bool(page or note)
+
+
+def _row_status_is_reviewable(row: dict[str, str]) -> bool:
+    status = str(row.get("Status") or row.get("status") or "").strip().lower()
+    return status not in {"", "ok", "passed", "pass", "skipped", "not elevated", "internal note"}
+
+
+def _normalize_row_severity(row: dict[str, str]) -> str:
+    text = str(row.get("Severity") or row.get("Priority") or row.get("priority") or "Low").strip().title()
+    return text if text in {"High", "Medium", "Low"} else "Low"
+
+
+def _row_locations(rows: list[dict[str, str]], limit: int = 6) -> str:
+    locations: list[str] = []
+    for row in rows:
+        page = str(row.get("Page reference") or row.get("Page number") or row.get("page_reference") or row.get("page_number") or "").strip()
+        note = str(row.get("Note reference") or row.get("note_reference") or "").strip()
+        location = " | ".join(part for part in (page, note) if part)
+        if location and location not in locations:
+            locations.append(location)
+    shown = ", ".join(locations[:limit])
+    if len(locations) > limit:
+        shown += f", plus {len(locations) - limit} more"
+    return shown
 
 
 def _stage_status_from_combined(status: str, enabled: bool) -> str:

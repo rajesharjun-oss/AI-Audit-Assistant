@@ -728,6 +728,33 @@ def test_combined_ai_retries_plain_json_when_router_rejects_structured_output(mo
     assert result.error_rows[0]["Structured outputs"] == "Yes"
 
 
+
+def test_combined_ai_replaces_unsupported_broad_summary_with_neutral_section_text():
+    parsed = {
+        "summary": "The draft financial statements exhibit a series of significant issues, including cash flow inconsistencies, regulatory reference shortcomings, and arithmetic errors.",
+        "executive_review_memo": "Material discrepancies were identified across multiple sections which need immediate attention.",
+        "policy_review_findings": [],
+        "missed_review_findings": [],
+        "finding_adjudications": [],
+        "review_comment_rows": [],
+    }
+
+    result = ai_combined_review._parsed_to_result(
+        parsed,
+        [],
+        "gpt-5-mini",
+        "quick",
+        {"Evidence type": "test"},
+        [],
+    )
+
+    assert "significant issues" not in result.summary.lower()
+    assert "material discrepancies" not in result.executive_memo.lower()
+    assert result.summary == "Combined AI review completed in Quick mode; no evidence-backed AI exceptions were added."
+    assert result.summary_fields["AI policy judgement summary"] == "No AI policy exceptions were added in Quick mode from the supplied evidence."
+    assert result.summary_fields["AI full review summary"] == "No additional AI full-review exceptions were added in Quick mode from the supplied evidence."
+
+
 def test_ai_review_pipeline_runs_combined_review_once(monkeypatch):
     document = PdfDocument([PdfPage(1, "Notes to the financial statements\n1. Significant accounting policies", [])])
     profile = CompanyProfile(company_name="Test Limited")
@@ -765,6 +792,47 @@ def test_ai_review_pipeline_runs_combined_review_once(monkeypatch):
     assert result.full_status == "completed"
     assert result.finding_status == "completed"
     assert result.findings == [base_finding]
+
+
+def test_ai_pipeline_does_not_copy_generic_combined_summary_into_all_sections(monkeypatch):
+    document = PdfDocument([PdfPage(1, "Notes to the financial statements\n1. Significant accounting policies", [])])
+    profile = CompanyProfile(company_name="Test Limited")
+
+    monkeypatch.setattr(ai_review_pipeline, "_AI_PIPELINE_LOCK", __import__("threading").Lock())
+    monkeypatch.setattr(
+        ai_review_pipeline,
+        "run_combined_ai_review",
+        lambda *args, **kwargs: ai_combined_review.CombinedAiReviewResult(
+            findings=list(args[4]),
+            summary="The draft financial statements exhibit significant issues and material discrepancies.",
+            executive_memo="The draft financial statements exhibit significant issues and material discrepancies.",
+            status="completed",
+            model="gpt-5-mini",
+            review_mode="quick",
+        ),
+    )
+
+    result = ai_review_pipeline.run_ai_review_pipeline(
+        ai_review_pipeline.AiReviewContext(
+            document=document,
+            profile=profile,
+            note_sections={"1": "Significant accounting policies"},
+            policy_map={},
+            findings=[],
+            model="gpt-5-mini",
+            use_policy_review=True,
+            use_full_review=True,
+            review_mode="Quick review",
+        )
+    )
+
+    assert result.policy_summary == "No AI policy exceptions were added in Quick mode from the supplied evidence."
+    assert result.full_summary == "No additional AI full-review exceptions were added in Quick mode from the supplied evidence."
+    assert result.finding_summary == "AI finding review completed in Quick mode; no deterministic findings required suppression, downgrade, or rewrite."
+    assert "material discrepancies" not in result.policy_summary.lower()
+    assert "material discrepancies" not in result.full_summary.lower()
+    assert "material discrepancies" not in result.finding_summary.lower()
+
 
 def test_combined_ai_capacity_failure_does_not_run_finding_cleanup(monkeypatch):
     filler = "Additional extracted review context.\n" * 80
