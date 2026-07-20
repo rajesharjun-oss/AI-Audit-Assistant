@@ -29,7 +29,7 @@ jobs:
           python-version: '3.12'
 
       - name: Apply targeted patch
-        run: python scripts/apply_ai_timeout_fix_v3.py
+        run: python scripts/apply_ai_timeout_fix_v4.py
 
       - name: Validate source changes
         id: validate
