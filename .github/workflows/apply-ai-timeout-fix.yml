@@ -4,13 +4,16 @@ on:
   push:
     branches:
       - fix/ai-review-timeout
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   patch-and-test:
-    if: ${{ !contains(github.event.head_commit.message, '[ai-timeout-fix-applied]') }}
+    if: ${{ github.event_name == 'pull_request' || !contains(github.event.head_commit.message, '[ai-timeout-fix-applied]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out patch branch
@@ -26,7 +29,7 @@ jobs:
           python-version: '3.12'
 
       - name: Apply targeted patch
-        run: python scripts/apply_ai_timeout_fix_v2.py
+        run: python scripts/apply_ai_timeout_fix_v3.py
 
       - name: Validate source changes
         run: |
@@ -43,8 +46,12 @@ jobs:
           pytest -q tests/test_ai_timeout_regressions.py
           pytest -q tests/test_reviewer.py -k "ai_openai_call_uses_bounded_timeout or quick_ai_payload_uses_smaller_output_budget or ai_model_attempts_are_limited_for_automatic_quick_review or ai_invalid_provider_response_has_actionable_message or ai_dns_resolution_error_is_classified_and_explained"
 
-      - name: Commit tested patch
+      - name: Commit tested patch when needed
         run: |
+          if git diff --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
           git config user.name "AI Audit Assistant Patch Bot"
           git config user.email "actions@users.noreply.github.com"
           git add ai_policy_review.py ai_combined_review.py ai_review_pipeline.py app.py .env.example README.md tests/test_reviewer.py tests/test_ai_timeout_regressions.py
