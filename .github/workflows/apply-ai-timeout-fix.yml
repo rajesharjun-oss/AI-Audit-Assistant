@@ -4,13 +4,16 @@ on:
   push:
     branches:
       - fix/ai-review-timeout
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   patch-and-test:
-    if: ${{ !contains(github.event.head_commit.message, '[ai-timeout-fix-applied]') }}
+    if: ${{ github.event_name == 'pull_request' || !contains(github.event.head_commit.message, '[ai-timeout-fix-applied]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out patch branch
@@ -48,4 +51,4 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add ai_policy_review.py ai_combined_review.py ai_review_pipeline.py app.py .env.example README.md tests/test_reviewer.py tests/test_ai_timeout_regressions.py
           git commit -m "Fix AI review timeout handling [ai-timeout-fix-applied]"
-          git push origin HEAD:${GITHUB_REF_NAME}
+          git push origin HEAD:fix/ai-review-timeout
