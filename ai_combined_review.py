@@ -46,6 +46,31 @@ COMBINED_AI_REPAIR_SHAPE = (
     '"reason":"...","recommended_action":"...","rewrite":"..."}]}'
 )
 
+QUICK_COMBINED_AI_REPAIR_SHAPE = (
+    '{"summary":"short conclusion","executive_review_memo":"short memo",'
+    '"overall_signoff_conclusion":"ready|not ready|manual review required with reason",'
+    '"immediate_action_points":["action 1","action 2"],'
+    '"cash_flow_conclusion":"short note on cash flow correctness",'
+    '"regulatory_reference_conclusion":"short note on regulatory-reference issues",'
+    '"casting_cross_casting_conclusion":"short note on casting and cross-casting issues",'
+    '"review_comment_rows":[{"section_or_statement_or_note":"...","page_number":"Page X",'
+    '"account_or_line_item":"...","current_wording_amount_reference":"...",'
+    '"issue_identified":"...","expected_correction_recommendation":"...",'
+    '"category":"Spelling / Grammar|Regulatory Reference|Note Cross-reference|Casting|Cross-casting|Cash Flow|Disclosure|Presentation|Internal Consistency",'
+    '"priority":"High|Medium|Low","status":"Open","reviewer_comments":"..."}],'
+    '"policy_review_findings":[{"title":"...","severity":"High|Medium|Low","confidence":"High|Medium|Low",'
+    '"status":"exception|review_prompt|ok","page_reference":"Page X","note_reference":"Note X","issue":"...",'
+    '"evidence_snippet":"...","recommendation":"...","rationale":"..."}],'
+    '"missed_review_findings":[{"title":"...","category":"Formatting|Grammar|Disclosure|Presentation|Notes agreement|Cash Flow|Regulatory Reference|Internal Consistency",'
+    '"severity":"High|Medium|Low","confidence":"High|Medium|Low","status":"exception|review_prompt|ok",'
+    '"page_reference":"Page X","note_reference":"Note X","issue":"...","evidence_snippet":"...",'
+    '"recommendation":"...","rationale":"..."}],'
+    '"finding_adjudications":[{"finding_id":"F1","decision":"keep|downgrade|suppress|rewrite",'
+    '"revised_severity":"High|Medium|Low","confidence":"High|Medium|Low","status":"confirmed_exception|review_prompt|likely_false_positive|insufficient_evidence",'
+    '"reason":"...","recommended_action":"...","rewrite":"..."}]}'
+)
+
+
 STATEMENT_PATTERNS = (
     "statement of financial position",
     "statement of profit or loss",
@@ -58,13 +83,13 @@ STATEMENT_PATTERNS = (
 
 MODE_LIMITS = {
     "quick": {
-        "primary_chars": 4500,
-        "notes_chars": 2500,
-        "contents_chars": 1600,
-        "key_pages": 4,
-        "key_page_chars": 700,
-        "findings": 25,
-        "skipped": 12,
+        "primary_chars": 3200,
+        "notes_chars": 1800,
+        "contents_chars": 1000,
+        "key_pages": 3,
+        "key_page_chars": 550,
+        "findings": 18,
+        "skipped": 8,
     },
     "standard": {
         "primary_chars": 8500,
@@ -154,7 +179,7 @@ def run_combined_ai_review(
                 try:
                     parsed = _parse_response_json(response_json)
                 except MalformedAiResponseError as parse_exc:
-                    parsed = _repair_response_json(api_key, attempt_model, parse_exc.text, COMBINED_AI_REPAIR_SHAPE)
+                    parsed = _repair_response_json(api_key, attempt_model, parse_exc.text, _repair_shape_for_review_mode(attempt_mode))
                 return _parsed_to_result(parsed, findings, attempt_model, attempt_mode, evidence_row, error_rows)
             except Exception as exc:  # pragma: no cover - network/runtime dependent
                 row = _error_row_from_exception(exc, attempt_model, attempt_mode, attempt_counter, package, structured_output)
@@ -229,7 +254,7 @@ def _quick_structured_outputs_enabled() -> bool:
 
 def _output_tokens_for_package(package: dict[str, Any]) -> int:
     mode = _normalize_review_mode(str(package.get("review_mode", "standard") or "standard"))
-    defaults = {"quick": 1600, "standard": COMBINED_AI_OUTPUT_TOKENS, "deep": 4200}
+    defaults = {"quick": 1200, "standard": COMBINED_AI_OUTPUT_TOKENS, "deep": 4200}
     env_names = {
         "quick": "OPENAI_QUICK_REVIEW_OUTPUT_TOKENS",
         "standard": "OPENAI_STANDARD_REVIEW_OUTPUT_TOKENS",
@@ -368,6 +393,10 @@ def _build_prompt(package: dict[str, Any]) -> str:
         "Compact evidence package:\n"
         f"{json.dumps(package, ensure_ascii=False, indent=2)}"
     )
+
+
+def _repair_shape_for_review_mode(review_mode: str) -> str:
+    return QUICK_COMBINED_AI_REPAIR_SHAPE if _normalize_review_mode(review_mode) == "quick" else COMBINED_AI_REPAIR_SHAPE
 
 
 def _build_compact_review_package(

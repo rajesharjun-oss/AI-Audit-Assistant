@@ -2451,6 +2451,41 @@ def test_skipped_table_details_include_reviewer_and_source_pages(monkeypatch):
     assert result.metrics["skipped_table_summary"][0]["Pages affected"] == "Page 9"
 
 
+
+def test_ai_timeout_is_not_classified_as_rate_limit():
+    exc = ai_policy_review.AiProviderError(
+        "The read operation timed out.",
+        {"error_category": "timeout", "error_message": "The read operation timed out."},
+    )
+
+    assert ai_policy_review._is_timeout_error(exc)
+    assert not ai_policy_review._is_rate_limit_error(exc)
+    assert ai_policy_review._is_retryable_ai_error(exc)
+    message = ai_policy_review._friendly_ai_error_message(exc)
+    assert "timed out" in message.lower()
+    assert "busy or rate-limited" not in message.lower()
+
+
+def test_quick_ai_review_uses_smaller_package_and_output_shape():
+    assert ai_combined_review.MODE_LIMITS["quick"] == {
+        "primary_chars": 3200,
+        "notes_chars": 1800,
+        "contents_chars": 1000,
+        "key_pages": 3,
+        "key_page_chars": 550,
+        "findings": 18,
+        "skipped": 8,
+    }
+    package = {"review_mode": "quick"}
+
+    assert ai_combined_review._output_tokens_for_package(package) == 1200
+    quick_shape = ai_combined_review._repair_shape_for_review_mode("Quick review")
+    assert "policy_review_findings" in quick_shape
+    assert "missed_review_findings" in quick_shape
+    assert "policy_review\"" not in quick_shape
+    assert "findings_to_add" not in quick_shape
+
+
 def test_ai_rate_limit_message_does_not_tell_user_to_refresh():
     ai_policy_review._AI_RATE_LIMIT_UNTIL = 0
     ai_policy_review._set_rate_limit_block(90)
@@ -2459,7 +2494,7 @@ def test_ai_rate_limit_message_does_not_tell_user_to_refresh():
 
     assert "refresh" not in message.lower()
     assert "deterministic review" in message.lower()
-    assert "automatic retry" in message.lower()
+    assert "deterministic review" in message.lower()
     assert "20 second(s)" not in message
     assert ai_policy_review._rate_limit_wait_seconds() <= 120
 
@@ -6469,7 +6504,7 @@ def test_quick_ai_payload_uses_smaller_output_budget(monkeypatch):
         structured_output=False,
     )
 
-    assert payload["max_output_tokens"] == 1600
+    assert payload["max_output_tokens"] == 1200
     assert "text" not in payload
 
 def test_ai_model_attempts_are_limited_for_automatic_quick_review(monkeypatch):

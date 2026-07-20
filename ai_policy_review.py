@@ -38,7 +38,7 @@ def _parse_retry_backoff_seconds() -> tuple[int, ...]:
 
 AI_RETRY_BACKOFF_SECONDS = _parse_retry_backoff_seconds()
 AI_RATE_LIMIT_COOLDOWN_SECONDS = max(5, min(int(os.getenv("OPENAI_RATE_LIMIT_COOLDOWN_SECONDS", "20")), 120))
-AI_REQUEST_TIMEOUT_SECONDS = max(5, min(int(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "30")), 45))
+AI_REQUEST_TIMEOUT_SECONDS = max(5, min(int(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "45")), 60))
 AI_MAX_ATTEMPTS = max(1, min(int(os.getenv("OPENAI_MAX_ATTEMPTS", "1")), 5))
 AI_REQUEST_LOCK_TIMEOUT_SECONDS = max(1.0, min(float(os.getenv("OPENAI_REQUEST_LOCK_TIMEOUT_SECONDS", "30")), 300.0))
 _AI_RATE_LIMIT_UNTIL: float = 0.0
@@ -208,7 +208,7 @@ def run_ai_policy_review(
             findings=[],
             export_rows=[],
             summary="",
-            status="deferred" if _is_rate_limit_error(exc) or isinstance(exc, MalformedAiResponseError) else "error",
+            status="deferred" if _is_retryable_ai_error(exc) or isinstance(exc, MalformedAiResponseError) else "error",
             model=model,
             message=friendly_message,
             evidence_rows=evidence_rows if 'evidence_rows' in locals() else [],
@@ -1091,34 +1091,53 @@ def _is_rate_limit_blocked() -> bool:
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     text = str(exc or "").lower()
-    return (
-        "429" in text
-        or "rate limit" in text
-        or "rate-limit" in text
-        or "rate exceeded" in text
-        or "too many requests" in text
-        or "ai service busy" in text
-        or "service busy" in text
-        or "temporarily busy" in text
-        or "cooldown" in text
-        or "timed out" in text
-        or "timeout" in text
+
+    if isinstance(exc, AiProviderError):
+        diagnostics = getattr(exc, "diagnostics", {}) or {}
+        category = str(diagnostics.get("error_category", "") or "").lower()
+        if category in {"rate_limit", "busy"}:
+            return True
+        text = f"{text} {diagnostics.get('error_message', '')}".lower()
+
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "rate limit",
+            "rate-limit",
+            "rate exceeded",
+            "too many requests",
+            "ai service busy",
+            "service busy",
+            "temporarily busy",
+            "cooldown",
+        )
     )
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+
+    if isinstance(exc, AiProviderError):
+        diagnostics = getattr(exc, "diagnostics", {}) or {}
+        category = str(diagnostics.get("error_category", "") or "").lower()
+        if category == "timeout":
+            return True
+        text = f"{text} {diagnostics.get('error_message', '')}".lower()
+
+    return isinstance(exc, TimeoutError) or "timed out" in text or "timeout" in text
 
 
 def _is_retryable_ai_error(exc: Exception) -> bool:
     text = str(exc or "").lower()
     return (
         _is_rate_limit_error(exc)
-        or isinstance(exc, TimeoutError)
+        or _is_timeout_error(exc)
         or _looks_like_dns_error(text)
         or "temporarily unavailable" in text
         or "connection reset" in text
         or "remote end closed" in text
-        or "503" in text
-        or "502" in text
-        or "500" in text
-        or "504" in text
+        or any(code in text for code in ("500", "502", "503", "504"))
     )
 
 
@@ -1141,12 +1160,16 @@ def _friendly_ai_error_message(exc: Exception) -> str:
             return "AI review was not completed because OPENAI_BASE_URL points to a website, WAF/security challenge, or non-API endpoint instead of an AI JSON API. Use the provider's actual API base URL, not the dashboard URL. The deterministic review and exports were still completed."
         if category == "network_dns":
             return "AI review was not completed because the AI provider host could not be resolved. Check OPENAI_BASE_URL, provider DNS, and deployment network egress. The deterministic review and exports were still completed."
-        if category in {"rate_limit", "timeout", "temporary_service_error", "busy"}:
-            return "AI review was not completed after automatic retry attempts because the AI service remained busy or rate-limited. The deterministic review and exports were still completed. Use Retry AI Review to run only the AI layer again."
+        if category == "timeout":
+            return "AI review timed out before the provider returned a complete response. The deterministic review and exports were still completed. Use Retry AI Review to rerun only the AI layer."
+        if category in {"rate_limit", "temporary_service_error", "busy"}:
+            return "AI review was not completed because the AI service remained busy or rate-limited. The deterministic review and exports were still completed. Use Retry AI Review to rerun only the AI layer."
         return "AI review was not completed. The deterministic review and exports were still completed; see AI debug details for the provider error."
+    if _is_timeout_error(exc):
+        return "AI review timed out before the provider returned a complete response. The deterministic review and exports were still completed. Use Retry AI Review to rerun only the AI layer."
     if _is_rate_limit_error(exc):
         return (
-            "AI review was not completed after automatic retry attempts because the AI service remained temporarily busy; "
+            "AI review was not completed because the AI service remained temporarily busy; "
             "the deterministic review and exports were still completed. Use Retry AI Review to run only the AI layer again."
         )
     if isinstance(exc, MalformedAiResponseError):

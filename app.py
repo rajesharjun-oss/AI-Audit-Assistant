@@ -27,13 +27,17 @@ st.set_page_config(page_title="AI Audit Assistant", page_icon="AI", layout="wide
 def _friendly_review_failure_message(exc: Exception) -> str:
     text = str(exc or "").strip()
     lower = text.lower()
-    if any(marker in lower for marker in ("429", "rate limit", "rate exceeded", "too many requests", "ai service busy", "timed out", "timeout")):
+    if "timed out" in lower or "timeout" in lower:
+        return (
+            "The review timed out before the worker returned a complete response. "
+            "If deterministic output was already produced, use Retry AI Review rather than re-uploading the PDF."
+        )
+    if any(marker in lower for marker in ("429", "rate limit", "rate exceeded", "too many requests", "ai service busy")):
         return (
             "The review worker or AI service is temporarily busy, so this upload could not finish cleanly. "
             "Please wait a moment and try again. If deterministic output was already produced, use Retry AI Review rather than re-uploading the PDF."
         )
     return f"The review could not be completed: {text or type(exc).__name__}."
-
 
 def _ai_failure_debug_summary(ai_error_rows: object) -> str:
     if not isinstance(ai_error_rows, list) or not ai_error_rows:
@@ -58,6 +62,27 @@ def _ai_failure_debug_summary(ai_error_rows: object) -> str:
     if message:
         pieces.append(f"message: {message}")
     return " Last AI error (debug): " + "; ".join(pieces) + "." if pieces else ""
+
+
+def _ai_overall_failure_message(metrics: dict, ai_error_rows: object) -> str:
+    message_candidates = [
+        str(metrics.get("ai_full_review_message", "") or "").strip(),
+        str(metrics.get("ai_policy_review_message", "") or "").strip(),
+        str(metrics.get("ai_finding_review_message", "") or "").strip(),
+    ]
+    for message in message_candidates:
+        if message:
+            return message
+    last = None
+    if isinstance(ai_error_rows, list):
+        last = next((row for row in reversed(ai_error_rows) if isinstance(row, dict)), None)
+    category = str((last or {}).get("Error category", "") or "").strip().lower()
+    if category == "timeout":
+        return (
+            "AI review timed out before the provider returned a complete response. "
+            "The deterministic review and exports were still completed. Use Retry AI Review to rerun only the AI layer."
+        )
+    return "AI review failed after automatic retries. The deterministic review and exports are still available; use Retry AI Review to run the AI layer again."
 
 def _metric_lines(value: object, empty: str) -> list[str]:
     text = str(value or "").strip()
@@ -1407,12 +1432,10 @@ elif ai_overall_status == "Not started":
 elif ai_overall_status == "Skipped":
     st.info("AI review was skipped because no suitable AI context was available.")
 elif ai_overall_status.startswith("Failed"):
-    st.warning(
-        "AI review failed after automatic retries. The deterministic review and exports are still available; use Retry AI Review to run the AI layer again."
-        + _ai_failure_debug_summary(ai_error_rows)
-    )
+    st.warning(_ai_overall_failure_message(result.metrics, ai_error_rows) + _ai_failure_debug_summary(ai_error_rows))
 else:
     st.info(f"AI review status: {ai_overall_status}")
+ai_review_failed = ai_overall_status.startswith("Failed")
 st.caption(f"AI review mode: {result.metrics.get('ai_review_mode', 'standard')}")
 if isinstance(ai_stage_rows, list) and ai_stage_rows:
     st.dataframe(pd.DataFrame(ai_stage_rows), use_container_width=True, hide_index=True)
@@ -1433,7 +1456,7 @@ if result.metrics.get("ai_policy_review_status") == "completed":
     if ai_summary:
         st.markdown('<div class="section-label">AI policy judgement</div>', unsafe_allow_html=True)
         st.info(ai_summary)
-elif use_ai_policy_review:
+elif use_ai_policy_review and not ai_review_failed:
     ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
     ai_message = str(result.metrics.get("ai_policy_review_message", "") or "").strip()
     st.markdown('<div class="section-label">AI policy judgement</div>', unsafe_allow_html=True)
@@ -1450,7 +1473,7 @@ if result.metrics.get("ai_full_review_status") == "completed":
     if ai_full_summary:
         st.markdown('<div class="section-label">AI full review</div>', unsafe_allow_html=True)
         st.info(ai_full_summary)
-elif use_ai_full_review:
+elif use_ai_full_review and not ai_review_failed:
     ai_full_status = str(result.metrics.get("ai_full_review_status", "disabled") or "disabled")
     ai_full_message = str(result.metrics.get("ai_full_review_message", "") or "").strip()
     if ai_full_status != "disabled":
@@ -1468,7 +1491,7 @@ if result.metrics.get("ai_finding_review_status") == "completed":
     if ai_finding_summary:
         st.markdown('<div class="section-label">AI finding review</div>', unsafe_allow_html=True)
         st.info(ai_finding_summary)
-elif use_ai_policy_review or use_ai_full_review:
+elif (use_ai_policy_review or use_ai_full_review) and not ai_review_failed:
     ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
     ai_finding_message = str(result.metrics.get("ai_finding_review_message", "") or "").strip()
     if ai_finding_status != "disabled":
