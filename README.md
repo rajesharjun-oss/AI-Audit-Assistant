@@ -17,6 +17,36 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## OpenAI API setup
+
+For direct OpenAI API usage, configure these environment variables. Do not commit API keys to Git. See `.env.example` for a safe placeholder template.
+
+Local PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY="sk-proj-your-openai-key"
+$env:OPENAI_BASE_URL="https://api.openai.com/v1"
+$env:OPENAI_API_STYLE="responses"
+$env:OPENAI_STRUCTURED_OUTPUTS="1"
+$env:OPENAI_QUICK_REVIEW_MODEL="gpt-5-mini"
+$env:OPENAI_STANDARD_REVIEW_MODEL="gpt-5.1"
+$env:OPENAI_DEEP_REVIEW_MODEL="gpt-5.1"
+```
+
+Deployment environment variables:
+
+```env
+OPENAI_API_KEY=sk-proj-your-openai-key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_STYLE=responses
+OPENAI_STRUCTURED_OUTPUTS=1
+OPENAI_QUICK_REVIEW_MODEL=gpt-5-mini
+OPENAI_STANDARD_REVIEW_MODEL=gpt-5.1
+OPENAI_DEEP_REVIEW_MODEL=gpt-5.1
+```
+
+If you change providers later, keep the provider base URL in `OPENAI_BASE_URL`; for OpenAI direct usage it must be `https://api.openai.com/v1`, not a dashboard URL and not a router URL.
+
 ## Run from the command line
 
 Basic markdown run:
