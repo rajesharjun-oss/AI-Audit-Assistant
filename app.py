@@ -521,17 +521,6 @@ def _build_excel_export(result) -> bytes:
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
         finding_summary_rows = _finding_summary_rows(result) or [{"Severity": "", "Category": "", "Page reference": "", "Issue": "No automated findings were identified.", "Recommendation": ""}]
         pd.DataFrame(finding_summary_rows).to_excel(writer, sheet_name="Findings summary", index=False)
-        ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
-        ai_message = str(result.metrics.get("ai_policy_review_message", "") or "").strip()
-        ai_default_title = {
-            "disabled": "AI policy review not enabled.",
-            "unavailable": "AI policy review was enabled but is unavailable in this environment.",
-            "skipped": "AI policy review was enabled but no suitable policy/disclosure context was detected.",
-            "error": "AI policy review was enabled but failed during execution.",
-            "completed": "AI policy review completed but returned no observation rows.",
-        }.get(ai_status, "AI policy review returned no rows.")
-        ai_policy_rows = result.metrics.get("ai_policy_export", []) or [{"Title": ai_default_title, "Status": ai_status, "Message": ai_message}]
-        pd.DataFrame(ai_policy_rows).to_excel(writer, sheet_name="AI policy judgement", index=False)
         ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
         ai_finding_message = str(result.metrics.get("ai_finding_review_message", "") or "").strip()
         ai_finding_default_title = {
@@ -546,6 +535,17 @@ def _build_excel_export(result) -> bytes:
             {"Finding ID": "", "Issue": ai_finding_default_title, "AI status": ai_finding_status, "Reason": ai_finding_message}
         ]
         pd.DataFrame(ai_finding_rows).to_excel(writer, sheet_name="AI finding review", index=False)
+        ai_status = str(result.metrics.get("ai_policy_review_status", "disabled") or "disabled")
+        ai_message = str(result.metrics.get("ai_policy_review_message", "") or "").strip()
+        ai_default_title = {
+            "disabled": "AI policy review not enabled.",
+            "unavailable": "AI policy review was enabled but is unavailable in this environment.",
+            "skipped": "AI policy review was enabled but no suitable policy/disclosure context was detected.",
+            "error": "AI policy review was enabled but failed during execution.",
+            "completed": "AI policy review completed but returned no observation rows.",
+        }.get(ai_status, "AI policy review returned no rows.")
+        ai_policy_rows = result.metrics.get("ai_policy_export", []) or [{"Title": ai_default_title, "Status": ai_status, "Message": ai_message}]
+        pd.DataFrame(ai_policy_rows).to_excel(writer, sheet_name="AI policy judgement", index=False)
         ai_evidence_rows = result.metrics.get("ai_evidence_packs", []) or [
             {"Evidence type": "None", "AI role": "AI review was not run or no evidence packs were eligible."}
         ]

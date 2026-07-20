@@ -146,7 +146,7 @@ def _looks_like_table_header_fragment(line: str, words: list[str]) -> bool:
         "accumulated", "fund", "funds", "equity", "assets", "liabilities", "liability",
         "land", "building", "buildings", "property", "plant", "equipment", "motor",
         "vehicles", "generators", "library", "books", "cash", "between", "over",
-        "less", "total", "cost", "depreciation", "carrying", "value", "note",
+        "less", "total", "cost", "depreciation", "carrying", "value", "note", "group", "company", "related", "party", "balances",
     }
     if not words or any(char in line for char in ".,;:"):
         return False
@@ -180,6 +180,8 @@ def _grammar_issue_for_line(line: str) -> str:
 
 def _spelling_issue_for_line(line: str) -> str:
     tokens = re.findall(r"[A-Za-z']+", line)
+    issues: list[str] = []
+    seen: set[str] = set()
     for index, token in enumerate(tokens):
         normalized = token.lower()
         if len(normalized) < 4:
@@ -190,11 +192,10 @@ def _spelling_issue_for_line(line: str) -> str:
             # likely a name/proper noun in narrative text
             continue
         correction = COMMON_SPELLING_CORRECTIONS.get(normalized)
-        if correction:
-            return f"Possible spelling error: '{token}' -> '{correction}'."
-    return ""
-
-
+        if correction and normalized not in seen:
+            seen.add(normalized)
+            issues.append(f"Possible spelling error: '{token}' -> '{correction}'.")
+    return " ".join(issues[:4])
 def _metric_page_is_excluded(page_text: str) -> bool:
     lower = page_text.lower()
     excluded_markers = (
@@ -211,11 +212,15 @@ def _metric_page_context_not_comparable(metric_name: str, page_text: str) -> boo
     lower = page_text.lower()
     if metric_name in {"Profit after tax", "Total comprehensive income"} and "statement of changes" in lower:
         return True
+    if metric_name == "Profit before tax" and re.search(r"\bprofit before tax(?:ation)?\s+is\s+stated\s+after\s+charging\b", lower):
+        return True
     return False
 
 
 def _metric_line_is_comparable(metric_name: str, line: str) -> bool:
     lower = re.sub(r"\s+", " ", line.lower()).strip()
+    if metric_name == "Profit before tax" and any(marker in lower for marker in ("stated after charging", "after charging", "after crediting")):
+        return False
     if metric_name == "Revenue":
         if re.search(r"[A-Za-z]\d{1,3},\d{3}", line):
             return False
@@ -320,7 +325,7 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                         "consolidated", "separate", "comprehensive", "position", "changes", "december",
                         "january", "street", "road", "cost", "accumulated", "carrying", "pay",
                         "employees", "government", "tuesday", "wednesday", "thursday", "friday",
-                        "saturday", "sunday",
+                        "saturday", "sunday", "assurance", "engagement", "engagements",
                         "opening", "additions", "depreciation", "total", "value", "distributed",
                         "balance", "at", "as", "for", "the", "ended", "loss", "profit",
                         "net", "gross", "operating", "cash", "flows", "financing", "investing", "activities",
@@ -751,6 +756,8 @@ def _suggest_standard_name(name1: str, pages1: set[int], name2: str, pages2: set
 
 
 def _names_look_like_spelling_variants(name1: str, name2: str) -> bool:
+    if _looks_like_non_person_name_phrase(name1) or _looks_like_non_person_name_phrase(name2):
+        return False
     tokens1 = _normalise_name_tokens(name1)
     tokens2 = _normalise_name_tokens(name2)
     if len(tokens1) != len(tokens2) or len(tokens1) < 2:
@@ -771,6 +778,17 @@ def _names_look_like_spelling_variants(name1: str, name2: str) -> bool:
             continue
         return False
     return exact >= 1 and fuzzy == 1
+
+
+def _looks_like_non_person_name_phrase(name: str) -> bool:
+    tokens = set(_normalise_name_tokens(name))
+    non_person_pairs = (
+        {"assurance", "engagement"},
+        {"assurance", "engagements"},
+        {"internal", "control"},
+        {"financial", "statement"},
+    )
+    return any(pair.issubset(tokens) for pair in non_person_pairs)
 
 
 def _normalise_name_tokens(name: str) -> list[str]:

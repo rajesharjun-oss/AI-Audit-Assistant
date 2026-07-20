@@ -130,8 +130,8 @@ NOTE_COMPATIBILITY_RULES: dict[str, dict[str, tuple[str, ...]]] = {
         "heading": ("inventory", "inventories", "stock"),
     },
     "trade receivables": {
-        "line": ("trade receivables", "other receivables", "trade other receivables", "receivables", "contract assets"),
-        "heading": ("trade receivables", "other receivables", "trade other receivables", "receivables", "contract assets"),
+        "line": ("trade receivables", "other receivables", "trade other receivables", "receivables", "receivable", "loans receivable", "loan receivable", "loan and advances", "loans and advances", "loan advances", "advances to customers", "contract assets"),
+        "heading": ("trade receivables", "other receivables", "trade other receivables", "receivables", "receivable", "loans receivable", "loan receivable", "loan and advances", "loans and advances", "loan advances", "advances to customers", "contract assets"),
     },
     "other financial assets": {
         "line": ("other financial assets", "financial asset", "financial assets", "amortised cost", "amortized cost", "loans advances"),
@@ -1383,10 +1383,18 @@ def _note_heading_semantically_compatible(line_item: str, note_heading: str, not
     rule_name = _note_compatibility_rule(line_item)
     if not rule_name:
         return True
+    item_norm = _normalise_match_words(line_item)
+    heading_norm = _normalise_match_words(note_heading)
+    if item_norm and heading_norm:
+        if item_norm == heading_norm or item_norm in heading_norm or heading_norm in item_norm:
+            return True
+        if item_norm.startswith("movement in "):
+            base = item_norm.removeprefix("movement in ").strip()
+            if base and (base in heading_norm or heading_norm in base):
+                return True
     rule = NOTE_COMPATIBILITY_RULES[rule_name]
     combined = f"{note_heading} {note_section[:400]}"
     return _contains_compatible_phrase(combined, rule["heading"])
-
 
 def _note_compatibility_label(line_item: str) -> str:
     rule_name = _note_compatibility_rule(line_item)
@@ -3449,32 +3457,42 @@ def check_primary_statement_consistency(
 
     # Value Added Statement cross-check
     vas_page = next((page for page in document.pages if _looks_like_value_added_page(page.text)), None)
-            
+
     if vas_page:
         pl_page = _find_statement_page(document, income_stmt_name)
         if pl_page:
-            pl_amounts, pl_line = _line_amount_for_aliases(pl_page.text, ("interest expense", "finance cost", "finance costs"))
-            if pl_amounts:
-                pl_finance_cost = pl_amounts[0]
-                vas_amounts, vas_line = _line_amount_for_aliases(
-                    vas_page.text,
-                    ("interest expense", "interest", "finance cost", "interest payable", "providers of capital", "interest paid"),
-                )
-                if vas_amounts:
+            vas_amounts, vas_line = _line_amount_for_aliases(
+                vas_page.text,
+                ("finance costs", "finance cost", "providers of capital", "interest paid", "interest expense", "interest payable"),
+            )
+            if vas_amounts:
+                vas_label = _normalise_match_words(_statement_label(vas_line))
+                if any(alias in vas_label for alias in ("finance cost", "finance costs", "providers of capital", "interest paid")):
+                    pl_aliases = ("finance costs", "finance cost")
+                    line_label = "finance cost"
+                elif "interest expense" in vas_label or "interest payable" in vas_label:
+                    pl_aliases = ("interest expense", "interest payable")
+                    line_label = "interest expense"
+                else:
+                    pl_aliases = ()
+                    line_label = "finance cost/interest expense"
+                pl_amounts, pl_line = _line_amount_for_aliases(pl_page.text, pl_aliases) if pl_aliases else ([], "")
+                if pl_amounts:
+                    pl_finance_cost = pl_amounts[0]
                     vas_finance_cost = vas_amounts[0]
-                    performed.append("Value Added Statement: interest expense compared with primary statement where readable.")
+                    performed.append(f"Value Added Statement: {line_label} compared with primary statement where readable.")
                     if abs(abs(vas_finance_cost) - abs(pl_finance_cost)) > tolerance:
                         findings.append(
                             Finding(
                                 "Value Added Statement",
                                 "Medium",
                                 f"Page {vas_page.number} | Value Added Statement",
-                                f"Value Added Statement shows interest expense of {abs(vas_finance_cost):,}, while the primary statement shows {abs(pl_finance_cost):,}.",
+                                f"Value Added Statement shows {line_label} of {abs(vas_finance_cost):,}, while the primary statement shows {abs(pl_finance_cost):,}.",
                                 f"Value Added Statement line: {vas_line} | Primary statement line: {pl_line}",
                                 "Review whether the Value Added Statement label, classification, or amount is appropriate.",
                             )
                         )
-                        
+
     return findings, performed, skipped
 
 
@@ -3526,11 +3544,17 @@ def check_totals_and_rounding(document: PdfDocument, tolerance: Decimal | None =
             if len(table) < 3:
                 continue
             table_quality = _classify_table_for_arithmetic(table, page.text)
+            primary_statement_page = page.number in primary_pages or _page_has_primary_statement_heading(page.text)
             if _skip_table_is_not_review_relevant(page, table_quality, primary_pages, notes_start_page):
                 if table_quality["type"] in {"value-added statement", "multi-year summary"}:
                     skipped_tables.append(
                         f"Page {page.number}, table {table_index}: {table_quality['type']} ({table_quality['reason']})"
                     )
+                continue
+            if primary_statement_page and table_quality["type"] == "statement table":
+                skipped_tables.append(
+                    f"Page {page.number}, table {table_index}: generic table row arithmetic skipped on a primary statement; canonical statement checks handle this page."
+                )
                 continue
             if notes_start_page is not None and page.number >= notes_start_page and page.number not in primary_pages:
                 targeted_note_findings = _check_simple_note_table_casting(page, table_index, table, tolerance)
@@ -4543,7 +4567,7 @@ def _looks_like_unformatted_amount(token: str) -> bool:
 def _financial_amount_contexts(document: PdfDocument) -> list[str]:
     contexts: list[str] = []
     for page in document.pages:
-        supplement_page = document.ocr_used and _is_post_notes_supplement_page(page.text)
+        supplement_page = _is_post_notes_supplement_page(page.text)
         for table in page.tables:
             classification = _classify_table_for_arithmetic(table)
             if document.ocr_used and not classification["can_run_arithmetic"]:
@@ -5734,6 +5758,23 @@ def _classified_primary_statement_pages(document: PdfDocument) -> dict[str, PdfP
     return classified
 
 
+
+def _page_has_primary_statement_heading(text: str) -> bool:
+    if _looks_like_contents_or_front_matter_page(text) or _is_post_notes_supplement_page(text) or _looks_like_value_added_page(text):
+        return False
+    page_head = "\n".join(text.splitlines()[:30])
+    heading_aliases = (
+        "statement of income and expenditure",
+        "statement of profit or loss",
+        "statement of comprehensive income",
+        "statement of financial position",
+        "balance sheet",
+        "statement of changes in accumulated fund",
+        "statement of changes in equity",
+        "statement of cash flows",
+        "cash flow statement",
+    )
+    return any(_statement_heading_line_present(page_head, phrase) for phrase in heading_aliases)
 def _infer_statement_page_from_contents(document: PdfDocument, canonical_name: str) -> PdfPage | None:
     contents_refs = _contents_statement_page_refs(document)
     if not contents_refs or canonical_name not in contents_refs:
@@ -5959,6 +6000,32 @@ def _physical_page_for_printed(document: PdfDocument, printed_page: int) -> int 
     return None
 
 
+def _contents_reference_page_has_statement_heading(document: PdfDocument, canonical_name: str, mapped_pdf_page: int | None, expected_printed_page: int) -> bool:
+    candidate_pages: list[PdfPage] = []
+    if mapped_pdf_page:
+        candidate_pages.extend(page for page in document.pages if page.number == mapped_pdf_page)
+    candidate_pages.extend(
+        page
+        for page in document.pages
+        if page not in candidate_pages and _reviewer_page_number(document, page.number) == expected_printed_page
+    )
+    phrases = [canonical_name]
+    name_lower = canonical_name.lower()
+    if "income and expenditure" in name_lower or "profit or loss" in name_lower:
+        phrases.extend(["statement of profit or loss", "statement of comprehensive income", "statement of income and expenditure"])
+    elif "cash flows" in name_lower or "cash flow" in name_lower:
+        phrases.extend(["statement of cash flows", "statement of cash flow"])
+    elif "financial position" in name_lower:
+        phrases.extend(["statement of financial position", "balance sheet"])
+    elif "changes in equity" in name_lower or "accumulated fund" in name_lower:
+        phrases.extend(["statement of changes in equity", "statement of changes in accumulated fund"])
+    for page in candidate_pages:
+        if _looks_like_contents_or_front_matter_page(page.text):
+            continue
+        if any(_statement_heading_line_present(page.text, phrase) for phrase in phrases):
+            return True
+    return False
+
 def _contents_statement_page_agreement_rows(document: PdfDocument) -> list[dict[str, object]]:
     details = _contents_statement_page_ref_details(document)
     if not details:
@@ -5980,10 +6047,14 @@ def _contents_statement_page_agreement_rows(document: PdfDocument) -> list[dict[
         if detected and expected_page:
             page_delta_value = int(detected_printed) - expected_page
             page_delta = page_delta_value
-            if int(detected_printed) == expected_page or (mapped is not None and detected.number == mapped):
+            reference_page_has_heading = _contents_reference_page_has_statement_heading(document, canonical_name, mapped, expected_page)
+            if int(detected_printed) == expected_page or (mapped is not None and detected.number == mapped) or reference_page_has_heading:
                 status = "Passed"
                 confidence = "High"
-                reason = "Detected statement page agrees to the contents page reference using printed-page mapping."
+                if reference_page_has_heading and int(detected_printed) != expected_page:
+                    reason = "Contents page reference agrees to the statement heading page; detector selected a continuation/better-parsed page."
+                else:
+                    reason = "Detected statement page agrees to the contents page reference using printed-page mapping."
             else:
                 status = "Mismatch"
                 confidence = "Low" if document.ocr_used else ("Medium" if document.table_extraction_confidence >= 80 else "Low")
@@ -8873,6 +8944,8 @@ def _classify_table_for_arithmetic(table: list[list[str]], page_text: str = "") 
         return {"type": "value-added statement", "can_run_arithmetic": False, "reason": "value-added statements have presentation-specific subtotals"}
     if "five year" in full_text or "5 year" in full_text or "financial summary" in full_text:
         return {"type": "multi-year summary", "can_run_arithmetic": False, "reason": "multi-year summaries should not be cast like primary statements"}
+    if any(marker in full_text for marker in ("gearing ratio", "capital risk management", "financial risk management", "credit risk", "liquidity risk", "market risk")):
+        return {"type": "risk/disclosure table", "can_run_arithmetic": False, "reason": "risk and ratio disclosure tables should not be cast as statement total tables"}
     if _table_has_merged_numeric_cells(table):
         return {"type": "merged extraction", "can_run_arithmetic": False, "reason": "one or more cells contain multiple numeric values"}
     if not _table_shape_confident(table):

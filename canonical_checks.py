@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 from canonical_extraction import extraction_audit_rows, extract_statement_facts, note_heading_map
@@ -15,7 +16,7 @@ NOTE_HEADING_KEYWORDS: dict[str, tuple[str, ...]] = {
     "intangible assets": ("intangible", "software", "amortisation", "amortization"),
     "investment property": ("investment property", "investment properties", "property"),
     "inventories": ("inventor", "stock"),
-    "trade and other receivables": ("receivable", "debtor", "trade and other receivables"),
+    "trade and other receivables": ("receivable", "debtor", "trade and other receivables", "loan and advance", "loans and advances"),
     "other financial assets": ("financial asset", "finacial asset", "investment", "treasury", "securities"),
     "current assets": ("asset",),
     "non-current assets": ("asset",),
@@ -42,7 +43,7 @@ NOTE_HEADING_KEYWORDS: dict[str, tuple[str, ...]] = {
     "finance costs": ("finance cost", "interest expense", "borrowing cost"),
     "profit before tax": ("profit before tax", "profit before taxation", "loss before tax", "loss before taxation"),
     "taxation": ("tax", "taxation", "income tax"),
-    "profit after tax": ("profit", "loss", "result for the year"),
+    "profit after tax": ("profit after", "loss after", "profit for the year", "loss for the year", "result for the year"),
     "total comprehensive income": ("comprehensive", "profit", "loss"),
 }
 
@@ -185,6 +186,18 @@ def check_note_references(document: PdfDocument, facts: list[StatementFact]) -> 
 
 def _one(facts: list[StatementFact], canonical: str, entity: str, year: int) -> StatementFact | None:
     exact = [fact for fact in facts if fact.entity == entity and fact.year == year and fact.canonical_line_item == canonical]
+    if canonical == "profit after tax":
+        exact = [
+            fact
+            for fact in exact
+            if not re.search(r"\b(total comprehensive|other comprehensive|oci)\b", fact.source_line, flags=re.I)
+        ]
+    if canonical == "profit before tax":
+        exact = [
+            fact
+            for fact in exact
+            if not re.search(r"\bstated after charging\b|\bafter charging\b", fact.source_line, flags=re.I)
+        ]
     return exact[0] if exact else None
 
 
@@ -219,9 +232,15 @@ def _heading_compatible(canonical_line_item: str, heading: str) -> bool:
     keywords = NOTE_HEADING_KEYWORDS.get(canonical_line_item)
     if not keywords:
         return True
-    heading_norm = heading.lower().replace("-", " ")
+    heading_norm = re.sub(r"\s+", " ", heading.lower().replace("-", " ")).strip()
+    line_norm = re.sub(r"\s+", " ", canonical_line_item.lower().replace("-", " ")).strip()
+    if line_norm and (line_norm == heading_norm or line_norm in heading_norm or heading_norm in line_norm):
+        return True
+    if line_norm.startswith("movement in "):
+        base = line_norm.removeprefix("movement in ").strip()
+        if base and (base in heading_norm or heading_norm in base):
+            return True
     return any(keyword.lower().replace("-", " ") in heading_norm for keyword in keywords)
-
 
 def _cash_flow_subtotal_without_note_detail(fact: StatementFact) -> bool:
     if "cash flow" not in fact.statement.lower():

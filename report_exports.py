@@ -71,6 +71,18 @@ def build_excel_export(result) -> bytes:
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
         finding_summary_rows = finding_summary_rows_for_result(result) or [{"Severity": "", "Category": "", "Page reference": "", "Issue": "No automated findings were identified.", "Recommendation": ""}]
         pd.DataFrame(finding_summary_rows).to_excel(writer, sheet_name="Findings summary", index=False)
+        ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
+        ai_finding_message = str(result.metrics.get("ai_finding_review_message", "") or "").strip()
+        ai_finding_default_title = {
+            "disabled": "AI finding review not enabled.",
+            "unavailable": "AI finding review was enabled but is unavailable in this environment.",
+            "skipped": "AI finding review was enabled but no weak deterministic findings were eligible.",
+            "error": "AI finding review was enabled but failed during execution.",
+            "deferred": "AI finding review was deferred due to API availability or rate limiting.",
+            "completed": "AI finding review completed but returned no adjudication rows.",
+        }.get(ai_finding_status, "AI finding review returned no rows.")
+        ai_finding_rows = result.metrics.get("ai_finding_export", []) or [{"Finding ID": "", "Issue": ai_finding_default_title, "AI status": ai_finding_status, "Reason": ai_finding_message}]
+        pd.DataFrame(ai_finding_rows).to_excel(writer, sheet_name="AI finding review", index=False)
         review_comment_rows = review_comment_rows_for_result(result) or [{"S/N": "", "Section / Statement / Note": "", "Page number": "", "Account / line item": "", "Current wording / amount / reference": "", "Issue identified": "No automated findings were identified.", "Expected correction / recommendation": "", "Category": "", "Priority": "", "Status": "Noted", "Reviewer comments": ""}]
         pd.DataFrame(review_comment_rows).to_excel(writer, sheet_name="Review comments", index=False)
         review_prompt_rows = review_prompts_not_elevated_rows(result) or [{"Issue": "No low-confidence review prompts were withheld from the exception register."}]
@@ -96,20 +108,16 @@ def build_excel_export(result) -> bytes:
             "deferred": "AI full review was deferred due to API availability or rate limiting.",
             "completed": "AI full review completed but returned no observation rows.",
         }.get(ai_full_status, "AI full review returned no rows.")
-        ai_full_rows = result.metrics.get("ai_full_export", []) or [{"Title": ai_full_default_title, "Status": ai_full_status, "Message": ai_full_message}]
+        ai_full_rows = result.metrics.get("ai_full_export", []) or []
+        if not ai_full_rows and ai_full_status == "completed" and result.metrics.get("ai_review_comment_rows"):
+            ai_full_rows = [
+                normalize_ai_review_comment_row(row, index, result)
+                for index, row in enumerate(result.metrics.get("ai_review_comment_rows", []) or [], start=1)
+                if isinstance(row, dict)
+            ]
+        if not ai_full_rows:
+            ai_full_rows = [{"Title": ai_full_default_title, "Status": ai_full_status, "Message": ai_full_message}]
         pd.DataFrame(ai_full_rows).to_excel(writer, sheet_name="AI full review", index=False)
-        ai_finding_status = str(result.metrics.get("ai_finding_review_status", "disabled") or "disabled")
-        ai_finding_message = str(result.metrics.get("ai_finding_review_message", "") or "").strip()
-        ai_finding_default_title = {
-            "disabled": "AI finding review not enabled.",
-            "unavailable": "AI finding review was enabled but is unavailable in this environment.",
-            "skipped": "AI finding review was enabled but no weak deterministic findings were eligible.",
-            "error": "AI finding review was enabled but failed during execution.",
-            "deferred": "AI finding review was deferred due to API availability or rate limiting.",
-            "completed": "AI finding review completed but returned no adjudication rows.",
-        }.get(ai_finding_status, "AI finding review returned no rows.")
-        ai_finding_rows = result.metrics.get("ai_finding_export", []) or [{"Finding ID": "", "Issue": ai_finding_default_title, "AI status": ai_finding_status, "Reason": ai_finding_message}]
-        pd.DataFrame(ai_finding_rows).to_excel(writer, sheet_name="AI finding review", index=False)
         ai_suppressed_rows = result.metrics.get("ai_suppressed_findings", []) or [{"Finding ID": "", "Issue": "No AI-suppressed false positives.", "AI status": ai_finding_status, "Reason": ai_finding_message}]
         pd.DataFrame(ai_suppressed_rows).to_excel(writer, sheet_name="AI suppressed findings", index=False)
         ai_evidence_rows = result.metrics.get("ai_evidence_packs", []) or [{"Evidence type": "None", "AI role": "AI review was not run or no evidence packs were eligible."}]

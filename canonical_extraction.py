@@ -577,6 +577,14 @@ def canonical_line_item(label: str) -> str:
     normalized = _normalise_words(label)
     if not normalized:
         return ""
+    if "total comprehensive" in normalized:
+        return "total comprehensive income"
+    if "other comprehensive" in normalized:
+        return "other comprehensive income"
+    if re.search(r"\b(profit|loss)\b.*\bafter\s+tax(?:ation)?\b", normalized):
+        return "profit after tax"
+    if re.search(r"\b(profit|loss)\b.*\bbefore\s+tax(?:ation)?\b", normalized):
+        return "profit before tax"
     for canonical, aliases in LINE_ALIASES:
         for alias in sorted(aliases, key=len, reverse=True):
             if _labels_match(normalized, _normalise_words(alias)):

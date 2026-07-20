@@ -7125,3 +7125,221 @@ def test_notes_start_accepts_plain_accounting_policies_with_numbered_note_one_af
     assert reviewer._notes_start_page(document) == 21
     candidates = reviewer._notes_heading_candidate_rows(document)
     assert any(row["Page"] == "21" and row["Accepted"] == "Yes" for row in candidates)
+
+
+def test_canonical_profit_after_tax_does_not_use_total_comprehensive_loss():
+    import canonical_checks
+    from canonical_extraction import extract_statement_facts
+
+    document = PdfDocument(
+        [
+            PdfPage(
+                18,
+                "Statement of profit or loss and other comprehensive income\n"
+                "Group Group Company Company\n"
+                "2025 2024 2025 2024\n"
+                "Loss before taxation (6,017,585) (1,356,692) (2,077,303) (1,295,292)\n"
+                "Taxation 15 2,752,255 (35,999) 1,565,696 (17,047)\n"
+                "Loss profit after taxation (3,265,330) (1,392,691) (511,607) (1,312,339)\n"
+                "Gains on property revaluation 8 - (13,500) - (13,500)\n"
+                "Total comprehensive loss for the year (3,265,330) (1,406,191) (511,607) (1,325,839)\n",
+                [],
+            )
+        ]
+    )
+
+    facts = extract_statement_facts(document)
+    assert not [fact for fact in facts if fact.canonical_line_item == "profit after tax" and "comprehensive" in fact.source_line.lower()]
+    findings, results, _audit_rows = canonical_checks.run_canonical_checks(document, facts)
+
+    assert not [finding for finding in findings if "P&L after-tax result cast" in finding.issue]
+    assert any(result.check_name == "P&L after-tax result cast" and result.status == "Pass" for result in results)
+
+
+def test_value_added_finance_cost_compares_to_primary_finance_cost_not_interest_expense():
+    document = PdfDocument(
+        [
+            PdfPage(
+                18,
+                "Statement of profit or loss\n"
+                "2025 2024\n"
+                "Interest expense 6 (4,350,701) (2,313,258)\n"
+                "Finance costs 13 (493,677) (215,969)\n"
+                "Loss before taxation (6,017,585) (1,356,692)\n",
+                [],
+            ),
+            PdfPage(
+                62,
+                "Value Added Statement\n"
+                "2025 2024\n"
+                "Finance cost 493,677 215,969\n",
+                [],
+            ),
+        ]
+    )
+
+    findings, performed, _skipped = check_primary_statement_consistency(document)
+
+    assert any("Value Added Statement: finance cost" in check for check in performed)
+    assert not [finding for finding in findings if finding.category == "Value Added Statement"]
+
+
+def test_key_amount_consistency_ignores_profit_before_tax_after_charging_note():
+    document = PdfDocument(
+        [
+            PdfPage(18, "Statement of profit or loss\nLoss before taxation (6,017,585)\n", []),
+            PdfPage(
+                42,
+                "Notes to the financial statements\n"
+                "14 Profit before taxation is stated after charging\n"
+                "Auditor remuneration 41,951\n"
+                "Depreciation 82,000\n",
+                [],
+            ),
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not [finding for finding in findings if "Profit before tax" in finding.issue]
+    assert not [row for row in export["key_amounts"] if row.get("Metric") == "Profit before tax" and row.get("Issue") == "Discrepancy"]
+
+
+def test_name_consistency_ignores_assurance_engagement_phrase_variants():
+    assert not _names_look_like_spelling_variants("Assurance Engagements", "Assurance Engagement")
+
+    document = PdfDocument(
+        [
+            PdfPage(13, "Independent auditor's report\nAssurance Engagements performed under applicable standards.", []),
+            PdfPage(17, "Independent auditor's report\nAssurance Engagement Report on internal controls.", []),
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not export["names"]
+    assert not [finding for finding in findings if "Assurance Engagement" in finding.issue]
+
+
+def test_grammar_review_ignores_group_company_repeated_table_headers():
+    document = PdfDocument(
+        [
+            PdfPage(
+                55,
+                "Notes to the financial statements\n"
+                "Related party balances Group Group Company Company\n"
+                "N'000 N'000 N'000 N'000\n",
+                [],
+            )
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+
+    assert not [row for row in export["grammar"] if row.get("Issue") == "Repeated word detected."]
+    assert not [finding for finding in findings if finding.issue == "Possible grammatical or drafting issue detected."]
+
+
+def test_supporting_disclosure_allows_loans_receivable_to_loans_and_advances_note():
+    document = PdfDocument(
+        [
+            PdfPage(14, "Notes to the financial statements\n17 Loan and advances to customers\nLoans and advances to customers 12,345 11,000", []),
+            PdfPage(
+                56,
+                "Financial instruments and risk management\n"
+                "Credit risk table\n"
+                "Loans receivable 17 12,345 11,000\n",
+                [],
+            ),
+        ]
+    )
+
+    findings, performed = reviewer._check_supporting_disclosure_note_reference_amounts(document, Decimal("1"))
+
+    assert not findings
+    assert not performed
+
+
+def test_table_arithmetic_skips_gearing_ratio_disclosure_tables():
+    table = [
+        ["", "2025", "2024"],
+        ["Bank overdraft", "17,478,416", "6,910,153"],
+        ["Borrowings", "14,581,826", "5,433,630"],
+        ["Total borrowings", "32,060,242", "12,343,783"],
+        ["Gearing ratio", "72%", "68%"],
+    ]
+
+    classification = reviewer._classify_table_for_arithmetic(table, "Capital risk management gearing ratio")
+
+    assert classification["can_run_arithmetic"] is False
+    assert classification["type"] == "risk/disclosure table"
+
+
+def test_ai_full_review_sheet_uses_ai_review_comment_rows_when_export_empty():
+    from models import ReviewResult
+
+    result = ReviewResult(
+        findings=[],
+        metrics={
+            "ai_full_review_status": "completed",
+            "ai_full_review_message": "AI full review completed.",
+            "ai_review_comment_rows": [
+                {
+                    "Section / Statement / Note": "Statement of cash flows",
+                    "Page number": "23",
+                    "Account / line item": "Cash and cash equivalents",
+                    "Issue identified": "Cash-flow presentation needs review.",
+                    "Expected correction / recommendation": "Agree the cash-flow presentation to the SFP and policy note.",
+                    "Category": "Presentation",
+                    "Priority": "Medium",
+                }
+            ],
+        },
+    )
+
+    workbook_bytes = build_excel_export(result)
+    workbook = openpyxl.load_workbook(BytesIO(workbook_bytes), data_only=True)
+    values = [cell for row in workbook["AI full review"].iter_rows(values_only=True) for cell in row if cell]
+
+    assert "Cash-flow presentation needs review." in values
+    assert "AI full review completed but returned no observation rows." not in values
+
+
+def test_cross_page_consistency_reports_multiple_common_spelling_errors_on_same_line():
+    document = PdfDocument(
+        [
+            PdfPage(
+                43,
+                "Value addded tax was incured due to complaince matters and should be corrected by management.",
+                [],
+            )
+        ]
+    )
+
+    findings, export = check_cross_page_consistency(document)
+    spelling_rows = [row for row in export["grammar"] if "Possible spelling error" in row.get("Issue", "")]
+
+    assert spelling_rows
+    assert "addded" in spelling_rows[0]["Issue"]
+    assert "incured" in spelling_rows[0]["Issue"]
+    assert "complaince" in spelling_rows[0]["Issue"]
+    assert any(finding.issue == "Possible spelling issue detected." for finding in findings)
+
+
+def test_excel_sheet_order_places_ai_finding_review_after_findings_summary():
+    from models import ReviewResult
+
+    result = ReviewResult(
+        findings=[],
+        metrics={
+            "ai_finding_review_status": "completed",
+            "ai_finding_export": [
+                {"Finding ID": "EX-001", "Issue": "AI kept deterministic finding", "AI status": "keep", "Reason": "Evidence supports the finding."}
+            ],
+        },
+    )
+
+    workbook = openpyxl.load_workbook(BytesIO(build_excel_export(result)), data_only=True)
+    sheetnames = workbook.sheetnames
+
+    assert sheetnames[sheetnames.index("Findings summary") + 1] == "AI finding review"
