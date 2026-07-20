@@ -4,16 +4,13 @@ on:
   push:
     branches:
       - fix/ai-review-timeout
-  pull_request:
-    branches:
-      - main
 
 permissions:
   contents: write
 
 jobs:
   patch-and-test:
-    if: ${{ github.event_name == 'pull_request' || !contains(github.event.head_commit.message, '[ai-timeout-fix-applied]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[ai-timeout-fix-applied]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out patch branch
@@ -21,6 +18,7 @@ jobs:
         with:
           ref: fix/ai-review-timeout
           fetch-depth: 0
+          show-progress: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -28,7 +26,7 @@ jobs:
           python-version: '3.12'
 
       - name: Apply targeted patch
-        run: python scripts/apply_ai_timeout_fix.py
+        run: python scripts/apply_ai_timeout_fix_v2.py
 
       - name: Validate source changes
         run: |
