@@ -32,9 +32,25 @@ jobs:
         run: python scripts/apply_ai_timeout_fix_v3.py
 
       - name: Validate source changes
+        id: validate
+        continue-on-error: true
         run: |
-          python -m py_compile ai_policy_review.py ai_combined_review.py ai_review_pipeline.py app.py
-          git diff --check
+          set -o pipefail
+          {
+            python -m py_compile ai_policy_review.py ai_combined_review.py ai_review_pipeline.py app.py
+            git diff --check
+          } 2>&1 | tee validation.log
+
+      - name: Upload validation diagnostics
+        if: steps.validate.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-timeout-validation-log
+          path: validation.log
+
+      - name: Stop after validation failure
+        if: steps.validate.outcome == 'failure'
+        run: exit 1
 
       - name: Install test dependencies
         run: |
