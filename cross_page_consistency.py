@@ -18,7 +18,7 @@ DATE_FORMAT_1_RE = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|
 DATE_FORMAT_2_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+20\d{2}\b", re.I)
 DATE_FORMAT_3_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b", re.I)
 REPEATED_WORD_RE = re.compile(r"\b([A-Za-z]{2,})\s+\1\b", re.I)
-MISSING_SPACE_AFTER_PUNCT_RE = re.compile(r"(?<=[A-Za-z])([,;:])(?=[A-Za-z])|(?<=[A-Za-z])\.(?=[A-Za-z][a-z])")
+MISSING_SPACE_AFTER_PUNCT_RE = re.compile(r"\b(?:Company|Group|Limited|Ltd|PLC|Plc|Bank|Firm)\.(?=[A-Z][a-z])")
 COMMON_SPELLING_CORRECTIONS = {
     "teh": "the",
     "statment": "statement",
@@ -290,7 +290,17 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                 if not any(match.group(0) in d for d in date_occurrences.keys()):
                     date_occurrences[match.group(0)].append((page.number, line.strip()))
             for special_issue in _special_drafting_issues_for_line(line):
-                _append_grammar_review_issue(findings, export_data, grammar_seen, page.number, special_issue, line, "Review the sentence, number, or disclosure wording for drafting clarity.")
+                special_spelling = special_issue.startswith("Possible spelling error")
+                _append_grammar_review_issue(
+                    findings,
+                    export_data,
+                    grammar_seen,
+                    page.number,
+                    special_issue,
+                    line,
+                    "Review the word choice and correct the spelling if needed." if special_spelling else "Review the sentence, number, or disclosure wording for drafting clarity.",
+                    spelling=special_spelling,
+                )
             if _looks_like_grammar_review_line(line):
                 grammar_issue = _grammar_issue_for_line(line)
                 spelling_issue = _spelling_issue_for_line(line)
@@ -367,6 +377,8 @@ def check_cross_page_consistency(document: PdfDocument) -> tuple[list[Finding], 
                     if _metric_page_is_excluded(text):
                         continue
                     if _metric_page_context_not_comparable(metric_name, text):
+                        continue
+                    if metric_name == "Taxation" and "notes to the financial statements" in text.lower() and not ("statement of profit or loss" in text.lower() or "statement of comprehensive income" in text.lower()):
                         continue
                     if not _metric_line_is_comparable(metric_name, line):
                         continue
@@ -592,6 +604,11 @@ def _special_drafting_issues_for_line(line: str) -> list[str]:
         issues.append("Possible malformed thousands grouping in a large number.")
     if re.search(r"(?<!\d)-\s*%", line):
         issues.append("Possible missing percentage value before percent sign.")
+    if _looks_like_grammar_review_line(line):
+        return issues
+    for wrong, correction in COMMON_SPELLING_CORRECTIONS.items():
+        if re.search(r"\b" + re.escape(wrong) + r"\b", lower):
+            issues.append(f"Possible spelling error: '{wrong}' -> '{correction}'.")
     return issues
 
 

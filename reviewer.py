@@ -1666,15 +1666,15 @@ def _page_has_numbered_notes_section_start(text: str) -> bool:
     if not has_notes_heading:
         return False
     numbered_note_patterns = (
-        r"(?im)^\s*(?:note\s+)?1\s*(?:[.)]|:)?\s+(?:reporting entity|significant accounting polic|material accounting polic|basis of preparation)\b",
-        r"(?im)^\s*1\.1\s+(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b",
-        r"(?im)^\s*1\s*(?:[.)]|:)?\s+.{0,80}\n\s*1\.1\s+(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b",
+        r"(?im)^\s*(?:note\s+)?1\s*(?:[.)]|:)?\s*(?:reporting entity|significant accounting polic|material accounting polic|basis of preparation)\b",
+        r"(?im)^\s*1\.1\s*(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b",
+        r"(?im)^\s*1\s*(?:[.)]|:)?\s*.{0,80}\n\s*1\.1\s*(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b",
     )
     if any(re.search(pattern, head, flags=re.I) for pattern in numbered_note_patterns):
         return True
     return bool(
         "accounting polic" in normalized_head
-        and re.search(r"(?im)^\s*1\.1\s+(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b", head)
+        and re.search(r"(?im)^\s*1\.1\s*(?:basis of prep\w*|basis of preparation|material accounting polic|significant accounting polic)\b", head)
     )
 
 
@@ -1705,6 +1705,8 @@ def _looks_like_front_matter_page(text: str) -> bool:
     if _page_has_numbered_notes_section_start(text) or _page_has_accounting_policy_notes_start(text):
         return False
     if lines and _normalise_match_words(lines[0]).startswith("notes"):
+        return False
+    if _notes_heading_in_text(text) and re.search(r"(?im)^\s*(?:note\s+)?\d{1,2}[A-Z]?\s*(?:[.)]|:)?\s*[A-Z][A-Za-z]", "\n".join(lines[:25])):
         return False
     front_terms = (
         "independent auditor",
@@ -1751,7 +1753,7 @@ def _notes_heading_line_score(line: str) -> float:
         "notes forming part of financial statements",
         "notes forming part financial statements",
     )
-    if re.fullmatch(r"notes\s+to\s+(?:the\s+)?financial\s+statements?", stripped, flags=re.I):
+    if re.fullmatch(r"notes\s+to\s+(?:the\s+)?(?:(?:consolidated|separate)\s+and\s+(?:separate|consolidated)\s+)?financial\s+statements?", stripped, flags=re.I):
         return 1.0
     for phrase in phrases:
         if normalized == phrase:
@@ -1764,6 +1766,8 @@ def _notes_heading_line_score(line: str) -> float:
         return max(0.82, SequenceMatcher(None, normalized, "notes to the accounts").ratio())
     if not all(term in normalized for term in ("notes", "financial", "statement")):
         return 0.0
+    if normalized.startswith("notes") and any(term in normalized for term in ("consolidated", "separate")):
+        return 0.94
     return max(SequenceMatcher(None, normalized, phrase).ratio() for phrase in phrases)
 
 
@@ -1898,7 +1902,7 @@ def _raw_page_notes_heading_candidates(text: str, include_weak: bool = False) ->
     if not text.strip():
         return candidates
     pattern_specs = (
-        (r"notes?\s+to\s+(?:the\s+)?financial\s+statements?", "Notes heading", 0.96),
+        (r"notes?\s+to\s+(?:the\s+)?(?:(?:consolidated|separate)\s+and\s+(?:separate|consolidated)\s+)?financial\s+statements?", "Notes heading", 0.96),
         (r"notes?\s+forming\s+part\s+of\s+(?:the\s+)?financial\s+statements?", "Notes heading", 0.96),
         (r"notes?\s+to\s+(?:the\s+)?accounts?", "Notes heading", 0.92),
         (r"(?:^|\n)\s*1\s*[\).:\s-]*\s*(?:material\s+|significant\s+)?accounting\s+polic(?:y|ies)", "Accounting policies heading", 0.84),
@@ -2026,7 +2030,7 @@ def _candidate_followed_by_numbered_policy(lines: list[str], index: int) -> bool
     nearby = "\n".join(lines[index : index + 10])
     return bool(
         re.search(
-            r"(?:^|\n)\s*(?:note\s+)?1\s*[\).:\s-]*\s*(?:material\s+|significant\s+)?accounting polic",
+            r"(?:^|\n)\s*(?:note\s+)?1\s*[\).:\s-]*(?:material\s+|significant\s+)?accounting polic",
             nearby,
             flags=re.I,
         )
@@ -7068,6 +7072,8 @@ def _check_supplementary_summary_consistency(
                 continue
             if _has_group_company_columns(summary_page.text) or _has_group_company_columns(source_page.text):
                 continue
+            if _has_duplicate_year_columns(source_page.text):
+                continue
             summary_amounts, summary_line = _line_amounts_for_aliases_preserving_zero(summary_page.text, summary_aliases)
             source_amounts, source_line = _line_amounts_for_aliases_preserving_zero(source_page.text, source_aliases)
             if not summary_amounts or not source_amounts:
@@ -7098,10 +7104,22 @@ def _check_supplementary_summary_consistency(
     return findings, performed
 
 
-def _has_group_company_columns(text: str) -> bool:
-    head = "\n".join(text.splitlines()[:80]).lower()
-    return bool(re.search(r"\bgroup\b.{0,80}\bcompany\b|\bcompany\b.{0,80}\bgroup\b", head, flags=re.I))
+def _has_duplicate_year_columns(text: str) -> bool:
+    head = "\n".join(text.splitlines()[:60])
+    years = YEAR_RE.findall(head)
+    return len(years) >= 4 and len(set(years)) < len(years)
 
+
+def _has_group_company_columns(text: str) -> bool:
+    head = "\n".join(text.splitlines()[:100])
+    compact = re.sub(r"\s+", " ", head).lower()
+    if not re.search(r"\b20\d{2}\b", compact):
+        return False
+    return bool(
+        re.search(r"\bgroup\b", compact)
+        and re.search(r"\bcompany\b", compact)
+        and (compact.find("group") < 900 or compact.find("company") < 900)
+    )
 
 def _line_amounts_for_aliases_preserving_zero(text: str, aliases: tuple[str, ...]) -> tuple[list[Decimal], str]:
     alias_norms = [_normalise_match_words(alias) for alias in aliases]
@@ -7194,6 +7212,8 @@ def _parse_supporting_note_reference_amount_line(line: str) -> tuple[str, str, l
         "financial statements for the year ended",
     )
     if any(marker in lower_line for marker in narrative_markers):
+        return None
+    if normalized_label.startswith(("balance as at", "balance at", "balance beginning", "balance end", "charge for year", "transfer from", "payment during")):
         return None
     label_words = re.findall(r"[A-Za-z]{3,}", label)
     if len(label_words) > 4:
@@ -9186,6 +9206,12 @@ def _note_headings_by_page(document: PdfDocument) -> dict[str, tuple[str, int]]:
                 candidates.setdefault("1", []).append((implicit_note_1, page.number, table_count))
         for index, raw_line in enumerate(lines):
             line = raw_line.strip()
+            collapsed = _collapsed_note_heading_line(line)
+            if collapsed:
+                number, title = collapsed
+                if not _is_policy_subsection_suspect(title, number, page.number, table_count, notes_start_page):
+                    candidates.setdefault(number.upper(), []).append((_clean_note_title(title), page.number, table_count))
+                continue
             embedded = _embedded_note_heading_after_notes_title(line)
             if embedded:
                 number, title = embedded
@@ -9260,6 +9286,19 @@ def _implicit_policy_note_heading(lines: list[str]) -> str | None:
         return "Significant accounting policies"
     return None
 
+
+def _collapsed_note_heading_line(line: str) -> tuple[str, str] | None:
+    """Detect PDF text extraction where the note number is glued to the heading."""
+    match = re.match(r"^\s*(\d{1,2})([A-Z][a-z][A-Za-z&/'() ,.\-*]{2,100})$", str(line or "").strip())
+    if not match:
+        return None
+    number, title = match.groups()
+    title = title.strip(" -:.;")
+    if not _valid_note_number(number) or not title:
+        return None
+    if _valid_note_heading(number, title):
+        return number.upper(), title
+    return None
 
 def _embedded_note_heading_after_notes_title(line: str) -> tuple[str, str] | None:
     if _notes_heading_line_score(line) < 0.82:
@@ -10502,6 +10541,13 @@ def _note_sections(document: PdfDocument) -> dict[str, str]:
             in_notes = True
         if strict_notes_start and not in_notes:
             continue
+        collapsed = _collapsed_note_heading_line(stripped)
+        if collapsed:
+            current_refs = [collapsed[0].upper()]
+            pending_number = None
+            for current in current_refs:
+                sections[current].append(line)
+            continue
         match = NOTE_HEADING_RE.match(stripped)
         if match and _valid_note_heading(match.group(1), match.group(2)):
             prev_line = lines[index-1].strip() if index > 0 else ""
@@ -10619,7 +10665,7 @@ def _is_policy_subsection_suspect(title: str, number: str, page_number: int, tab
 def _valid_note_heading(number: str, title: str) -> bool:
     number = number.upper().strip()
     # Reject policy subsections starting with a number like "1.4" or ".4"
-    if re.match(r"^\.?\d+\b", title.strip()):
+    if re.match(r"^\.?\d+", title.strip()):
         return False
     title_clean = _clean_note_title(title)
     title_lower = title_clean.lower()

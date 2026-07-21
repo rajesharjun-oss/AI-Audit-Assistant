@@ -17,8 +17,9 @@ STATEMENT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 LINE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("cash at beginning", ("cash at beginning", "cash at the beginning of the year", "cash and cash equivalents at the beginning of the year")),
-    ("cash and cash equivalents", ("cash and cash equivalent", "cash and cash equivalents", "total cash at end of the year", "cash at end")),
+    ("cash at beginning", ("cash at beginning", "cash at the beginning of the year", "cash and cash equivalents at the beginning of the year", "cash cash equivalents at beginning year")),
+    ("net movement in cash", ("net movement in cash and cash equivalents", "total cash movement for the year", "net cash movement", "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents")),
+    ("cash and cash equivalents", ("cash and cash equivalent", "cash and cash equivalents", "total cash at end of the year", "cash at end", "cash cash equivalents at end year")),
     ("bank overdraft", ("bank overdraft", "overdraft")),
     ("other operating losses", ("losses gains on disposal", "losses on disposal", "loss on disposal", "gains on disposal", "gain on disposal", "losses on foreign exchange", "gains on foreign exchange", "other operating losses", "other non-operating losses", "other non-operating gains")),
     ("property, plant and equipment", ("property plant and equipment", "property, plant and equipment", "ppe")),
@@ -57,7 +58,6 @@ LINE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("net cash from operating activities", ("net cash from operating activities", "net cash generated from operating activities", "net cash used in operating activities", "net cash flows used in operating activities")),
     ("net cash from investing activities", ("net cash from investing activities", "net cash used in investing activities", "net cash generated from investing activities", "net cash flows used in investing activities")),
     ("net cash from financing activities", ("net cash from financing activities", "net cash used in financing activities", "net cash generated from financing activities", "net cash flows used in financing activities")),
-    ("net movement in cash", ("net movement in cash and cash equivalents", "total cash movement for the year", "net cash movement", "net increase in cash and cash equivalents", "net decrease in cash and cash equivalents")),
     ("effect of exchange rate movement", ("effect of exchange rate movement on cash balances", "exchange rate movement", "effect of foreign exchange", "loss on foreign exchange on cash and cash equivalents", "profit on foreign exchange on cash and cash equivalents", "foreign exchange on cash and cash equivalents", "exchange differences on cash and cash equivalents")),
     ("purchase of property, plant and equipment", ("purchase of property plant and equipment", "purchase of property, plant and equipment")),
 )
@@ -506,7 +506,11 @@ def _facts_from_page(page: PdfPage, statement: str, columns: list[StatementColum
             stop_after_statement = True
         if stop_after_statement or _line_is_header_or_section(line):
             continue
-        note_ref, label_part, amount_part = _split_note_ref(line, expected)
+        trailing_row = _split_trailing_label_row(line, expected)
+        if trailing_row:
+            note_ref, label_part, amount_part = trailing_row
+        else:
+            note_ref, label_part, amount_part = _split_note_ref(line, expected)
         label = clean_line_label(label_part or line)
         if not label:
             continue
@@ -537,6 +541,27 @@ def _facts_from_page(page: PdfPage, statement: str, columns: list[StatementColum
                 )
             )
     return facts
+
+
+def _split_trailing_label_row(line: str, expected_amounts: int = 0) -> tuple[str, str, str] | None:
+    """Handle rows extracted as note/amount columns first and the label last."""
+    if expected_amounts <= 0:
+        return None
+    matches = list(AMOUNT_START_RE.finditer(line))
+    if len(matches) < expected_amounts:
+        return None
+    amount_matches = matches[-expected_amounts:]
+    trailing_label = line[amount_matches[-1].end() :].strip(" -:.;")
+    if not trailing_label or not re.search(r"[A-Za-z]", trailing_label):
+        return None
+    prefix = line[: amount_matches[0].start()].strip()
+    if prefix and not _valid_note_ref(prefix):
+        return None
+    # Avoid treating ordinary narrative lines with trailing text as statement rows.
+    if len(trailing_label.split()) < 3:
+        return None
+    amount_part = line[amount_matches[0].start() : amount_matches[-1].end()].strip()
+    return prefix.upper(), trailing_label, amount_part
 
 
 def _split_note_ref(line: str, expected_amounts: int = 0) -> tuple[str, str, str]:
@@ -585,6 +610,14 @@ def canonical_line_item(label: str) -> str:
         return "profit after tax"
     if re.search(r"\b(profit|loss)\b.*\bbefore\s+tax(?:ation)?\b", normalized):
         return "profit before tax"
+    if any(term in normalized for term in ("net movement in cash", "net increase in cash", "net decrease in cash", "net cash movement", "total cash movement")):
+        return "net movement in cash"
+    if "cash" in normalized and any(term in normalized for term in ("beginning", "opening", "start")):
+        return "cash at beginning"
+    if "cash" in normalized and any(term in normalized for term in ("foreign exchange", "exchange difference", "exchange differences", "exchange rate movement")):
+        return "effect of exchange rate movement"
+    if "cash" in normalized and any(term in normalized for term in (" end", "ending", "closing")):
+        return "cash and cash equivalents"
     for canonical, aliases in LINE_ALIASES:
         for alias in sorted(aliases, key=len, reverse=True):
             if _labels_match(normalized, _normalise_words(alias)):
@@ -620,6 +653,8 @@ def _labels_match(label_norm: str, alias_norm: str) -> bool:
     if alias_norm in {"current assets", "current liabilities"} and "non current" in label_norm:
         return False
     if "cash equivalent" in alias_norm and any(term in label_norm for term in ("beginning", "opening", "start")):
+        return False
+    if "cash equivalent" in alias_norm and any(term in label_norm for term in ("net movement", "net increase", "net decrease", "cash movement")):
         return False
     if "cash equivalent" in alias_norm and any(term in label_norm for term in ("foreign exchange", "exchange difference", "exchange differences", "exchange rate movement")):
         return False

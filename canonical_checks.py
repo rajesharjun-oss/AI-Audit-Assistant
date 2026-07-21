@@ -150,11 +150,7 @@ def check_cash_flow(facts: list[StatementFact]) -> list[ReconciliationCheckResul
         closing = _one(cf_facts, "cash and cash equivalents", entity, year)
         results.append(_equation_result("Cash flow opening-to-closing cash cast", "Statement of cash flows", entity, year, [opening, movement, fx], closing, "opening cash + net movement + effect of exchange rate movement", "Cash Flow", "High"))
         sfp_cash = _one(sfp_facts, "cash and cash equivalents", entity, year)
-        sfp_overdraft = _one(sfp_facts, "bank overdraft", entity, year)
-        if closing and sfp_cash and sfp_overdraft:
-            expected = sfp_cash.amount - abs(sfp_overdraft.amount)
-            results.append(_calculated_result("Cash flow overdraft presentation consistency", "Statement of cash flows", entity, year, closing, expected, "CFS cash should be presented consistently with SFP cash and overdraft policy", [sfp_cash, sfp_overdraft, closing], "Presentation consistency", "Medium"))
-        elif closing and sfp_cash:
+        if closing and sfp_cash:
             results.append(_comparison_result("Cash flow closing cash agrees to SFP cash", "Statement of cash flows", entity, year, closing, sfp_cash, "closing cash per cash flow = SFP cash and cash equivalents", "Cash Flow", "Medium"))
     return [result for result in results if result.status != "Not tested"]
 

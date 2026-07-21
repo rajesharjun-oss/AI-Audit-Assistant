@@ -180,7 +180,7 @@ def run_combined_ai_review(
                     parsed = _parse_response_json(response_json)
                 except MalformedAiResponseError as parse_exc:
                     parsed = _repair_response_json(api_key, attempt_model, parse_exc.text, _repair_shape_for_review_mode(attempt_mode))
-                return _parsed_to_result(parsed, findings, attempt_model, attempt_mode, evidence_row, error_rows)
+                return _parsed_to_result(parsed, findings, document, attempt_model, attempt_mode, evidence_row, error_rows)
             except Exception as exc:  # pragma: no cover - network/runtime dependent
                 row = _error_row_from_exception(exc, attempt_model, attempt_mode, attempt_counter, package, structured_output)
                 error_rows.append(row)
@@ -642,6 +642,7 @@ def _key_page_snippets(document: PdfDocument, findings: list[Finding], max_pages
 def _parsed_to_result(
     parsed: dict[str, Any],
     original_findings: list[Finding],
+    document: PdfDocument,
     model: str,
     review_mode: str,
     evidence_row: dict[str, str],
@@ -654,8 +655,8 @@ def _parsed_to_result(
     )
     policy_observations = _combined_list_values(parsed, "policy_review_findings", "policy_findings", "policy_review")
     missed_observations = _combined_list_values(parsed, "missed_review_findings", "missed_findings", "findings_to_add")
-    policy_findings, policy_rows = _observations_to_outputs(policy_observations, "AI policy judgement")
-    missed_findings, missed_rows = _observations_to_outputs(missed_observations, "AI full review")
+    policy_findings, policy_rows = _observations_to_outputs(policy_observations, "AI policy judgement", document)
+    missed_findings, missed_rows = _observations_to_outputs(missed_observations, "AI full review", document)
     final_findings = findings_after_adjudication + policy_findings + missed_findings
     review_comment_rows = _review_comment_rows_from_parsed(parsed, policy_rows + missed_rows)
     summary_fields = _summary_fields_from_parsed(
@@ -721,7 +722,7 @@ def _combined_adjudications_from_parsed(parsed: dict[str, Any]) -> list[dict[str
     return rows
 
 
-def _observations_to_outputs(observations: list[dict[str, Any]], category: str) -> tuple[list[Finding], list[dict[str, str]]]:
+def _observations_to_outputs(observations: list[dict[str, Any]], category: str, document: PdfDocument) -> tuple[list[Finding], list[dict[str, str]]]:
     findings: list[Finding] = []
     rows: list[dict[str, str]] = []
     for observation in observations[:30]:
@@ -735,35 +736,160 @@ def _observations_to_outputs(observations: list[dict[str, Any]], category: str) 
         note_reference = str(observation.get("note_reference", "") or "").strip()
         issue = str(observation.get("issue", "") or title).strip()
         evidence = str(observation.get("evidence_snippet", "") or observation.get("rationale", "") or title).strip()
+        rationale = str(observation.get("rationale", "") or "")
         recommendation = str(observation.get("recommendation", "") or "Review the referenced source page/note and confirm the AI observation.").strip()
+        supported = _ai_observation_supported_by_cited_source(document, title, issue, evidence, rationale, page_reference, note_reference)
+        row_status = status or "review_prompt"
+        row_recommendation = recommendation
+        if not supported:
+            row_status = "not_elevated"
+            confidence = "Low"
+            severity = "Low"
+            row_recommendation = "Do not elevate until the cited page/note evidence is confirmed; review in AI/debug sheets only."
         metadata = {
             "check_type": category,
-            "ai_review_status": "confirmed_exception" if status == "exception" else "review_prompt",
+            "ai_review_status": "confirmed_exception" if status == "exception" and supported else ("review_prompt" if supported else "insufficient_evidence"),
             "ai_review_confidence": confidence,
-            "ai_review_reason": str(observation.get("rationale", "") or ""),
+            "ai_review_reason": rationale,
             "match_confidence": confidence,
             "page_reference": page_reference,
             "note_reference": note_reference,
             "line_item": title,
         }
-        findings.append(Finding(category, severity, page_reference or note_reference or "Document-wide", issue, evidence, recommendation, metadata))
+        if supported:
+            findings.append(Finding(category, severity, page_reference or note_reference or "Document-wide", issue, evidence, recommendation, metadata))
         rows.append(
             {
                 "Title": title,
-                "Status": status or "review_prompt",
+                "Status": row_status,
                 "Severity": severity,
                 "Confidence": confidence,
                 "Page reference": page_reference,
                 "Note reference": note_reference,
                 "Issue": issue,
                 "Evidence": evidence,
-                "Recommendation": recommendation,
-                "Rationale": str(observation.get("rationale", "") or ""),
+                "Recommendation": row_recommendation,
+                "Rationale": rationale if supported else (rationale + " | Not elevated: cited page/note evidence did not corroborate the AI amount/reconciliation claim.").strip(" |"),
             }
         )
     return findings, rows
 
 
+
+
+
+
+def _ai_observation_supported_by_cited_source(
+    document: PdfDocument,
+    title: str,
+    issue: str,
+    evidence: str,
+    rationale: str,
+    page_reference: str,
+    note_reference: str,
+) -> bool:
+    combined = " ".join(str(part or "") for part in (title, issue, evidence, rationale))
+    if not _ai_observation_requires_source_gate(combined):
+        return True
+    source_text = _ai_cited_source_text(document, page_reference, note_reference)
+    if not source_text.strip():
+        return False
+    normalized_source = _normalise_ai_amount_text(source_text)
+    amount_tokens = _ai_amount_tokens(combined)
+    if amount_tokens:
+        matched = [token for token in amount_tokens if _normalise_ai_amount_text(token) in normalized_source]
+        return bool(matched)
+    keywords = _ai_evidence_keywords(combined)
+    if not keywords:
+        return False
+    normalized_words = _normalise_match_words(source_text)
+    return sum(1 for keyword in keywords if keyword in normalized_words) >= min(2, len(keywords))
+
+
+def _ai_observation_requires_source_gate(text: str) -> bool:
+    lower = text.lower()
+    if _ai_amount_tokens(text):
+        return True
+    return any(
+        term in lower
+        for term in (
+            "amount",
+            "calculation",
+            "does not agree",
+            "do not agree",
+            "reconcile",
+            "reconciliation",
+            "reported",
+            "expected",
+            "difference",
+            "tax expense",
+            "current tax",
+            "deferred tax",
+            "cash flow",
+        )
+    )
+
+
+def _ai_cited_source_text(document: PdfDocument, page_reference: str, note_reference: str) -> str:
+    page_numbers = [int(number) for number in re.findall(r"\d+", str(page_reference or ""))]
+    parts: list[str] = []
+    for page_number in page_numbers[:6]:
+        page = next((item for item in document.pages if item.number == page_number), None)
+        if page and page.text:
+            parts.append(page.text)
+    note_refs = [ref.upper() for ref in re.findall(r"\b\d+[A-Z]?\b", str(note_reference or ""))]
+    if note_refs:
+        headings = _local_note_heading_pages(document)
+        for ref in note_refs[:4]:
+            page_number = headings.get(ref)
+            page = next((item for item in document.pages if item.number == page_number), None) if page_number else None
+            if page and page.text:
+                parts.append(page.text)
+    return "\n".join(parts)
+
+
+def _local_note_heading_pages(document: PdfDocument) -> dict[str, int]:
+    pages: dict[str, int] = {}
+    pattern = re.compile(r"(?im)^\s*(?:note\s+)?(\d{1,2}[A-Z]?)\s*(?:[.)]|:)?\s+[A-Z][A-Za-z][^\n]{2,100}$")
+    for page in document.pages:
+        for match in pattern.finditer(page.text or ""):
+            pages.setdefault(match.group(1).upper(), page.number)
+    return pages
+
+
+def _ai_amount_tokens(text: str) -> list[str]:
+    tokens = re.findall(r"\(?-?\d{1,3}(?:[, .]\d{3})+(?:\.\d+)?\)?|\(?-?\d{4,}(?:\.\d+)?\)?", text)
+    cleaned: list[str] = []
+    for token in tokens:
+        digits = re.sub(r"\D", "", token)
+        if len(digits) >= 4 and digits not in cleaned:
+            cleaned.append(token)
+    return cleaned[:12]
+
+
+def _normalise_ai_amount_text(text: str) -> str:
+    return re.sub(r"\D", "", str(text or ""))
+
+
+def _normalise_match_words(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def _ai_evidence_keywords(text: str) -> list[str]:
+    normalized = _normalise_match_words(text)
+    candidate_terms = (
+        "tax expense",
+        "current tax",
+        "deferred tax",
+        "taxation",
+        "cash flow",
+        "cash equivalents",
+        "bank overdraft",
+        "profit before taxation",
+        "profit after taxation",
+        "reconciliation",
+    )
+    return [term for term in candidate_terms if term in normalized]
 
 
 def _summary_fields_from_parsed(

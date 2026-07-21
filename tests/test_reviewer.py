@@ -742,6 +742,7 @@ def test_combined_ai_replaces_unsupported_broad_summary_with_neutral_section_tex
     result = ai_combined_review._parsed_to_result(
         parsed,
         [],
+        PdfDocument([PdfPage(1, "No AI exception source evidence.", [])]),
         "gpt-5-mini",
         "quick",
         {"Evidence type": "test"},
@@ -7343,3 +7344,124 @@ def test_excel_sheet_order_places_ai_finding_review_after_findings_summary():
     sheetnames = workbook.sheetnames
 
     assert sheetnames[sheetnames.index("Findings summary") + 1] == "AI finding review"
+
+
+
+def test_notes_start_detects_consolidated_and_separate_financial_statement_notes_heading():
+    document = PdfDocument(
+        [
+            PdfPage(18, "Consolidated and Separate Statements of Profit or Loss\nNotes 2025 2024", []),
+            PdfPage(19, "Consolidated and Separate Statements of Financial Position\nAssets", []),
+            PdfPage(20, "Consolidated and Separate Statements of Changes in Equity", []),
+            PdfPage(
+                24,
+                "Creditville Nigeria Limited\n"
+                "Notes to the Consolidated and Separate Financial Statements\n"
+                "1 Reporting entity\n"
+                "2 Basis of preparation\n"
+                "2.1 Statement of compliance\n",
+                [],
+            ),
+        ]
+    )
+
+    assert reviewer._notes_start_page(document) == 24
+
+
+def test_ai_amount_observation_is_not_elevated_when_cited_page_does_not_support_amounts():
+    document = PdfDocument(
+        [
+            PdfPage(15, "Independent Auditor's Report\nOpinion\nBasis for opinion\nNo tax note appears on this page.", []),
+            PdfPage(42, "15 Taxation\nCurrent tax 31,258\nDeferred tax charge (2,783,513)\nTaxation (2,752,255)", []),
+        ]
+    )
+    observations = [
+        {
+            "title": "Accounting policies on tax",
+            "status": "exception",
+            "severity": "High",
+            "confidence": "High",
+            "page_reference": "Page 15",
+            "note_reference": "Note summary",
+            "issue": "Tax expense calculation lacks transparency and does not align with reported figures.",
+            "evidence_snippet": "Current tax 25,883; deferred tax 30,265; total tax -80,470.",
+            "recommendation": "Reconcile figures in the tax note with the financial statements.",
+            "rationale": "Tax note fails to properly reconcile with calculations shown in profit/loss.",
+        }
+    ]
+
+    findings, rows = ai_combined_review._observations_to_outputs(observations, "AI policy judgement", document)
+
+    assert findings == []
+    assert rows[0]["Status"] == "not_elevated"
+    assert rows[0]["Severity"] == "Low"
+    assert "Not elevated" in rows[0]["Rationale"]
+
+
+def test_cash_flow_closing_cash_is_not_netted_against_overdraft_by_default():
+    import canonical_checks
+    from canonical_models import StatementFact
+
+    facts = [
+        StatementFact("Statement of cash flows", "Group", 2025, "Cash and cash equivalents at end", "cash and cash equivalents", Decimal("1759784"), 23, "Cash and cash equivalents at end 1,759,784"),
+        StatementFact("Statement of cash flows", "Group", 2025, "Net movement in cash", "net movement in cash", Decimal("1691581"), 23, "Net movement in cash and cash equivalents 1,691,581"),
+        StatementFact("Statement of cash flows", "Group", 2025, "Cash at beginning", "cash at beginning", Decimal("68203"), 23, "Cash and cash equivalents at beginning 68,203"),
+        StatementFact("Statement of financial position", "Group", 2025, "Cash and cash equivalent", "cash and cash equivalents", Decimal("1759784"), 19, "Cash and cash equivalent 16 1,759,784"),
+        StatementFact("Statement of financial position", "Group", 2025, "Bank overdraft", "bank overdraft", Decimal("2955300"), 19, "Bank overdraft 16 2,955,300"),
+    ]
+
+    results = canonical_checks.check_cash_flow(facts)
+
+    assert not [result for result in results if result.check_name == "Cash flow overdraft presentation consistency"]
+    assert any(result.check_name == "Cash flow closing cash agrees to SFP cash" and result.status == "Pass" for result in results)
+
+
+def test_note_headings_detect_collapsed_number_title_lines_inside_notes_section():
+    document = PdfDocument(
+        [
+            PdfPage(20, "Statement of Financial Position\nNotes 2025 2024", []),
+            PdfPage(
+                24,
+                "Notes to the Financial Statements\n"
+                "16Cash and cash equivalent\n"
+                "Balances with local banks 1,759,784 168,203\n"
+                "33Statutory reserve*\n"
+                "Balance as at 1 January 75,140 75,140\n",
+                [],
+            ),
+        ]
+    )
+
+    headings = reviewer._note_headings_by_page(document)
+    sections = reviewer._note_sections(document)
+
+    assert headings["16"] == ("Cash and cash equivalent", 24)
+    assert headings["33"] == ("Statutory reserve*", 24)
+    assert "16" in sections
+    assert "33" in sections
+
+
+def test_supplementary_summary_skips_duplicate_year_group_company_primary_columns():
+    document = PdfDocument(
+        [
+            PdfPage(
+                1,
+                "Consolidated and Separate Statements of Financial Position\n"
+                "Notes 2025 2024 2025 2024\n"
+                "Total assets 33,264,220 15,380,685 28,059,917 9,870\n",
+                [],
+            ),
+            PdfPage(
+                2,
+                "Five-Year Financial Summary - Company\n"
+                "2025 2024 2023 2022 2021\n"
+                "Total assets 28,059,917 9,870 8,000 7,000 6,000\n",
+                [],
+            ),
+        ]
+    )
+
+    findings, performed = reviewer._check_supplementary_summary_consistency(document, Decimal("1"))
+
+    assert findings == []
+    assert performed == []
