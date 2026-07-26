@@ -15,6 +15,12 @@ AMOUNT_TOKEN_RE = re.compile(
     r"|(?:(?<=\s)|^)[-–—](?=\s|$)"
 )
 UNREADABLE_RE = re.compile(r"(#{3,}|\uFFFD|\u25A1)")
+_CALENDAR_DAY_RE = re.compile(r"\d{1,2}")
+_MONTH_AFTER_RE = re.compile(
+    r"\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?"
+    r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -118,12 +124,18 @@ def extract_amount_cells(
     context: str = "",
 ) -> list[AmountCell]:
     """Extract typed numeric cells from a row of financial-statement text."""
+    text = str(text or "")
     cells: list[AmountCell] = []
-    for match in AMOUNT_TOKEN_RE.finditer(str(text or "")):
+    for match in AMOUNT_TOKEN_RE.finditer(text):
         token = match.group(0)
         before = text[match.start() - 1] if match.start() > 0 else " "
         after = text[match.end()] if match.end() < len(text) else " "
         if token not in {"-", "–", "—"} and (before.isalpha() or after.isalpha()):
+            continue
+        # A bare one/two-digit token immediately followed by a month name is a
+        # calendar day in a date caption ("As at 31 December 2025", "Balance at
+        # 1 January 2025"), never a monetary amount.
+        if _CALENDAR_DAY_RE.fullmatch(token) and _MONTH_AFTER_RE.match(text[match.end():]):
             continue
         cell = parse_amount_cell(
             token,

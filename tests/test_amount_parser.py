@@ -45,3 +45,16 @@ def test_explicit_scale_suffix_still_stripped():
     # The legitimate "in 000s" / "N'000" units suffix must still be removed.
     assert parse_amount_cell("5000s").value == Decimal("5")
     assert parse_amount_cell("5N'000").value == Decimal("5")
+
+
+def test_calendar_day_in_date_caption_is_not_an_amount():
+    # The day number in a statement date caption must not become a phantom amount.
+    assert extract_amount_cells("As at 31 December 2025") == []
+    # A real balance row keeps its amounts but drops the calendar day.
+    assert [c.value for c in extract_amount_cells("Balance at 1 January 2025 5,000")] == [Decimal("5000")]
+    assert [c.value for c in extract_amount_cells("Balance at 31 December 2025 6,100 5,300")] == [
+        Decimal("6100"),
+        Decimal("5300"),
+    ]
+    # A grouped value that merely starts with a day-like number is still an amount.
+    assert [c.value for c in extract_amount_cells("Profit 31,000 28,000")] == [Decimal("31000"), Decimal("28000")]
