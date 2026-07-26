@@ -467,7 +467,12 @@ def _line_matches_statement_heading(line: str, aliases: tuple[str, ...]) -> bool
 def detect_statement_columns(text: str, statement: str = "") -> list[StatementColumn]:
     header_lines = [line for line in text.splitlines()[:30] if len(YEAR_RE.findall(line)) >= 2]
     if "changes in equity" in statement.lower() and not header_lines:
-        return []
+        # Single-year statement of changes in equity: no comparative-year header
+        # row (only "for the year ended 31 December 20XX"). Map each movement row
+        # to that single reporting year using the rightmost (total-equity) amount
+        # so the roll-forward check can still run. Multi-year statements have a
+        # "20XX 20XX" header line and take the general path below.
+        return _single_year_columns(text)
     context_header = " ".join(text.splitlines()[:18])
     header = " ".join(header_lines or text.splitlines()[:18])
     header_context = f"{context_header} {header}"
@@ -492,6 +497,15 @@ def detect_statement_columns(text: str, statement: str = "") -> list[StatementCo
         years = all_years[:2]
         entities = [_default_entity(text)] * len(years)
     return [StatementColumn(index + 1, entities[index], year, raw_header=header[:220]) for index, year in enumerate(years)]
+
+
+def _single_year_columns(text: str) -> list[StatementColumn]:
+    """Single reporting-year column for a statement with no comparative header."""
+    years = [int(value) for value in YEAR_RE.findall(text)]
+    if not years:
+        return []
+    header = " ".join(text.splitlines()[:18])
+    return [StatementColumn(1, _default_entity(text), max(years), raw_header=header[:220])]
 
 
 def _facts_from_page(page: PdfPage, statement: str, columns: list[StatementColumn]) -> list[StatementFact]:

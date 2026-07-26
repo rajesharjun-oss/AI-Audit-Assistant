@@ -42,6 +42,57 @@ Balance at 31 December 130 100
     assert not [finding for finding in findings if finding.category == "Equity movement"]
 
 
+def test_single_year_changes_in_equity_casts():
+    # A single-column SoCE (no comparative-year header) must still roll forward.
+    equity_text = """Example Limited
+Statement of changes in equity
+For the year ended 31 December 2025
+2025
+N'000
+Balance at 1 January 2025 5,000
+Profit for the year 2,100
+Dividends paid (1,000)
+Balance at 31 December 2025 6,100
+"""
+    doc = PdfDocument([PdfPage(1, equity_text, [])])
+    findings, checks, audit = run_canonical_checks(doc)
+    assert any(check.check_name == "Changes in equity closing balance cast" and check.status == "Pass" for check in checks)
+    assert not [finding for finding in findings if finding.category == "Equity movement"]
+
+
+def test_single_year_matrix_changes_in_equity_uses_total_column():
+    # A single-year matrix SoCE: the rightmost (total-equity) column drives the check.
+    equity_text = """Example Limited
+Statement of changes in equity
+For the year ended 31 December 2025
+Share capital Retained earnings Total equity
+N'000 N'000 N'000
+Balance at 1 January 2025 1,000 4,000 5,000
+Profit for the year - 2,100 2,100
+Dividends paid - (1,000) (1,000)
+Balance at 31 December 2025 1,000 5,100 6,100
+"""
+    doc = PdfDocument([PdfPage(1, equity_text, [])])
+    findings, checks, audit = run_canonical_checks(doc)
+    assert any(check.check_name == "Changes in equity closing balance cast" and check.status == "Pass" for check in checks)
+
+
+def test_single_year_changes_in_equity_flags_wrong_closing():
+    equity_text = """Example Limited
+Statement of changes in equity
+For the year ended 31 December 2025
+2025
+N'000
+Balance at 1 January 2025 5,000
+Profit for the year 2,100
+Dividends paid (1,000)
+Balance at 31 December 2025 6,500
+"""
+    doc = PdfDocument([PdfPage(1, equity_text, [])])
+    findings, checks, audit = run_canonical_checks(doc)
+    assert any(check.check_name == "Changes in equity closing balance cast" and check.status == "Fail" for check in checks)
+
+
 def test_note_reference_compatibility_flags_wrong_heading_generically():
     doc = PdfDocument([
         PdfPage(1, """Example Limited
