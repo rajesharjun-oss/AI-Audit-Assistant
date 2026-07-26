@@ -85,11 +85,12 @@ def parse_amount_cell(
     if not normalized:
         return AmountCell(token, None, "invalid", scale=scale_decimal, confidence="Low", reason="No numeric content remained after normalization.")
 
-    # A thousands-grouped value ("2,000") or a bracketed/negative value
-    # ("(2,000)") is unambiguously a monetary amount, never a reporting year, so
-    # it must not be discarded by the four-digit year guard.
-    grouped_or_signed = bool(re.search(r"\d[,.\s]\d{3}", candidate)) or negative
-    if reject_years and not grouped_or_signed and _looks_like_year(normalized, context):
+    # A thousands-grouped value ("2,000", "(2,050)") is unambiguously a monetary
+    # amount, never a reporting year, so it must not be discarded by the
+    # four-digit year guard. A bare signed four-digit token ("(2024)", "-2025")
+    # is NOT exempted: it is far more likely a comparative year than an amount.
+    grouped_amount = bool(re.search(r"\d[,.\s]\d{3}", candidate))
+    if reject_years and not grouped_amount and _looks_like_year(normalized, context):
         return AmountCell(token, None, "year", scale=scale_decimal, reason="Four-digit reporting year excluded from amount parsing.")
     if reject_page_refs and _looks_like_page_reference(normalized, context):
         return AmountCell(token, None, "page_ref", scale=scale_decimal, reason="Page reference excluded from amount parsing.")

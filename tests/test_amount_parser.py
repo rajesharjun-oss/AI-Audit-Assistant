@@ -37,8 +37,11 @@ def test_grouped_value_matching_a_year_is_still_an_amount():
     # "2,000" / "(2,000)" are amounts, not the reporting year 2000.
     assert parse_amount_cell("2,000").kind == "amount"
     assert parse_amount_cell("(2,050)").value == Decimal("-2050")
-    # A bare four-digit token with no grouping is still treated as a year.
+    # A bare four-digit token with no grouping is still treated as a year,
+    # including signed/bracketed forms of a bare year.
     assert parse_amount_cell("2025").kind == "year"
+    assert parse_amount_cell("(2024)").kind == "year"
+    assert parse_amount_cell("-2025").kind == "year"
 
 
 def test_explicit_scale_suffix_still_stripped():

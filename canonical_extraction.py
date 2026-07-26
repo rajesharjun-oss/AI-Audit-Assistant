@@ -470,9 +470,15 @@ def detect_statement_columns(text: str, statement: str = "") -> list[StatementCo
         # Single-year statement of changes in equity: no comparative-year header
         # row (only "for the year ended 31 December 20XX"). Map each movement row
         # to that single reporting year using the rightmost (total-equity) amount
-        # so the roll-forward check can still run. Multi-year statements have a
-        # "20XX 20XX" header line and take the general path below.
-        return _single_year_columns(text)
+        # so the roll-forward check can still run. Only do this when the header
+        # region genuinely shows one reporting year: comparative years split
+        # across separate header lines ("2025" and "2024" stacked) also leave
+        # header_lines empty but must not be collapsed to a single year, so those
+        # keep the original no-column result rather than a mislabelled fallback.
+        header_region_years = {int(value) for value in YEAR_RE.findall(" ".join(text.splitlines()[:30]))}
+        if len(header_region_years) <= 1:
+            return _single_year_columns(text)
+        return []
     context_header = " ".join(text.splitlines()[:18])
     header = " ".join(header_lines or text.splitlines()[:18])
     header_context = f"{context_header} {header}"
