@@ -15,6 +15,12 @@ AMOUNT_TOKEN_RE = re.compile(
     r"|(?:(?<=\s)|^)[-–—](?=\s|$)"
 )
 UNREADABLE_RE = re.compile(r"(#{3,}|\uFFFD|\u25A1)")
+_CALENDAR_DAY_RE = re.compile(r"\d{1,2}")
+_MONTH_AFTER_RE = re.compile(
+    r"\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?"
+    r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -79,7 +85,12 @@ def parse_amount_cell(
     if not normalized:
         return AmountCell(token, None, "invalid", scale=scale_decimal, confidence="Low", reason="No numeric content remained after normalization.")
 
-    if reject_years and _looks_like_year(normalized, context):
+    # A thousands-grouped value ("2,000", "(2,050)") is unambiguously a monetary
+    # amount, never a reporting year, so it must not be discarded by the
+    # four-digit year guard. A bare signed four-digit token ("(2024)", "-2025")
+    # is NOT exempted: it is far more likely a comparative year than an amount.
+    grouped_amount = bool(re.search(r"\d[,.\s]\d{3}", candidate))
+    if reject_years and not grouped_amount and _looks_like_year(normalized, context):
         return AmountCell(token, None, "year", scale=scale_decimal, reason="Four-digit reporting year excluded from amount parsing.")
     if reject_page_refs and _looks_like_page_reference(normalized, context):
         return AmountCell(token, None, "page_ref", scale=scale_decimal, reason="Page reference excluded from amount parsing.")
@@ -114,12 +125,18 @@ def extract_amount_cells(
     context: str = "",
 ) -> list[AmountCell]:
     """Extract typed numeric cells from a row of financial-statement text."""
+    text = str(text or "")
     cells: list[AmountCell] = []
-    for match in AMOUNT_TOKEN_RE.finditer(str(text or "")):
+    for match in AMOUNT_TOKEN_RE.finditer(text):
         token = match.group(0)
         before = text[match.start() - 1] if match.start() > 0 else " "
         after = text[match.end()] if match.end() < len(text) else " "
         if token not in {"-", "–", "—"} and (before.isalpha() or after.isalpha()):
+            continue
+        # A bare one/two-digit token immediately followed by a month name is a
+        # calendar day in a date caption ("As at 31 December 2025", "Balance at
+        # 1 January 2025"), never a monetary amount.
+        if _CALENDAR_DAY_RE.fullmatch(token) and _MONTH_AFTER_RE.match(text[match.end():]):
             continue
         cell = parse_amount_cell(
             token,
@@ -145,7 +162,12 @@ def _normalise_token(raw: object) -> str:
 def _strip_currency_and_units(token: str) -> str:
     value = token.strip()
     value = re.sub(r"^(?:NGN|N|₦|US\$|USD|GBP|EUR)\s*", "", value, flags=re.I)
-    value = re.sub(r"\s*(?:N'?000|₦'?000|NGN'?000|000s?)$", "", value, flags=re.I)
+    # Strip an explicit scale/units suffix such as "N'000" or a standalone
+    # "000s" token. The bare "000" form is deliberately NOT matched here: the
+    # trailing group of any grouped thousand (e.g. "5,000", "1,000,000") ends in
+    # "000", and stripping it would silently truncate real amounts to a fraction
+    # of their value. Require either a currency marker or the literal "s".
+    value = re.sub(r"\s*(?:N'?000|₦'?000|NGN'?000|000s)$", "", value, flags=re.I)
     return value.strip()
 
 

@@ -1,11 +1,30 @@
 from decimal import Decimal
 
-from canonical_extraction import document_section_map, extract_statement_facts, facts_for, note_heading_map, table_classification_rows
+from canonical_extraction import detect_statement_columns, document_section_map, extract_statement_facts, facts_for, note_heading_map, table_classification_rows
 from models import PdfDocument, PdfPage
 
 
 def _doc(text):
     return PdfDocument([PdfPage(1, text, [])])
+
+
+def test_stacked_comparative_years_not_collapsed_to_single_year_soce():
+    # Comparative years split across separate header lines leave header_lines
+    # empty, but the SoCE must not be treated as single-year (which would keep
+    # only the rightmost column and mislabel it with the max year).
+    text = """Statement of changes in equity
+For the year ended 31 December 2025
+2025
+2024
+Balance at 1 January 100 90
+Balance at 31 December 130 110
+"""
+    columns = detect_statement_columns(text, "Statement of changes in equity")
+    # Either two comparative columns are detected, or none are, but never a
+    # single fabricated column spanning both years.
+    assert len(columns) != 1
+    years = {column.year for column in columns}
+    assert not (len(columns) == 1 and years == {2025})
 
 
 def test_group_company_columns_and_note_reference_are_mapped():

@@ -4610,10 +4610,12 @@ def test_notes_heading_candidates_include_rejected_diagnostic_rows(monkeypatch):
 
 
 def test_excel_export_wires_notes_heading_candidates_sheet():
-    app_source = Path("app.py").read_text(encoding="utf-8")
+    # The live Excel export is built by report_exports.build_excel_export; assert
+    # the sheet is wired there rather than in app.py's UI wrapper.
+    export_source = Path("report_exports.py").read_text(encoding="utf-8")
 
-    assert 'sheet_name="Notes heading candidates"' in app_source
-    assert 'writer.book["Notes heading candidates"]' in app_source
+    assert 'sheet_name="Notes heading candidates"' in export_source
+    assert 'writer.book["Notes heading candidates"]' in export_source
 
 
 def test_ai_finding_review_normalizes_physical_pages_to_printed_pages():
