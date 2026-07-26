@@ -79,7 +79,11 @@ def parse_amount_cell(
     if not normalized:
         return AmountCell(token, None, "invalid", scale=scale_decimal, confidence="Low", reason="No numeric content remained after normalization.")
 
-    if reject_years and _looks_like_year(normalized, context):
+    # A thousands-grouped value ("2,000") or a bracketed/negative value
+    # ("(2,000)") is unambiguously a monetary amount, never a reporting year, so
+    # it must not be discarded by the four-digit year guard.
+    grouped_or_signed = bool(re.search(r"\d[,.\s]\d{3}", candidate)) or negative
+    if reject_years and not grouped_or_signed and _looks_like_year(normalized, context):
         return AmountCell(token, None, "year", scale=scale_decimal, reason="Four-digit reporting year excluded from amount parsing.")
     if reject_page_refs and _looks_like_page_reference(normalized, context):
         return AmountCell(token, None, "page_ref", scale=scale_decimal, reason="Page reference excluded from amount parsing.")
@@ -145,7 +149,12 @@ def _normalise_token(raw: object) -> str:
 def _strip_currency_and_units(token: str) -> str:
     value = token.strip()
     value = re.sub(r"^(?:NGN|N|₦|US\$|USD|GBP|EUR)\s*", "", value, flags=re.I)
-    value = re.sub(r"\s*(?:N'?000|₦'?000|NGN'?000|000s?)$", "", value, flags=re.I)
+    # Strip an explicit scale/units suffix such as "N'000" or a standalone
+    # "000s" token. The bare "000" form is deliberately NOT matched here: the
+    # trailing group of any grouped thousand (e.g. "5,000", "1,000,000") ends in
+    # "000", and stripping it would silently truncate real amounts to a fraction
+    # of their value. Require either a currency marker or the literal "s".
+    value = re.sub(r"\s*(?:N'?000|₦'?000|NGN'?000|000s)$", "", value, flags=re.I)
     return value.strip()
 
 
