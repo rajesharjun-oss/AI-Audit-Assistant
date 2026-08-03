@@ -80,6 +80,34 @@ def _sheet_text(workbook, sheet_name: str) -> str:
     return "\n".join(values)
 
 
+def _sheet_records(workbook, sheet_name: str) -> list[dict[str, object]]:
+    if sheet_name not in workbook.sheetnames:
+        return []
+    rows = list(workbook[sheet_name].iter_rows(values_only=True))
+    if not rows:
+        return []
+    headers = [str(value or "").strip() for value in rows[0]]
+    records: list[dict[str, object]] = []
+    for row in rows[1:]:
+        if not any(value is not None and str(value).strip() for value in row):
+            continue
+        records.append({headers[index]: value for index, value in enumerate(row) if index < len(headers) and headers[index]})
+    return records
+
+
+def _assert_exception_register_rows_are_traceable(workbook) -> None:
+    for row in _sheet_records(workbook, "Exception register"):
+        issue = str(row.get("Issue") or "").strip()
+        if not issue or "No automated findings" in issue:
+            continue
+        page_reference = str(row.get("Page reference") or "").strip()
+        evidence = str(row.get("Evidence") or "").strip()
+        recommendation = str(row.get("Recommendation") or "").strip()
+        assert page_reference, f"Exception register finding lacks page reference: {issue}"
+        assert evidence and evidence.lower() not in {"evidence", "n/a", "none", "not detected"}, f"Exception register finding lacks substantive evidence: {issue}"
+        assert recommendation, f"Exception register finding lacks recommendation: {issue}"
+
+
 @pytest.mark.parametrize("case_path", _case_files(), ids=lambda path: path.stem)
 def test_golden_regression_case(case_path: Path, tmp_path: Path):
     case = _load_case(case_path)
@@ -92,6 +120,7 @@ def test_golden_regression_case(case_path: Path, tmp_path: Path):
     assert output.stat().st_size > 0
 
     workbook = openpyxl.load_workbook(output, data_only=True)
+    _assert_exception_register_rows_are_traceable(workbook)
     summary = _summary_map(workbook)
     assertions = case.get("assertions", {}) or {}
 

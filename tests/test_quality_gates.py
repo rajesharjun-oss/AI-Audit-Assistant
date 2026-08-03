@@ -91,3 +91,30 @@ def test_key_amount_consistency_page_column_uses_reviewer_page_numbers():
 
     assert translated["Page"] == "3"
     assert translated["Context"] == "Page 3: Taxation 19,185 -"
+
+
+def test_page_required_finding_without_substantive_evidence_is_not_elevated():
+    document = PdfDocument([PdfPage(4, "Statement of profit or loss\nRevenue 100\nTotal revenue 100", [])])
+    weak_finding = Finding(
+        category="Formatting",
+        severity="Medium",
+        location="Page 4 | Statement of profit or loss",
+        issue="Possible formatting inconsistency needs review.",
+        evidence="Evidence",
+        recommendation="Inspect the source page before treating this as an exception.",
+    )
+
+    result = reviewer._build_result(document, [weak_finding], ["Synthetic formatting check"], [])
+
+    assert result.findings == []
+    assert result.metrics["findings"] == 0
+    assert result.metrics["review_prompts_not_elevated_count"] == 1
+    prompt = result.metrics["review_prompts_not_elevated"][0]
+    assert prompt["Page reference"] == "Page 4"
+    assert "substantive source evidence" in prompt["Reason not elevated"]
+
+    workbook = openpyxl.load_workbook(BytesIO(build_excel_export(result)), data_only=True)
+    exceptions = list(workbook["Exception register"].iter_rows(min_row=2, values_only=True))
+    assert any("No automated findings" in str(cell or "") for row in exceptions for cell in row)
+    prompts = list(workbook["Review prompts not elevated"].iter_rows(min_row=2, values_only=True))
+    assert any("Possible formatting inconsistency" in str(cell or "") for row in prompts for cell in row)

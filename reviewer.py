@@ -865,6 +865,8 @@ def _not_elevated_reason(finding: Finding, document: PdfDocument) -> str:
             return "AI full review did not identify a specific page or note reference."
     if finding.category in _PAGE_REQUIRED_FINDING_CATEGORIES and not _finding_has_page_evidence(finding):
         return "Finding did not include a specific page reference, so it is retained as a review prompt instead of an exception."
+    if finding.category in _EVIDENCE_REQUIRED_FINDING_CATEGORIES and not _finding_has_substantive_evidence(finding):
+        return "Finding did not include substantive source evidence, so it is retained as a review prompt instead of an exception."
     if document.ocr_used and str(metadata.get("ocr_review", "") or "").lower() in {"true", "1", "yes"}:
         if confidence == "low":
             return "OCR-derived item has low parse/match confidence."
@@ -881,6 +883,27 @@ _PAGE_REQUIRED_FINDING_CATEGORIES = {
     "AI full review",
 }
 
+_EVIDENCE_REQUIRED_FINDING_CATEGORIES = _PAGE_REQUIRED_FINDING_CATEGORIES | {
+    "Accounting policies",
+    "Standards checklist",
+    "Presentation",
+}
+
+_WEAK_EVIDENCE_PLACEHOLDERS = {
+    "",
+    "evidence",
+    "evidence.",
+    "n/a",
+    "na",
+    "none",
+    "not available",
+    "no evidence",
+    "no evidence.",
+    "not detected",
+    "not found",
+    "document-wide",
+}
+
 
 def _finding_has_page_evidence(finding: Finding) -> bool:
     metadata = finding.metadata or {}
@@ -894,6 +917,32 @@ def _finding_has_page_evidence(finding: Finding) -> bool:
     if str(finding.location or "").strip().lower() == "document-wide" and finding.category not in _PAGE_REQUIRED_FINDING_CATEGORIES:
         return True
     return False
+
+
+def _finding_has_substantive_evidence(finding: Finding) -> bool:
+    metadata = finding.metadata or {}
+    for key in (
+        "evidence_snippet",
+        "source_snippet",
+        "matched_text_snippet",
+        "matched_text",
+        "raw_line",
+        "source_line",
+        "reported_amount",
+        "expected_amount",
+        "difference",
+    ):
+        value = str(metadata.get(key, "") or "").strip()
+        if value and value.lower() not in _WEAK_EVIDENCE_PLACEHOLDERS:
+            return True
+    evidence = re.sub(r"\s+", " ", str(finding.evidence or "")).strip()
+    if evidence.lower() in _WEAK_EVIDENCE_PLACEHOLDERS:
+        return False
+    if re.search(r"\b(Page|Note)\s+\d+[A-Z]?\b", evidence, flags=re.I):
+        return True
+    if re.search(r"\d{1,3}(?:,\d{3})+|\d+\s*[+\-=]\s*\d+|difference\s+\(?-?\d", evidence, flags=re.I):
+        return True
+    return len(evidence.split()) >= 4
 
 
 def _finding_has_note_evidence(finding: Finding) -> bool:

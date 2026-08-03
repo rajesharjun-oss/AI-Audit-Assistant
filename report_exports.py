@@ -268,7 +268,20 @@ def checks_skipped_rows(result) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for item in metric_lines(result.metrics.get("checks_skipped"), "No major checks skipped."):
         row = parse_skipped_check(item)
-        rows.append(translate_row_page_fields(row, result, ("Page reference", "Original message", "Reason skipped")))
+        rows.append(
+            translate_row_page_fields(
+                row,
+                result,
+                (
+                    "Page reference",
+                    "Affected statement/note",
+                    "Reason skipped",
+                    "Reviewer action",
+                    "Automation requirement",
+                    "Original message",
+                ),
+            )
+        )
     return rows
 
 
@@ -648,6 +661,70 @@ def translate_bare_page_value(value: object, result) -> str:
     return "".join(translated).strip()
 
 
+def skipped_check_affected_area(item: str, check_area: str) -> str:
+    lower = str(item or "").lower()
+    note_match = re.search(r"\bNote\s+(\d+[A-Z]?)\b", item, flags=re.I)
+    if note_match:
+        return f"Note {note_match.group(1).upper()}"
+    statement_aliases = (
+        ("statement of cash flows", "Statement of cash flows"),
+        ("cash flow", "Statement of cash flows"),
+        ("statement of financial position", "Statement of financial position"),
+        ("financial position", "Statement of financial position"),
+        ("profit or loss", "Statement of profit or loss"),
+        ("income statement", "Statement of profit or loss"),
+        ("income and expenditure", "Statement of income and expenditure"),
+        ("changes in equity", "Statement of changes in equity"),
+        ("accumulated fund", "Statement of changes in accumulated fund"),
+    )
+    for marker, label in statement_aliases:
+        if marker in lower:
+            return label
+    if "income-to-equity" in lower or "income or equity" in lower:
+        return "Profit or loss and equity movement"
+    if "generic table arithmetic" in lower:
+        return "Skipped table details"
+    if "note" in lower or "table extraction confidence" in lower:
+        return "Notes to the financial statements"
+    if "limited-scope" in lower or "full afs" in lower:
+        return "Upload scope / full financial statements"
+    if "pdf extraction" in lower or "extraction" in lower:
+        return "Extraction quality"
+    return check_area
+
+
+def skipped_check_manual_priority(item: str, can_fix: str) -> str:
+    lower = str(item or "").lower()
+    if any(marker in lower for marker in ("cash flow", "financial position", "profit or loss", "income-to-equity", "changes in equity")):
+        return "High"
+    if any(marker in lower for marker in ("note", "table extraction", "generic table arithmetic", "not confidently parsed")):
+        return "Medium"
+    if str(can_fix or "").lower().startswith("not applicable"):
+        return "Low"
+    return "Medium"
+
+
+def skipped_check_automation_requirement(item: str, can_fix: str) -> str:
+    lower = str(item or "").lower()
+    if "limited-scope" in lower or "complete afs" in lower or "full afs" in lower:
+        return "Upload the complete financial statements, including all primary statements and notes."
+    if "notes section start was not detected" in lower:
+        return "Reliable notes-section heading detection from extracted text or OCR."
+    if "table extraction confidence is below threshold" in lower:
+        return "Relevant note tables must reach the detailed-agreement confidence threshold."
+    if "generic table arithmetic" in lower:
+        return "Confident table classification and numeric row/column structure; supplementary tables remain intentionally excluded."
+    if "income-to-equity" in lower or "income or equity" in lower:
+        return "Confident extraction of both the income result and the equity/accumulated-fund movement row."
+    if any(marker in lower for marker in ("cash flow", "financial position", "profit or loss", "changes in equity", "not confidently parsed")):
+        return "Reliable line/table extraction from the affected primary statement page."
+    if "pdf extraction is unreliable" in lower or "extraction" in lower:
+        return "Readable text/OCR coverage and stable statement row extraction."
+    if str(can_fix or "").lower().startswith("not applicable"):
+        return "No automation change planned; this skip is intentional for the table type."
+    return "Improve extraction confidence or provide clearer table/statement structure."
+
+
 def parse_skipped_check(item: str) -> dict[str, str]:
     check_area = item
     page_reference = ""
@@ -692,11 +769,18 @@ def parse_skipped_check(item: str) -> dict[str, str]:
         check_area = "Primary statement checks"
         reason = "PDF extraction is unreliable."
         reviewer_action = "Review extraction confidence, OCR statement rows, and source pages before relying on automated checks."
+    affected_area = skipped_check_affected_area(item, check_area)
+    manual_priority = skipped_check_manual_priority(item, can_fix)
+    automation_requirement = skipped_check_automation_requirement(item, can_fix)
     return {
         "Check area": check_area,
+        "Affected statement/note": affected_area,
         "Page reference": page_reference,
         "Reason skipped": reason,
+        "Requires manual review?": "Optional" if str(can_fix).lower().startswith("not applicable") else "Yes",
+        "Manual review priority": manual_priority,
         "Can automated check be fixed?": can_fix,
+        "Automation requirement": automation_requirement,
         "Reviewer action": reviewer_action,
         "Original message": item,
     }

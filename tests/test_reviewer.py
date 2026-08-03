@@ -995,7 +995,7 @@ def test_retry_ai_review_uses_cached_deterministic_result_without_rerunning_chec
         severity="Low",
         location="Page 1",
         issue="Weak deterministic issue.",
-        evidence="Evidence.",
+        evidence="Page 1: Statement line formatting requires reviewer confirmation.",
         recommendation="Review.",
     )
     cached_result = reviewer.ReviewResult(
@@ -7467,3 +7467,37 @@ def test_supplementary_summary_skips_duplicate_year_group_company_primary_column
 
     assert findings == []
     assert performed == []
+
+
+def test_checks_skipped_export_includes_reviewer_traceability_fields():
+    document = PdfDocument([
+        PdfPage(9, "Statement of cash flows\nCash generated from operations 100 90", []),
+    ])
+    result = reviewer._build_result(
+        document,
+        [],
+        checks_skipped=["Statement of cash flows: Page 9 skipped because table structure was not confidently parsed."],
+    )
+
+    workbook = openpyxl.load_workbook(BytesIO(build_excel_export(result)), data_only=True)
+    rows = list(workbook["Checks skipped"].iter_rows(values_only=True))
+    headers = [str(value or "") for value in rows[0]]
+    record = dict(zip(headers, rows[1]))
+
+    assert record["Check area"] == "Statement of cash flows"
+    assert record["Affected statement/note"] == "Statement of cash flows"
+    assert record["Page reference"] == "Page 9"
+    assert record["Requires manual review?"] == "Yes"
+    assert record["Manual review priority"] == "High"
+    assert "Reliable line/table extraction" in record["Automation requirement"]
+
+
+def test_parse_generic_table_skip_points_to_skipped_table_details():
+    row = parse_skipped_check(
+        "Generic table arithmetic skipped because low-confidence, note, supplementary, or non-standard tables are listed separately."
+    )
+
+    assert row["Check area"] == "Generic table arithmetic"
+    assert row["Affected statement/note"] == "Skipped table details"
+    assert row["Manual review priority"] == "Medium"
+    assert "table classification" in row["Automation requirement"].lower()
