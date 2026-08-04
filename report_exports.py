@@ -806,18 +806,43 @@ def finding_confidence(finding, result) -> str:
 
 def page_reference(location: str, evidence: str = "", result=None) -> str:
     text = f"{location}\n{evidence}"
-    pages = set()
-    for match in re.finditer(r"\bpages?\s*:?\s+([0-9,\sand]+)", text, flags=re.I):
-        for number in re.findall(r"\d+", match.group(1)):
-            page_number = int(number)
-            pages.add(reviewer_page_number(result, page_number) if result is not None else page_number)
+    pages: set[int] = set()
+    for match in re.finditer(r"\bpages?\s*:?\s+([0-9,\sand\-]+)", text, flags=re.I):
+        for token in re.findall(r"\d+(?:\s*-\s*\d+)?", match.group(1)):
+            _add_page_reference_token(pages, token, result)
     for match in re.findall(r"\bPage\s+(\d+)\b", text, flags=re.I):
-        page_number = int(match)
-        pages.add(reviewer_page_number(result, page_number) if result is not None else page_number)
-    pages = sorted(pages)
+        _add_page_reference_token(pages, match, result)
+    return _format_page_reference_set(pages)
+
+
+def _add_page_reference_token(pages: set[int], token: str, result=None) -> None:
+    numbers = [int(number) for number in re.findall(r"\d+", token)]
+    if not numbers:
+        return
+    if len(numbers) >= 2 and "-" in token:
+        start, end = numbers[0], numbers[1]
+        if start <= end and end - start <= 50:
+            for page_number in range(start, end + 1):
+                pages.add(reviewer_page_number(result, page_number) if result is not None else page_number)
+            return
+    page_number = numbers[0]
+    pages.add(reviewer_page_number(result, page_number) if result is not None else page_number)
+
+
+def _format_page_reference_set(pages: set[int]) -> str:
     if not pages:
         return ""
-    return f"Page {pages[0]}" if len(pages) == 1 else "Pages " + ", ".join(str(page) for page in pages)
+    ordered = sorted(pages)
+    ranges: list[str] = []
+    start = previous = ordered[0]
+    for page in ordered[1:]:
+        if page == previous + 1:
+            previous = page
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = page
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return f"Page {ranges[0]}" if len(ordered) == 1 else "Pages " + ", ".join(ranges)
 
 
 def page_reference_for_finding(finding, result) -> str:

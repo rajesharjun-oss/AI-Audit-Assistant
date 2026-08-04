@@ -2368,6 +2368,44 @@ def _filtered_note_agreement_rows(document: PdfDocument, findings: list[Finding]
     return filtered
 
 
+
+def _merged_value_cell_review_page_reference(document: PdfDocument) -> str:
+    pages: set[int] = set()
+    for page in document.pages:
+        page_has_merged_values = False
+        for table in page.tables:
+            for row in table:
+                for cell in row[1:]:
+                    if len(NUMBER_RE.findall(str(cell or ""))) > 1:
+                        page_has_merged_values = True
+                        break
+                if page_has_merged_values:
+                    break
+            if page_has_merged_values:
+                break
+        if page_has_merged_values:
+            pages.add(_reviewer_page_number(document, page.number))
+    return _format_page_set(pages) if pages else ""
+
+def _skipped_table_review_page_reference(document: PdfDocument, *, keyword: str = "") -> str:
+    rows = _skipped_table_detail_rows(document)
+    pages: set[int] = set()
+    keyword_lower = keyword.lower().strip()
+    for row in rows:
+        combined = " ".join(str(row.get(field, "")) for field in ("Classification", "Reason skipped", "Result")).lower()
+        if keyword_lower and keyword_lower not in combined:
+            continue
+        page = str(row.get("Page", "")).strip()
+        if page.isdigit():
+            pages.add(int(page))
+    if not pages and keyword_lower:
+        for row in rows:
+            page = str(row.get("Page", "")).strip()
+            if page.isdigit():
+                pages.add(int(page))
+    return _format_page_set(pages) if pages else ""
+
+
 def _skipped_table_detail_rows(document: PdfDocument) -> list[dict[str, str]]:
     details = getattr(document, "skipped_table_details", []) or []
     rows: list[dict[str, str]] = []
@@ -2915,13 +2953,15 @@ def check_extraction_quality(document: PdfDocument) -> list[Finding]:
             )
         )
     if document.merged_value_cell_count:
+        merged_pages = _merged_value_cell_review_page_reference(document) or _skipped_table_review_page_reference(document, keyword="merged")
         findings.append(
             Finding(
                 "Extraction quality",
                 "Medium",
-                "Table extraction",
+                merged_pages or "Table extraction",
                 "Some extracted table cells appear to contain multiple merged values.",
-                f"Detected {document.merged_value_cell_count} table cell(s) containing more than one numeric value.",
+                f"Detected {document.merged_value_cell_count} table cell(s) containing more than one numeric value."
+                + (f" Affected review pages: {merged_pages}." if merged_pages else ""),
                 "Review the extracted table layout. Merged numeric cells can make column arithmetic and cross-footing checks unreliable.",
             )
         )

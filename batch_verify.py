@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import csv
@@ -25,7 +25,7 @@ def _safe_folder_name(path: Path) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in stem)
     cleaned = "_".join(part for part in cleaned.split("_") if part) or "financial_statement"
     digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:8]
-    return f"{cleaned[:36].rstrip('_')}_{digest}"
+    return f"{cleaned[:18].rstrip('_')}_{digest}"
 
 
 def _iter_pdfs(input_dir: Path, pattern: str, limit: int | None = None) -> list[Path]:

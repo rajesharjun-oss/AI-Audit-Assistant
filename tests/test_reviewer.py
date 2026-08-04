@@ -14,7 +14,7 @@ from ai_finding_review import run_ai_finding_review
 from ai_policy_review import _parse_response_json
 from cross_page_consistency import _names_look_like_spelling_variants, check_cross_page_consistency
 from extraction import _line_to_table_row, _reconstruct_ocr_tables, extract_pdf_with_ocr
-from report_exports import build_excel_export, parse_skipped_check
+from report_exports import build_excel_export, page_reference, parse_skipped_check
 from models import CompanyProfile, PdfDocument, PdfPage, ReviewOptions
 from reviewer import (
     _note_headings,
@@ -5933,6 +5933,27 @@ def test_extraction_quality_flags_merged_numeric_cells():
     assert any("merged values" in finding.issue.lower() for finding in findings)
 
 
+
+def test_extraction_quality_merged_cells_include_affected_pages():
+    document = PdfDocument(
+        [
+            PdfPage(1, "Cover\n" * 50, []),
+            PdfPage(2, "Statement\n" * 50, []),
+            PdfPage(3, "Notes\n" * 50, []),
+            PdfPage(
+                4,
+                "Revenue 100 90\n" * 120,
+                [[ ["Description", "2025", "2024"], ["Revenue", "100 90", ""], ["Total", "100", "90"] ]],
+            ),
+        ]
+    )
+    findings = check_extraction_quality(document)
+    merged = next(finding for finding in findings if "merged values" in finding.issue.lower())
+
+    assert merged.location == "Page 4"
+    assert "Affected review pages: Page 4" in merged.evidence
+
+
 def test_clean_text_document_has_high_extraction_confidence():
     document = PdfDocument(
         [
@@ -7491,6 +7512,10 @@ def test_checks_skipped_export_includes_reviewer_traceability_fields():
     assert record["Manual review priority"] == "High"
     assert "Reliable line/table extraction" in record["Automation requirement"]
 
+
+
+def test_page_reference_preserves_page_ranges():
+    assert page_reference("Pages 3, 11, 17-18", "Affected review pages: Pages 3, 11, 17-18.") == "Pages 3, 11, 17-18"
 
 def test_parse_generic_table_skip_points_to_skipped_table_details():
     row = parse_skipped_check(

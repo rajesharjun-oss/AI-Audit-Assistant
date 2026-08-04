@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from batch_verify import BatchGate, _safe_folder_name, run_batch
 from models import Finding, ReviewResult
@@ -31,7 +31,7 @@ def _fake_result(high=0, medium=0, low=0, issue=""):
 def test_batch_verify_uses_short_hashed_output_folder_names():
     name = _safe_folder_name(Path("Very Long Financial Statement Name With Many Words And Symbols 2025 Final Draft.pdf"))
 
-    assert len(name) <= 45
+    assert len(name) <= 27
     assert name.endswith(name[-8:])
 
 def test_batch_verify_writes_summary_and_passes_clean_file(monkeypatch, tmp_path: Path):
