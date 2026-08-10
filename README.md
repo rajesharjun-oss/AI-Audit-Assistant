@@ -66,6 +66,31 @@ OPENAI_MODEL_FALLBACK_LIMIT=2
 If you change providers later, keep the provider base URL in `OPENAI_BASE_URL`; for OpenAI direct usage it must be `https://api.openai.com/v1`, not a dashboard URL and not a router URL.
 
 The automatic Quick AI review is intentionally bounded by the timeout and fallback settings above so deterministic exports are not delayed for several minutes. Increase these values only for deliberate Deep/partner-style testing.
+## Cloud Run capacity setup
+
+If the deployed URL shows a plain `Rate exceeded.` page with HTTP 429, the request is being rejected by Google Frontend before Streamlit renders. Cloud Run commonly does this when there is no available instance because of cold start, long PDF processing, or a low maximum instance limit.
+
+After deploying a revision, apply the production capacity settings:
+
+```powershell
+.\deploy-cloudrun.ps1 -Service ai-audit-assistant -Region europe-west1
+```
+
+Equivalent `gcloud` command:
+
+```powershell
+gcloud run services update ai-audit-assistant `
+  --region europe-west1 `
+  --min-instances 1 `
+  --max-instances 10 `
+  --concurrency 10 `
+  --cpu 2 `
+  --memory 4Gi `
+  --timeout 3600 `
+  --cpu-boost
+```
+
+These settings keep one warm instance, allow the service to scale during long reviews, and avoid routing too many CPU-heavy PDF reviews to one Streamlit process. The app also waits for the reviewer to click `Run Review` after upload, so a browser refresh or settings change does not accidentally start another full extraction.
 
 ## Run from the command line
 

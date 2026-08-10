@@ -904,6 +904,16 @@ if ai_retry_available:
         type="primary",
         help="Reuse the cached extraction and deterministic review context, then rerun the AI review layer.",
     )
+run_review_requested = cached_result is not None
+if cached_result is None:
+    st.info("PDF uploaded. Click Run Review to start extraction and checks. This prevents accidental reruns when the page refreshes or settings change.")
+    run_review_requested = st.button(
+        "Run Review",
+        type="primary",
+        help="Start the deterministic review and the bounded automatic AI quick review when AI is enabled.",
+    )
+    if not run_review_requested:
+        st.stop()
 if cached_result is not None and not retry_ai_requested:
     result = cached_result
 else:
